@@ -3,7 +3,7 @@
  *
  * Error Recovery Procedures (ERP).
  *
- * Copyright IBM Corporation 2002, 2010
+ * Copyright IBM Corp. 2002, 2010
  */
 
 #define KMSG_COMPONENT "zfcp"
@@ -732,7 +732,7 @@ static int zfcp_erp_adapter_strategy_open_fsf(struct zfcp_erp_action *act)
 	if (zfcp_erp_adapter_strategy_open_fsf_xport(act) == ZFCP_ERP_FAILED)
 		return ZFCP_ERP_FAILED;
 
-	if (mempool_resize(act->adapter->pool.status_read_data,
+	if (mempool_resize(act->adapter->pool.sr_data,
 			   act->adapter->stat_read_buf_num, GFP_KERNEL))
 		return ZFCP_ERP_FAILED;
 
@@ -1230,9 +1230,11 @@ static void zfcp_erp_action_cleanup(struct zfcp_erp_action *act, int result)
 	case ZFCP_ERP_ACTION_REOPEN_ADAPTER:
 		if (result == ZFCP_ERP_SUCCEEDED) {
 			register_service_level(&adapter->service_level);
-			queue_work(adapter->work_queue, &adapter->scan_work);
+			zfcp_fc_conditional_port_scan(adapter);
+			queue_work(adapter->work_queue, &adapter->ns_up_work);
 		} else
 			unregister_service_level(&adapter->service_level);
+
 		kref_put(&adapter->ref, zfcp_adapter_release);
 		break;
 	}

@@ -58,6 +58,7 @@ struct htcpld_chip {
 	uint                    irq_start;
 	int                     nirqs;
 
+	unsigned int		flow_type;
 	/*
 	 * Work structure to allow for setting values outside of any
 	 * possible interrupt context
@@ -97,12 +98,7 @@ static void htcpld_unmask(struct irq_data *data)
 
 static int htcpld_set_type(struct irq_data *data, unsigned int flags)
 {
-	struct irq_desc *d = irq_to_desc(data->irq);
-
-	if (!d) {
-		pr_err("HTCPLD invalid IRQ: %d\n", data->irq);
-		return -EINVAL;
-	}
+	struct htcpld_chip *chip = irq_data_get_irq_chip_data(data);
 
 	if (flags & ~IRQ_TYPE_SENSE_MASK)
 		return -EINVAL;
@@ -111,9 +107,7 @@ static int htcpld_set_type(struct irq_data *data, unsigned int flags)
 	if (flags & (IRQ_TYPE_LEVEL_LOW|IRQ_TYPE_LEVEL_HIGH))
 		return -EINVAL;
 
-	d->status &= ~IRQ_TYPE_SENSE_MASK;
-	d->status |= flags;
-
+	chip->flow_type = flags;
 	return 0;
 }
 
@@ -135,7 +129,6 @@ static irqreturn_t htcpld_handler(int irq, void *dev)
 	unsigned int i;
 	unsigned long flags;
 	int irqpin;
-	struct irq_desc *desc;
 
 	if (!htcpld) {
 		pr_debug("htcpld is null in ISR\n");
@@ -195,23 +188,19 @@ static irqreturn_t htcpld_handler(int irq, void *dev)
 		 * associated interrupts.
 		 */
 		for (irqpin = 0; irqpin < chip->nirqs; irqpin++) {
-			unsigned oldb, newb;
-			int flags;
+			unsigned oldb, newb, type = chip->flow_type;
 
 			irq = chip->irq_start + irqpin;
-			desc = irq_to_desc(irq);
-			flags = desc->status;
 
 			/* Run the IRQ handler, but only if the bit value
 			 * changed, and the proper flags are set */
 			oldb = (old_val >> irqpin) & 1;
 			newb = (uval >> irqpin) & 1;
 
-			if ((!oldb && newb && (flags & IRQ_TYPE_EDGE_RISING)) ||
-			    (oldb && !newb &&
-			     (flags & IRQ_TYPE_EDGE_FALLING))) {
+			if ((!oldb && newb && (type & IRQ_TYPE_EDGE_RISING)) ||
+			    (oldb && !newb && (type & IRQ_TYPE_EDGE_FALLING))) {
 				pr_debug("fire IRQ %d\n", irqpin);
-				desc->handle_irq(irq, desc);
+				generic_handle_irq(irq);
 			}
 		}
 	}
@@ -338,7 +327,7 @@ static void htcpld_chip_reset(struct i2c_client *client)
 		client, (chip_data->cache_out = chip_data->reset));
 }
 
-static int __devinit htcpld_setup_chip_irq(
+static int htcpld_setup_chip_irq(
 		struct platform_device *pdev,
 		int chip_index)
 {
@@ -359,20 +348,20 @@ static int __devinit htcpld_setup_chip_irq(
 	/* Setup irq handlers */
 	irq_end = chip->irq_start + chip->nirqs;
 	for (irq = chip->irq_start; irq < irq_end; irq++) {
-		set_irq_chip(irq, &htcpld_muxed_chip);
-		set_irq_chip_data(irq, chip);
-		set_irq_handler(irq, handle_simple_irq);
+		irq_set_chip_and_handler(irq, &htcpld_muxed_chip,
+					 handle_simple_irq);
+		irq_set_chip_data(irq, chip);
 #ifdef CONFIG_ARM
 		set_irq_flags(irq, IRQF_VALID | IRQF_PROBE);
 #else
-		set_irq_probe(irq);
+		irq_set_probe(irq);
 #endif
 	}
 
 	return ret;
 }
 
-static int __devinit htcpld_register_chip_i2c(
+static int htcpld_register_chip_i2c(
 		struct platform_device *pdev,
 		int chip_index)
 {
@@ -430,7 +419,7 @@ static int __devinit htcpld_register_chip_i2c(
 	return 0;
 }
 
-static void __devinit htcpld_unregister_chip_i2c(
+static void htcpld_unregister_chip_i2c(
 		struct platform_device *pdev,
 		int chip_index)
 {
@@ -445,7 +434,7 @@ static void __devinit htcpld_unregister_chip_i2c(
 		i2c_unregister_device(chip->client);
 }
 
-static int __devinit htcpld_register_chip_gpio(
+static int htcpld_register_chip_gpio(
 		struct platform_device *pdev,
 		int chip_index)
 {
@@ -512,7 +501,7 @@ static int __devinit htcpld_register_chip_gpio(
 	return 0;
 }
 
-static int __devinit htcpld_setup_chips(struct platform_device *pdev)
+static int htcpld_setup_chips(struct platform_device *pdev)
 {
 	struct htcpld_data *htcpld;
 	struct device *dev = &pdev->dev;
@@ -574,7 +563,7 @@ static int __devinit htcpld_setup_chips(struct platform_device *pdev)
 	return 0;
 }
 
-static int __devinit htcpld_core_probe(struct platform_device *pdev)
+static int htcpld_core_probe(struct platform_device *pdev)
 {
 	struct htcpld_data *htcpld;
 	struct device *dev = &pdev->dev;

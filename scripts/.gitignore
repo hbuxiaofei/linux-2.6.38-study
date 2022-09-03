@@ -8,3 +8,6 @@ bin2c
 unifdef
 ihex2fw
 recordmcount
+docproc
+sortextable
+asn1_compiler

@@ -20,7 +20,6 @@
 #include <linux/cramfs_fs.h>
 #include <linux/slab.h>
 #include <linux/cramfs_fs_sb.h>
-#include <linux/buffer_head.h>
 #include <linux/vfs.h>
 #include <linux/mutex.h>
 
@@ -37,7 +36,7 @@ static DEFINE_MUTEX(read_mutex);
 /* These macros may change in future, to provide better st_ino semantics. */
 #define OFFSET(x)	((x)->i_ino)
 
-static unsigned long cramino(struct cramfs_inode *cino, unsigned int offset)
+static unsigned long cramino(const struct cramfs_inode *cino, unsigned int offset)
 {
 	if (!cino->offset)
 		return offset + 1;
@@ -61,7 +60,7 @@ static unsigned long cramino(struct cramfs_inode *cino, unsigned int offset)
 }
 
 static struct inode *get_cramfs_inode(struct super_block *sb,
-	struct cramfs_inode *cramfs_inode, unsigned int offset)
+	const struct cramfs_inode *cramfs_inode, unsigned int offset)
 {
 	struct inode *inode;
 	static struct timespec zerotime;
@@ -91,8 +90,8 @@ static struct inode *get_cramfs_inode(struct super_block *sb,
 	}
 
 	inode->i_mode = cramfs_inode->mode;
-	inode->i_uid = cramfs_inode->uid;
-	inode->i_gid = cramfs_inode->gid;
+	i_uid_write(inode, cramfs_inode->uid);
+	i_gid_write(inode, cramfs_inode->gid);
 
 	/* if the lower 2 bits are zero, the inode contains data */
 	if (!(inode->i_ino & 3)) {
@@ -258,10 +257,10 @@ static int cramfs_fill_super(struct super_block *sb, void *data, int silent)
 
 	/* Do sanity checks on the superblock */
 	if (super.magic != CRAMFS_MAGIC) {
-		/* check for wrong endianess */
+		/* check for wrong endianness */
 		if (super.magic == CRAMFS_MAGIC_WEND) {
 			if (!silent)
-				printk(KERN_ERR "cramfs: wrong endianess\n");
+				printk(KERN_ERR "cramfs: wrong endianness\n");
 			goto out;
 		}
 
@@ -271,7 +270,7 @@ static int cramfs_fill_super(struct super_block *sb, void *data, int silent)
 		mutex_unlock(&read_mutex);
 		if (super.magic != CRAMFS_MAGIC) {
 			if (super.magic == CRAMFS_MAGIC_WEND && !silent)
-				printk(KERN_ERR "cramfs: wrong endianess\n");
+				printk(KERN_ERR "cramfs: wrong endianness\n");
 			else if (!silent)
 				printk(KERN_ERR "cramfs: wrong magic\n");
 			goto out;
@@ -317,13 +316,11 @@ static int cramfs_fill_super(struct super_block *sb, void *data, int silent)
 	/* Set it all up.. */
 	sb->s_op = &cramfs_ops;
 	root = get_cramfs_inode(sb, &super.root, 0);
-	if (!root)
+	if (IS_ERR(root))
 		goto out;
-	sb->s_root = d_alloc_root(root);
-	if (!sb->s_root) {
-		iput(root);
+	sb->s_root = d_make_root(root);
+	if (!sb->s_root)
 		goto out;
-	}
 	return 0;
 out:
 	kfree(sbi);
@@ -354,7 +351,7 @@ static int cramfs_statfs(struct dentry *dentry, struct kstatfs *buf)
  */
 static int cramfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 {
-	struct inode *inode = filp->f_path.dentry->d_inode;
+	struct inode *inode = file_inode(filp);
 	struct super_block *sb = inode->i_sb;
 	char *buf;
 	unsigned int offset;
@@ -378,7 +375,7 @@ static int cramfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 		unsigned long nextoffset;
 		char *name;
 		ino_t ino;
-		mode_t mode;
+		umode_t mode;
 		int namelen, error;
 
 		mutex_lock(&read_mutex);
@@ -420,9 +417,10 @@ static int cramfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 /*
  * Lookup and fill in the inode data..
  */
-static struct dentry * cramfs_lookup(struct inode *dir, struct dentry *dentry, struct nameidata *nd)
+static struct dentry * cramfs_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags)
 {
 	unsigned int offset = 0;
+	struct inode *inode = NULL;
 	int sorted;
 
 	mutex_lock(&read_mutex);
@@ -449,8 +447,8 @@ static struct dentry * cramfs_lookup(struct inode *dir, struct dentry *dentry, s
 
 		for (;;) {
 			if (!namelen) {
-				mutex_unlock(&read_mutex);
-				return ERR_PTR(-EIO);
+				inode = ERR_PTR(-EIO);
+				goto out;
 			}
 			if (name[namelen-1])
 				break;
@@ -462,17 +460,18 @@ static struct dentry * cramfs_lookup(struct inode *dir, struct dentry *dentry, s
 		if (retval > 0)
 			continue;
 		if (!retval) {
-			struct cramfs_inode entry = *de;
-			mutex_unlock(&read_mutex);
-			d_add(dentry, get_cramfs_inode(dir->i_sb, &entry, dir_off));
-			return NULL;
+			inode = get_cramfs_inode(dir->i_sb, de, dir_off);
+			break;
 		}
 		/* else (retval < 0) */
 		if (sorted)
 			break;
 	}
+out:
 	mutex_unlock(&read_mutex);
-	d_add(dentry, NULL);
+	if (IS_ERR(inode))
+		return ERR_CAST(inode);
+	d_add(dentry, inode);
 	return NULL;
 }
 
@@ -574,6 +573,7 @@ static struct file_system_type cramfs_fs_type = {
 	.kill_sb	= kill_block_super,
 	.fs_flags	= FS_REQUIRES_DEV,
 };
+MODULE_ALIAS_FS("cramfs");
 
 static int __init init_cramfs_fs(void)
 {

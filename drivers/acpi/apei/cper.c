@@ -29,6 +29,8 @@
 #include <linux/time.h>
 #include <linux/cper.h>
 #include <linux/acpi.h>
+#include <linux/pci.h>
+#include <linux/aer.h>
 
 /*
  * CPER record ID need to be unique even after reboot, because record
@@ -70,8 +72,8 @@ static const char *cper_severity_str(unsigned int severity)
  * If the output length is longer than 80, multiple line will be
  * printed, with @pfx is printed at the beginning of each line.
  */
-static void cper_print_bits(const char *pfx, unsigned int bits,
-			    const char *strs[], unsigned int strs_size)
+void cper_print_bits(const char *pfx, unsigned int bits,
+		     const char *strs[], unsigned int strs_size)
 {
 	int i, len = 0;
 	const char *str;
@@ -81,6 +83,8 @@ static void cper_print_bits(const char *pfx, unsigned int bits,
 		if (!(bits & (1U << i)))
 			continue;
 		str = strs[i];
+		if (!str)
+			continue;
 		if (len && len + strlen(str) + 2 > 80) {
 			printk("%s\n", buf);
 			len = 0;
@@ -243,7 +247,8 @@ static const char *cper_pcie_port_type_strs[] = {
 	"root complex event collector",
 };
 
-static void cper_print_pcie(const char *pfx, const struct cper_sec_pcie *pcie)
+static void cper_print_pcie(const char *pfx, const struct cper_sec_pcie *pcie,
+			    const struct acpi_hest_generic_data *gdata)
 {
 	if (pcie->validation_bits & CPER_PCIE_VALID_PORT_TYPE)
 		printk("%s""port_type: %d, %s\n", pfx, pcie->port_type,
@@ -322,7 +327,7 @@ static void apei_estatus_print_section(
 		struct cper_sec_pcie *pcie = (void *)(gdata + 1);
 		printk("%s""section_type: PCIe error\n", pfx);
 		if (gdata->error_data_length >= sizeof(*pcie))
-			cper_print_pcie(pfx, pcie);
+			cper_print_pcie(pfx, pcie, gdata);
 		else
 			goto err_section_too_small;
 	} else
@@ -352,6 +357,7 @@ void apei_estatus_print(const char *pfx,
 		gedata_len = gdata->error_data_length;
 		apei_estatus_print_section(pfx, gdata, sec_no);
 		data_len -= gedata_len + sizeof(*gdata);
+		gdata = (void *)(gdata + 1) + gedata_len;
 		sec_no++;
 	}
 }
@@ -381,11 +387,12 @@ int apei_estatus_check(const struct acpi_hest_generic_status *estatus)
 		return rc;
 	data_len = estatus->data_length;
 	gdata = (struct acpi_hest_generic_data *)(estatus + 1);
-	while (data_len > sizeof(*gdata)) {
+	while (data_len >= sizeof(*gdata)) {
 		gedata_len = gdata->error_data_length;
 		if (gedata_len > data_len - sizeof(*gdata))
 			return -EINVAL;
 		data_len -= gedata_len + sizeof(*gdata);
+		gdata = (void *)(gdata + 1) + gedata_len;
 	}
 	if (data_len)
 		return -EINVAL;

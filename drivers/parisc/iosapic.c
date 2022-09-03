@@ -140,14 +140,13 @@
 #include <asm/pdc.h>
 #include <asm/pdcpat.h>
 #include <asm/page.h>
-#include <asm/system.h>
 #include <asm/io.h>		/* read/write functions */
 #ifdef CONFIG_SUPERIO
 #include <asm/superio.h>
 #endif
 
 #include <asm/ropes.h>
-#include "./iosapic_private.h"
+#include "iosapic_private.h"
 
 #define MODULE_NAME "iosapic"
 
@@ -533,7 +532,7 @@ iosapic_xlate_pin(struct iosapic_info *isi, struct pci_dev *pcidev)
 		intr_slot = PCI_SLOT(pcidev->devfn);
 	}
 	DBG_IRT("iosapic_xlate_pin:  bus %d slot %d pin %d\n",
-				pcidev->bus->secondary, intr_slot, intr_pin);
+			pcidev->bus->busn_res.start, intr_slot, intr_pin);
 
 	return irt_find_irqline(isi, intr_slot, intr_pin);
 }
@@ -615,10 +614,10 @@ iosapic_set_irt_data( struct vector_info *vi, u32 *dp0, u32 *dp1)
 }
 
 
-static void iosapic_mask_irq(unsigned int irq)
+static void iosapic_mask_irq(struct irq_data *d)
 {
 	unsigned long flags;
-	struct vector_info *vi = get_irq_chip_data(irq);
+	struct vector_info *vi = irq_data_get_irq_chip_data(d);
 	u32 d0, d1;
 
 	spin_lock_irqsave(&iosapic_lock, flags);
@@ -628,9 +627,9 @@ static void iosapic_mask_irq(unsigned int irq)
 	spin_unlock_irqrestore(&iosapic_lock, flags);
 }
 
-static void iosapic_unmask_irq(unsigned int irq)
+static void iosapic_unmask_irq(struct irq_data *d)
 {
-	struct vector_info *vi = get_irq_chip_data(irq);
+	struct vector_info *vi = irq_data_get_irq_chip_data(d);
 	u32 d0, d1;
 
 	/* data is initialized by fixup_irq */
@@ -666,34 +665,34 @@ printk("\n");
 	 * enables their IRQ. It can lead to "interesting" race conditions
 	 * in the driver initialization sequence.
 	 */
-	DBG(KERN_DEBUG "enable_irq(%d): eoi(%p, 0x%x)\n", irq,
+	DBG(KERN_DEBUG "enable_irq(%d): eoi(%p, 0x%x)\n", d->irq,
 			vi->eoi_addr, vi->eoi_data);
 	iosapic_eoi(vi->eoi_addr, vi->eoi_data);
 }
 
-static void iosapic_eoi_irq(unsigned int irq)
+static void iosapic_eoi_irq(struct irq_data *d)
 {
-	struct vector_info *vi = get_irq_chip_data(irq);
+	struct vector_info *vi = irq_data_get_irq_chip_data(d);
 
 	iosapic_eoi(vi->eoi_addr, vi->eoi_data);
-	cpu_eoi_irq(irq);
+	cpu_eoi_irq(d);
 }
 
 #ifdef CONFIG_SMP
-static int iosapic_set_affinity_irq(unsigned int irq,
-				     const struct cpumask *dest)
+static int iosapic_set_affinity_irq(struct irq_data *d,
+				    const struct cpumask *dest, bool force)
 {
-	struct vector_info *vi = get_irq_chip_data(irq);
+	struct vector_info *vi = irq_data_get_irq_chip_data(d);
 	u32 d0, d1, dummy_d0;
 	unsigned long flags;
 	int dest_cpu;
 
-	dest_cpu = cpu_check_affinity(irq, dest);
+	dest_cpu = cpu_check_affinity(d, dest);
 	if (dest_cpu < 0)
 		return -1;
 
-	cpumask_copy(irq_desc[irq].affinity, cpumask_of(dest_cpu));
-	vi->txn_addr = txn_affinity_addr(irq, dest_cpu);
+	cpumask_copy(d->affinity, cpumask_of(dest_cpu));
+	vi->txn_addr = txn_affinity_addr(d->irq, dest_cpu);
 
 	spin_lock_irqsave(&iosapic_lock, flags);
 	/* d1 contains the destination CPU, so only want to set that
@@ -708,13 +707,13 @@ static int iosapic_set_affinity_irq(unsigned int irq,
 #endif
 
 static struct irq_chip iosapic_interrupt_type = {
-	.name	=	"IO-SAPIC-level",
-	.unmask	=	iosapic_unmask_irq,
-	.mask	=	iosapic_mask_irq,
-	.ack	=	cpu_ack_irq,
-	.eoi	=	iosapic_eoi_irq,
+	.name		=	"IO-SAPIC-level",
+	.irq_unmask	=	iosapic_unmask_irq,
+	.irq_mask	=	iosapic_mask_irq,
+	.irq_ack	=	cpu_ack_irq,
+	.irq_eoi	=	iosapic_eoi_irq,
 #ifdef CONFIG_SMP
-	.set_affinity =	iosapic_set_affinity_irq,
+	.irq_set_affinity =	iosapic_set_affinity_irq,
 #endif
 };
 
@@ -812,6 +811,70 @@ int iosapic_fixup_irq(void *isi_obj, struct pci_dev *pcidev)
 	return pcidev->irq;
 }
 
+static struct iosapic_info *first_isi = NULL;
+
+#ifdef CONFIG_64BIT
+int iosapic_serial_irq(int num)
+{
+	struct iosapic_info *isi = first_isi;
+	struct irt_entry *irte = NULL;  /* only used if PAT PDC */
+	struct vector_info *vi;
+	int isi_line;	/* line used by device */
+
+	/* lookup IRT entry for isi/slot/pin set */
+	irte = &irt_cell[num];
+
+	DBG_IRT("iosapic_serial_irq(): irte %p %x %x %x %x %x %x %x %x\n",
+		irte,
+		irte->entry_type,
+		irte->entry_length,
+		irte->polarity_trigger,
+		irte->src_bus_irq_devno,
+		irte->src_bus_id,
+		irte->src_seg_id,
+		irte->dest_iosapic_intin,
+		(u32) irte->dest_iosapic_addr);
+	isi_line = irte->dest_iosapic_intin;
+
+	/* get vector info for this input line */
+	vi = isi->isi_vector + isi_line;
+	DBG_IRT("iosapic_serial_irq:  line %d vi 0x%p\n", isi_line, vi);
+
+	/* If this IRQ line has already been setup, skip it */
+	if (vi->irte)
+		goto out;
+
+	vi->irte = irte;
+
+	/*
+	 * Allocate processor IRQ
+	 *
+	 * XXX/FIXME The txn_alloc_irq() code and related code should be
+	 * moved to enable_irq(). That way we only allocate processor IRQ
+	 * bits for devices that actually have drivers claiming them.
+	 * Right now we assign an IRQ to every PCI device present,
+	 * regardless of whether it's used or not.
+	 */
+	vi->txn_irq = txn_alloc_irq(8);
+
+	if (vi->txn_irq < 0)
+		panic("I/O sapic: couldn't get TXN IRQ\n");
+
+	/* enable_irq() will use txn_* to program IRdT */
+	vi->txn_addr = txn_alloc_addr(vi->txn_irq);
+	vi->txn_data = txn_alloc_data(vi->txn_irq);
+
+	vi->eoi_addr = isi->addr + IOSAPIC_REG_EOI;
+	vi->eoi_data = cpu_to_le32(vi->txn_data);
+
+	cpu_claim_irq(vi->txn_irq, &iosapic_interrupt_type, vi);
+
+ out:
+
+	return vi->txn_irq;
+}
+#endif
+
 
 /*
 ** squirrel away the I/O Sapic Version
@@ -878,6 +941,8 @@ void *iosapic_register(unsigned long hpa)
 		vip->irqline = (unsigned char) cnt;
 		vip->iosapic = isi;
 	}
+	if (!first_isi)
+		first_isi = isi;
 	return isi;
 }
 

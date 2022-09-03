@@ -8,7 +8,6 @@
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  */
-#include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
@@ -95,6 +94,7 @@ static int adjust_pte(struct vm_area_struct *vma, unsigned long address,
 {
 	spinlock_t *ptl;
 	pgd_t *pgd;
+	pud_t *pud;
 	pmd_t *pmd;
 	pte_t *pte;
 	int ret;
@@ -103,7 +103,11 @@ static int adjust_pte(struct vm_area_struct *vma, unsigned long address,
 	if (pgd_none_or_clear_bad(pgd))
 		return 0;
 
-	pmd = pmd_offset(pgd, address);
+	pud = pud_offset(pgd, address);
+	if (pud_none_or_clear_bad(pud))
+		return 0;
+
+	pmd = pmd_offset(pud, address);
 	if (pmd_none_or_clear_bad(pmd))
 		return 0;
 
@@ -130,7 +134,6 @@ make_coherent(struct address_space *mapping, struct vm_area_struct *vma,
 {
 	struct mm_struct *mm = vma->vm_mm;
 	struct vm_area_struct *mpnt;
-	struct prio_tree_iter iter;
 	unsigned long offset;
 	pgoff_t pgoff;
 	int aliases = 0;
@@ -143,7 +146,7 @@ make_coherent(struct address_space *mapping, struct vm_area_struct *vma,
 	 * cache coherency.
 	 */
 	flush_dcache_mmap_lock(mapping);
-	vma_prio_tree_foreach(mpnt, &iter, &mapping->i_mmap, pgoff, pgoff) {
+	vma_interval_tree_foreach(mpnt, &mapping->i_mmap, pgoff, pgoff) {
 		/*
 		 * If this VMA is not in our MM, we can ignore it.
 		 * Note that we intentionally mask out the VMA

@@ -1,6 +1,4 @@
 /*
- * drivers/serial/netx-serial.c
- *
  * Copyright (c) 2005 Sascha Hauer <s.hauer@pengutronix.de>, Pengutronix
  *
  * This program is free software; you can redistribute it and/or modify
@@ -201,7 +199,6 @@ static void netx_txint(struct uart_port *port)
 static void netx_rxint(struct uart_port *port)
 {
 	unsigned char rx, flg, status;
-	struct tty_struct *tty = port->state->port.tty;
 
 	while (!(readl(port->membase + UART_FR) & FR_RXFE)) {
 		rx = readl(port->membase + UART_DR);
@@ -239,8 +236,7 @@ static void netx_rxint(struct uart_port *port)
 		uart_insert_char(port, status, SR_OE, rx, flg);
 	}
 
-	tty_flip_buffer_push(tty);
-	return;
+	tty_flip_buffer_push(&port->state->port);
 }
 
 static irqreturn_t netx_int(int irq, void *dev_id)

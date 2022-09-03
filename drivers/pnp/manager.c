@@ -18,11 +18,27 @@
 
 DEFINE_MUTEX(pnp_res_mutex);
 
+static struct resource *pnp_find_resource(struct pnp_dev *dev,
+					  unsigned char rule,
+					  unsigned long type,
+					  unsigned int bar)
+{
+	struct resource *res = pnp_get_resource(dev, type, bar);
+
+	/* when the resource already exists, set its resource bits from rule */
+	if (res) {
+		res->flags &= ~IORESOURCE_BITS;
+		res->flags |= rule & IORESOURCE_BITS;
+	}
+
+	return res;
+}
+
 static int pnp_assign_port(struct pnp_dev *dev, struct pnp_port *rule, int idx)
 {
 	struct resource *res, local_res;
 
-	res = pnp_get_resource(dev, IORESOURCE_IO, idx);
+	res = pnp_find_resource(dev, rule->flags, IORESOURCE_IO, idx);
 	if (res) {
 		pnp_dbg(&dev->dev, "  io %d already set to %#llx-%#llx "
 			"flags %#lx\n", idx, (unsigned long long) res->start,
@@ -65,7 +81,7 @@ static int pnp_assign_mem(struct pnp_dev *dev, struct pnp_mem *rule, int idx)
 {
 	struct resource *res, local_res;
 
-	res = pnp_get_resource(dev, IORESOURCE_MEM, idx);
+	res = pnp_find_resource(dev, rule->flags, IORESOURCE_MEM, idx);
 	if (res) {
 		pnp_dbg(&dev->dev, "  mem %d already set to %#llx-%#llx "
 			"flags %#lx\n", idx, (unsigned long long) res->start,
@@ -78,6 +94,7 @@ static int pnp_assign_mem(struct pnp_dev *dev, struct pnp_mem *rule, int idx)
 	res->start = 0;
 	res->end = 0;
 
+	/* ??? rule->flags restricted to 8 bits, all tests bogus ??? */
 	if (!(rule->flags & IORESOURCE_MEM_WRITEABLE))
 		res->flags |= IORESOURCE_READONLY;
 	if (rule->flags & IORESOURCE_MEM_CACHEABLE)
@@ -123,7 +140,7 @@ static int pnp_assign_irq(struct pnp_dev *dev, struct pnp_irq *rule, int idx)
 		5, 10, 11, 12, 9, 14, 15, 7, 3, 4, 13, 0, 1, 6, 8, 2
 	};
 
-	res = pnp_get_resource(dev, IORESOURCE_IRQ, idx);
+	res = pnp_find_resource(dev, rule->flags, IORESOURCE_IRQ, idx);
 	if (res) {
 		pnp_dbg(&dev->dev, "  irq %d already set to %d flags %#lx\n",
 			idx, (int) res->start, res->flags);
@@ -171,6 +188,7 @@ __add:
 	return 0;
 }
 
+#ifdef CONFIG_ISA_DMA_API
 static int pnp_assign_dma(struct pnp_dev *dev, struct pnp_dma *rule, int idx)
 {
 	struct resource *res, local_res;
@@ -181,7 +199,7 @@ static int pnp_assign_dma(struct pnp_dev *dev, struct pnp_dma *rule, int idx)
 		1, 3, 5, 6, 7, 0, 2, 4
 	};
 
-	res = pnp_get_resource(dev, IORESOURCE_DMA, idx);
+	res = pnp_find_resource(dev, rule->flags, IORESOURCE_DMA, idx);
 	if (res) {
 		pnp_dbg(&dev->dev, "  dma %d already set to %d flags %#lx\n",
 			idx, (int) res->start, res->flags);
@@ -210,6 +228,7 @@ __add:
 	pnp_add_dma_resource(dev, res->start, res->flags);
 	return 0;
 }
+#endif /* CONFIG_ISA_DMA_API */
 
 void pnp_init_resources(struct pnp_dev *dev)
 {
@@ -234,7 +253,8 @@ static void pnp_clean_resource_table(struct pnp_dev *dev)
 static int pnp_assign_resources(struct pnp_dev *dev, int set)
 {
 	struct pnp_option *option;
-	int nport = 0, nmem = 0, nirq = 0, ndma = 0;
+	int nport = 0, nmem = 0, nirq = 0;
+	int ndma __maybe_unused = 0;
 	int ret = 0;
 
 	pnp_dbg(&dev->dev, "pnp_assign_resources, try dependent set %d\n", set);
@@ -256,9 +276,11 @@ static int pnp_assign_resources(struct pnp_dev *dev, int set)
 		case IORESOURCE_IRQ:
 			ret = pnp_assign_irq(dev, &option->u.irq, nirq++);
 			break;
+#ifdef CONFIG_ISA_DMA_API
 		case IORESOURCE_DMA:
 			ret = pnp_assign_dma(dev, &option->u.dma, ndma++);
 			break;
+#endif
 		default:
 			ret = -EINVAL;
 			break;

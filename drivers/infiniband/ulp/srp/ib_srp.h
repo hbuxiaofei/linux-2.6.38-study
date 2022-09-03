@@ -69,16 +69,18 @@ enum {
 	SRP_TAG_NO_REQ		= ~0U,
 	SRP_TAG_TSK_MGMT	= 1U << 31,
 
-	SRP_FMR_SIZE		= 256,
+	SRP_FMR_SIZE		= 512,
+	SRP_FMR_MIN_SIZE	= 128,
 	SRP_FMR_POOL_SIZE	= 1024,
-	SRP_FMR_DIRTY_SIZE	= SRP_FMR_POOL_SIZE / 4
+	SRP_FMR_DIRTY_SIZE	= SRP_FMR_POOL_SIZE / 4,
+
+	SRP_MAP_ALLOW_FMR	= 0,
+	SRP_MAP_NO_FMR		= 1,
 };
 
 enum srp_target_state {
 	SRP_TARGET_LIVE,
-	SRP_TARGET_CONNECTING,
-	SRP_TARGET_DEAD,
-	SRP_TARGET_REMOVED
+	SRP_TARGET_REMOVED,
 };
 
 enum srp_iu_type {
@@ -93,9 +95,9 @@ struct srp_device {
 	struct ib_pd	       *pd;
 	struct ib_mr	       *mr;
 	struct ib_fmr_pool     *fmr_pool;
-	int			fmr_page_shift;
-	int			fmr_page_size;
 	u64			fmr_page_mask;
+	int			fmr_page_size;
+	int			fmr_max_size;
 };
 
 struct srp_host {
@@ -112,7 +114,11 @@ struct srp_request {
 	struct list_head	list;
 	struct scsi_cmnd       *scmnd;
 	struct srp_iu	       *cmd;
-	struct ib_pool_fmr     *fmr;
+	struct ib_pool_fmr    **fmr_list;
+	u64		       *map_page;
+	struct srp_direct_buf  *indirect_desc;
+	dma_addr_t		indirect_dma_addr;
+	short			nfmr;
 	short			index;
 };
 
@@ -130,6 +136,11 @@ struct srp_target_port {
 	u32			lkey;
 	u32			rkey;
 	enum srp_target_state	state;
+	unsigned int		max_iu_len;
+	unsigned int		cmd_sg_cnt;
+	unsigned int		indirect_size;
+	bool			allow_ext_sg;
+	bool			transport_offline;
 
 	/* Everything above this point is used in the hot path of
 	 * command processing. Try to keep them packed into cachelines.
@@ -144,11 +155,15 @@ struct srp_target_port {
 	struct Scsi_Host       *scsi_host;
 	char			target_name[32];
 	unsigned int		scsi_id;
+	unsigned int		sg_tablesize;
 
 	struct ib_sa_path_rec	path;
 	__be16			orig_dgid[8];
 	struct ib_sa_query     *path_query;
 	int			path_query_id;
+
+	u32			rq_tmo_jiffies;
+	bool			connected;
 
 	struct ib_cm_id	       *cm_id;
 
@@ -160,12 +175,12 @@ struct srp_target_port {
 	struct srp_iu	       *rx_ring[SRP_RQ_SIZE];
 	struct srp_request	req_ring[SRP_CMD_SQ_SIZE];
 
-	struct work_struct	work;
+	struct work_struct	remove_work;
 
 	struct list_head	list;
 	struct completion	done;
 	int			status;
-	int			qp_in_error;
+	bool			qp_in_error;
 
 	struct completion	tsk_mgmt_done;
 	u8			tsk_mgmt_status;
@@ -177,6 +192,21 @@ struct srp_iu {
 	void		       *buf;
 	size_t			size;
 	enum dma_data_direction	direction;
+};
+
+struct srp_map_state {
+	struct ib_pool_fmr    **next_fmr;
+	struct srp_direct_buf  *desc;
+	u64		       *pages;
+	dma_addr_t		base_dma_addr;
+	u32			fmr_len;
+	u32			total_len;
+	unsigned int		npages;
+	unsigned int		nfmr;
+	unsigned int		ndesc;
+	struct scatterlist     *unmapped_sg;
+	int			unmapped_index;
+	dma_addr_t		unmapped_addr;
 };
 
 #endif /* IB_SRP_H */

@@ -13,7 +13,6 @@
 #include <linux/bitops.h>
 
 #include <asm/ptrace.h>
-#include <asm/system.h>
 #include <asm/dma.h>
 #include <asm/irq.h>
 #include <asm/mmu_context.h>
@@ -276,7 +275,7 @@ init_io7_irqs(struct io7 *io7,
 
 	/* Set up the lsi irqs.  */
 	for (i = 0; i < 128; ++i) {
-		set_irq_chip_and_handler(base + i, lsi_ops, handle_level_irq);
+		irq_set_chip_and_handler(base + i, lsi_ops, handle_level_irq);
 		irq_set_status_flags(i, IRQ_LEVEL);
 	}
 
@@ -290,7 +289,7 @@ init_io7_irqs(struct io7 *io7,
 
 	/* Set up the msi irqs.  */
 	for (i = 128; i < (128 + 512); ++i) {
-		set_irq_chip_and_handler(base + i, msi_ops, handle_level_irq);
+		irq_set_chip_and_handler(base + i, msi_ops, handle_level_irq);
 		irq_set_status_flags(i, IRQ_LEVEL);
 	}
 
@@ -308,8 +307,8 @@ marvel_init_irq(void)
 
 	/* Reserve the legacy irqs.  */
 	for (i = 0; i < 16; ++i) {
-		set_irq_chip_and_handler(i, &marvel_legacy_irq_type,
-			handle_level_irq);
+		irq_set_chip_and_handler(i, &marvel_legacy_irq_type,
+					 handle_level_irq);
 	}
 
 	/* Init the io7 irqs.  */
@@ -384,7 +383,8 @@ marvel_init_pci(void)
 
 	marvel_register_error_handlers();
 
-	pci_probe_only = 1;
+	/* Indicate that we trust the console to configure things properly */
+	pci_set_flags(PCI_PROBE_ONLY);
 	common_init_pci();
 	locate_and_init_vga(NULL);
 

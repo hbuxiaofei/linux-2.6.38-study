@@ -20,8 +20,10 @@
 
 #include <linux/module.h>
 #include <linux/serial.h>
-#include <linux/slab.h>
 #include <linux/serial_core.h>
+#include <linux/slab.h>
+#include <linux/tty.h>
+#include <linux/tty_flip.h>
 #include <linux/io.h>
 #include <linux/of_platform.h>
 #include <linux/dma-mapping.h>
@@ -235,7 +237,7 @@ static inline void *qe2cpu_addr(dma_addr_t addr, struct uart_qe_port *qe_port)
 		return qe_port->bd_virt + (addr - qe_port->bd_dma_addr);
 
 	/* something nasty happened */
-	printk(KERN_ERR "%s: addr=%x\n", __func__, addr);
+	printk(KERN_ERR "%s: addr=%llx\n", __func__, (u64)addr);
 	BUG();
 	return NULL;
 }
@@ -467,7 +469,7 @@ static void qe_uart_int_rx(struct uart_qe_port *qe_port)
 	int i;
 	unsigned char ch, *cp;
 	struct uart_port *port = &qe_port->port;
-	struct tty_struct *tty = port->state->port.tty;
+	struct tty_port *tport = &port->state->port;
 	struct qe_bd *bdp;
 	u16 status;
 	unsigned int flg;
@@ -489,7 +491,7 @@ static void qe_uart_int_rx(struct uart_qe_port *qe_port)
 		/* If we don't have enough room in RX buffer for the entire BD,
 		 * then we try later, which will be the next RX interrupt.
 		 */
-		if (tty_buffer_request_room(tty, i) < i) {
+		if (tty_buffer_request_room(tport, i) < i) {
 			dev_dbg(port->dev, "ucc-uart: no room in RX buffer\n");
 			return;
 		}
@@ -510,7 +512,7 @@ static void qe_uart_int_rx(struct uart_qe_port *qe_port)
 				continue;
 
 error_return:
-			tty_insert_flip_char(tty, ch, flg);
+			tty_insert_flip_char(tport, ch, flg);
 
 		}
 
@@ -528,7 +530,7 @@ error_return:
 	qe_port->rx_cur = bdp;
 
 	/* Activate BH processing */
-	tty_flip_buffer_push(tty);
+	tty_flip_buffer_push(tport);
 
 	return;
 
@@ -558,7 +560,7 @@ handle_error:
 
 	/* Overrun does not affect the current character ! */
 	if (status & BD_SC_OV)
-		tty_insert_flip_char(tty, 0, TTY_OVERRUN);
+		tty_insert_flip_char(tport, 0, TTY_OVERRUN);
 #ifdef SUPPORT_SYSRQ
 	port->sysrq = 0;
 #endif
@@ -961,6 +963,9 @@ static void qe_uart_set_termios(struct uart_port *port,
 	/* Do we really need a spinlock here? */
 	spin_lock_irqsave(&port->lock, flags);
 
+	/* Update the per-port timeout. */
+	uart_update_timeout(port, termios->c_cflag, baud);
+
 	out_be16(&uccp->upsmr, upsmr);
 	if (soft_uart) {
 		out_be16(&uccup->supsmr, supsmr);
@@ -1194,8 +1199,7 @@ static void uart_firmware_cont(const struct firmware *fw, void *context)
 	release_firmware(fw);
 }
 
-static int ucc_uart_probe(struct platform_device *ofdev,
-	const struct of_device_id *match)
+static int ucc_uart_probe(struct platform_device *ofdev)
 {
 	struct device_node *np = ofdev->dev.of_node;
 	const unsigned int *iprop;      /* Integer OF properties */
@@ -1270,13 +1274,12 @@ static int ucc_uart_probe(struct platform_device *ofdev,
 	ret = of_address_to_resource(np, 0, &res);
 	if (ret) {
 		dev_err(&ofdev->dev, "missing 'reg' property in device tree\n");
-		kfree(qe_port);
-		return ret;
+		goto out_free;
 	}
 	if (!res.start) {
 		dev_err(&ofdev->dev, "invalid 'reg' property in device tree\n");
-		kfree(qe_port);
-		return -EINVAL;
+		ret = -EINVAL;
+		goto out_free;
 	}
 	qe_port->port.mapbase = res.start;
 
@@ -1286,17 +1289,17 @@ static int ucc_uart_probe(struct platform_device *ofdev,
 	if (!iprop) {
 		iprop = of_get_property(np, "device-id", NULL);
 		if (!iprop) {
-			kfree(qe_port);
 			dev_err(&ofdev->dev, "UCC is unspecified in "
 				"device tree\n");
-			return -EINVAL;
+			ret = -EINVAL;
+			goto out_free;
 		}
 	}
 
 	if ((*iprop < 1) || (*iprop > UCC_MAX_NUM)) {
 		dev_err(&ofdev->dev, "no support for UCC%u\n", *iprop);
-		kfree(qe_port);
-		return -ENODEV;
+		ret = -ENODEV;
+		goto out_free;
 	}
 	qe_port->ucc_num = *iprop - 1;
 
@@ -1310,16 +1313,16 @@ static int ucc_uart_probe(struct platform_device *ofdev,
 	sprop = of_get_property(np, "rx-clock-name", NULL);
 	if (!sprop) {
 		dev_err(&ofdev->dev, "missing rx-clock-name in device tree\n");
-		kfree(qe_port);
-		return -ENODEV;
+		ret = -ENODEV;
+		goto out_free;
 	}
 
 	qe_port->us_info.rx_clock = qe_clock_source(sprop);
 	if ((qe_port->us_info.rx_clock < QE_BRG1) ||
 	    (qe_port->us_info.rx_clock > QE_BRG16)) {
 		dev_err(&ofdev->dev, "rx-clock-name must be a BRG for UART\n");
-		kfree(qe_port);
-		return -ENODEV;
+		ret = -ENODEV;
+		goto out_free;
 	}
 
 #ifdef LOOPBACK
@@ -1329,39 +1332,39 @@ static int ucc_uart_probe(struct platform_device *ofdev,
 	sprop = of_get_property(np, "tx-clock-name", NULL);
 	if (!sprop) {
 		dev_err(&ofdev->dev, "missing tx-clock-name in device tree\n");
-		kfree(qe_port);
-		return -ENODEV;
+		ret = -ENODEV;
+		goto out_free;
 	}
 	qe_port->us_info.tx_clock = qe_clock_source(sprop);
 #endif
 	if ((qe_port->us_info.tx_clock < QE_BRG1) ||
 	    (qe_port->us_info.tx_clock > QE_BRG16)) {
 		dev_err(&ofdev->dev, "tx-clock-name must be a BRG for UART\n");
-		kfree(qe_port);
-		return -ENODEV;
+		ret = -ENODEV;
+		goto out_free;
 	}
 
 	/* Get the port number, numbered 0-3 */
 	iprop = of_get_property(np, "port-number", NULL);
 	if (!iprop) {
 		dev_err(&ofdev->dev, "missing port-number in device tree\n");
-		kfree(qe_port);
-		return -EINVAL;
+		ret = -EINVAL;
+		goto out_free;
 	}
 	qe_port->port.line = *iprop;
 	if (qe_port->port.line >= UCC_MAX_UART) {
 		dev_err(&ofdev->dev, "port-number must be 0-%u\n",
 			UCC_MAX_UART - 1);
-		kfree(qe_port);
-		return -EINVAL;
+		ret = -EINVAL;
+		goto out_free;
 	}
 
 	qe_port->port.irq = irq_of_parse_and_map(np, 0);
-	if (qe_port->port.irq == NO_IRQ) {
+	if (qe_port->port.irq == 0) {
 		dev_err(&ofdev->dev, "could not map IRQ for UCC%u\n",
 		       qe_port->ucc_num + 1);
-		kfree(qe_port);
-		return -EINVAL;
+		ret = -EINVAL;
+		goto out_free;
 	}
 
 	/*
@@ -1373,8 +1376,8 @@ static int ucc_uart_probe(struct platform_device *ofdev,
 		np = of_find_node_by_type(NULL, "qe");
 		if (!np) {
 			dev_err(&ofdev->dev, "could not find 'qe' node\n");
-			kfree(qe_port);
-			return -EINVAL;
+			ret = -EINVAL;
+			goto out_free;
 		}
 	}
 
@@ -1382,8 +1385,8 @@ static int ucc_uart_probe(struct platform_device *ofdev,
 	if (!iprop) {
 		dev_err(&ofdev->dev,
 		       "missing brg-frequency in device tree\n");
-		kfree(qe_port);
-		return -EINVAL;
+		ret = -EINVAL;
+		goto out_np;
 	}
 
 	if (*iprop)
@@ -1398,16 +1401,16 @@ static int ucc_uart_probe(struct platform_device *ofdev,
 		if (!iprop) {
 			dev_err(&ofdev->dev,
 				"missing QE bus-frequency in device tree\n");
-			kfree(qe_port);
-			return -EINVAL;
+			ret = -EINVAL;
+			goto out_np;
 		}
 		if (*iprop)
 			qe_port->port.uartclk = *iprop / 2;
 		else {
 			dev_err(&ofdev->dev,
 				"invalid QE bus-frequency in device tree\n");
-			kfree(qe_port);
-			return -EINVAL;
+			ret = -EINVAL;
+			goto out_np;
 		}
 	}
 
@@ -1445,8 +1448,7 @@ static int ucc_uart_probe(struct platform_device *ofdev,
 	if (ret) {
 		dev_err(&ofdev->dev, "could not add /dev/ttyQE%u\n",
 		       qe_port->port.line);
-		kfree(qe_port);
-		return ret;
+		goto out_np;
 	}
 
 	dev_set_drvdata(&ofdev->dev, qe_port);
@@ -1460,6 +1462,11 @@ static int ucc_uart_probe(struct platform_device *ofdev,
 	       SERIAL_QE_MINOR + qe_port->port.line);
 
 	return 0;
+out_np:
+	of_node_put(np);
+out_free:
+	kfree(qe_port);
+	return ret;
 }
 
 static int ucc_uart_remove(struct platform_device *ofdev)
@@ -1485,7 +1492,7 @@ static struct of_device_id ucc_uart_match[] = {
 };
 MODULE_DEVICE_TABLE(of, ucc_uart_match);
 
-static struct of_platform_driver ucc_uart_of_driver = {
+static struct platform_driver ucc_uart_of_driver = {
 	.driver = {
 		.name = "ucc_uart",
 		.owner = THIS_MODULE,
@@ -1510,7 +1517,7 @@ static int __init ucc_uart_init(void)
 		return ret;
 	}
 
-	ret = of_register_platform_driver(&ucc_uart_of_driver);
+	ret = platform_driver_register(&ucc_uart_of_driver);
 	if (ret)
 		printk(KERN_ERR
 		       "ucc-uart: could not register platform driver\n");
@@ -1523,7 +1530,7 @@ static void __exit ucc_uart_exit(void)
 	printk(KERN_INFO
 	       "Freescale QUICC Engine UART device driver unloading\n");
 
-	of_unregister_platform_driver(&ucc_uart_of_driver);
+	platform_driver_unregister(&ucc_uart_of_driver);
 	uart_unregister_driver(&ucc_uart_driver);
 }
 

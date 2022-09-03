@@ -18,6 +18,7 @@
 #include <linux/interrupt.h>
 #include <linux/module.h>
 #include <linux/console.h>
+#include <linux/of.h>
 #include <linux/tty.h>
 #include <linux/tty_flip.h>
 #include <linux/serial.h>
@@ -138,7 +139,7 @@ static void altera_jtaguart_rx_chars(struct altera_jtaguart *pp)
 		uart_insert_char(port, 0, 0, ch, flag);
 	}
 
-	tty_flip_buffer_push(port->state->port.tty);
+	tty_flip_buffer_push(&port->state->port);
 }
 
 static void altera_jtaguart_tx_chars(struct altera_jtaguart *pp)
@@ -218,7 +219,7 @@ static int altera_jtaguart_startup(struct uart_port *port)
 	unsigned long flags;
 	int ret;
 
-	ret = request_irq(port->irq, altera_jtaguart_interrupt, IRQF_DISABLED,
+	ret = request_irq(port->irq, altera_jtaguart_interrupt, 0,
 			DRV_NAME, port);
 	if (ret) {
 		pr_err(DRV_NAME ": unable to attach Altera JTAG UART %d "
@@ -305,28 +306,6 @@ static struct altera_jtaguart altera_jtaguart_ports[ALTERA_JTAGUART_MAXPORTS];
 
 #if defined(CONFIG_SERIAL_ALTERA_JTAGUART_CONSOLE)
 
-int __init early_altera_jtaguart_setup(struct altera_jtaguart_platform_uart
-				       *platp)
-{
-	struct uart_port *port;
-	int i;
-
-	for (i = 0; i < ALTERA_JTAGUART_MAXPORTS && platp[i].mapbase; i++) {
-		port = &altera_jtaguart_ports[i].port;
-
-		port->line = i;
-		port->type = PORT_ALTERA_JTAGUART;
-		port->mapbase = platp[i].mapbase;
-		port->membase = ioremap(port->mapbase, ALTERA_JTAGUART_SIZE);
-		port->iotype = SERIAL_IO_MEM;
-		port->irq = platp[i].irq;
-		port->flags = ASYNC_BOOT_AUTOCONF;
-		port->ops = &altera_jtaguart_ops;
-	}
-
-	return 0;
-}
-
 #if defined(CONFIG_SERIAL_ALTERA_JTAGUART_CONSOLE_BYPASS)
 static void altera_jtaguart_console_putc(struct console *co, const char c)
 {
@@ -384,7 +363,7 @@ static int __init altera_jtaguart_console_setup(struct console *co,
 	if (co->index < 0 || co->index >= ALTERA_JTAGUART_MAXPORTS)
 		return -EINVAL;
 	port = &altera_jtaguart_ports[co->index].port;
-	if (port->membase == 0)
+	if (port->membase == NULL)
 		return -ENODEV;
 	return 0;
 }
@@ -427,50 +406,82 @@ static struct uart_driver altera_jtaguart_driver = {
 	.cons		= ALTERA_JTAGUART_CONSOLE,
 };
 
-static int __devinit altera_jtaguart_probe(struct platform_device *pdev)
+static int altera_jtaguart_probe(struct platform_device *pdev)
 {
 	struct altera_jtaguart_platform_uart *platp = pdev->dev.platform_data;
 	struct uart_port *port;
-	int i;
+	struct resource *res_irq, *res_mem;
+	int i = pdev->id;
 
-	for (i = 0; i < ALTERA_JTAGUART_MAXPORTS && platp[i].mapbase; i++) {
-		port = &altera_jtaguart_ports[i].port;
+	/* -1 emphasizes that the platform must have one port, no .N suffix */
+	if (i == -1)
+		i = 0;
 
-		port->line = i;
-		port->type = PORT_ALTERA_JTAGUART;
-		port->mapbase = platp[i].mapbase;
-		port->membase = ioremap(port->mapbase, ALTERA_JTAGUART_SIZE);
-		port->iotype = SERIAL_IO_MEM;
-		port->irq = platp[i].irq;
-		port->ops = &altera_jtaguart_ops;
-		port->flags = ASYNC_BOOT_AUTOCONF;
+	if (i >= ALTERA_JTAGUART_MAXPORTS)
+		return -EINVAL;
 
-		uart_add_one_port(&altera_jtaguart_driver, port);
-	}
+	port = &altera_jtaguart_ports[i].port;
+
+	res_mem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (res_mem)
+		port->mapbase = res_mem->start;
+	else if (platp)
+		port->mapbase = platp->mapbase;
+	else
+		return -ENODEV;
+
+	res_irq = platform_get_resource(pdev, IORESOURCE_IRQ, 0);
+	if (res_irq)
+		port->irq = res_irq->start;
+	else if (platp)
+		port->irq = platp->irq;
+	else
+		return -ENODEV;
+
+	port->membase = ioremap(port->mapbase, ALTERA_JTAGUART_SIZE);
+	if (!port->membase)
+		return -ENOMEM;
+
+	port->line = i;
+	port->type = PORT_ALTERA_JTAGUART;
+	port->iotype = SERIAL_IO_MEM;
+	port->ops = &altera_jtaguart_ops;
+	port->flags = UPF_BOOT_AUTOCONF;
+
+	uart_add_one_port(&altera_jtaguart_driver, port);
 
 	return 0;
 }
 
-static int __devexit altera_jtaguart_remove(struct platform_device *pdev)
+static int altera_jtaguart_remove(struct platform_device *pdev)
 {
 	struct uart_port *port;
-	int i;
+	int i = pdev->id;
 
-	for (i = 0; i < ALTERA_JTAGUART_MAXPORTS; i++) {
-		port = &altera_jtaguart_ports[i].port;
-		if (port)
-			uart_remove_one_port(&altera_jtaguart_driver, port);
-	}
+	if (i == -1)
+		i = 0;
+
+	port = &altera_jtaguart_ports[i].port;
+	uart_remove_one_port(&altera_jtaguart_driver, port);
 
 	return 0;
 }
+
+#ifdef CONFIG_OF
+static struct of_device_id altera_jtaguart_match[] = {
+	{ .compatible = "ALTR,juart-1.0", },
+	{},
+};
+MODULE_DEVICE_TABLE(of, altera_jtaguart_match);
+#endif /* CONFIG_OF */
 
 static struct platform_driver altera_jtaguart_platform_driver = {
 	.probe	= altera_jtaguart_probe,
-	.remove	= __devexit_p(altera_jtaguart_remove),
+	.remove	= altera_jtaguart_remove,
 	.driver	= {
-		.name	= DRV_NAME,
-		.owner	= THIS_MODULE,
+		.name		= DRV_NAME,
+		.owner		= THIS_MODULE,
+		.of_match_table	= of_match_ptr(altera_jtaguart_match),
 	},
 };
 
@@ -482,11 +493,9 @@ static int __init altera_jtaguart_init(void)
 	if (rc)
 		return rc;
 	rc = platform_driver_register(&altera_jtaguart_platform_driver);
-	if (rc) {
+	if (rc)
 		uart_unregister_driver(&altera_jtaguart_driver);
-		return rc;
-	}
-	return 0;
+	return rc;
 }
 
 static void __exit altera_jtaguart_exit(void)

@@ -3,7 +3,7 @@
  *
  * External function declarations.
  *
- * Copyright IBM Corporation 2002, 2010
+ * Copyright IBM Corp. 2002, 2010
  */
 
 #ifndef ZFCP_EXT_H
@@ -53,6 +53,8 @@ extern void zfcp_dbf_hba_fsf_uss(char *, struct zfcp_fsf_req *);
 extern void zfcp_dbf_hba_fsf_res(char *, struct zfcp_fsf_req *);
 extern void zfcp_dbf_hba_bit_err(char *, struct zfcp_fsf_req *);
 extern void zfcp_dbf_hba_berr(struct zfcp_dbf *, struct zfcp_fsf_req *);
+extern void zfcp_dbf_hba_def_err(struct zfcp_adapter *, u64, u16, void **);
+extern void zfcp_dbf_hba_basic(char *, struct zfcp_adapter *);
 extern void zfcp_dbf_san_req(char *, struct zfcp_fsf_req *, u32);
 extern void zfcp_dbf_san_res(char *, struct zfcp_fsf_req *);
 extern void zfcp_dbf_san_in_els(char *, struct zfcp_fsf_req *);
@@ -80,6 +82,7 @@ extern void zfcp_erp_notify(struct zfcp_erp_action *, unsigned long);
 extern void zfcp_erp_timeout_handler(unsigned long);
 
 /* zfcp_fc.c */
+extern struct kmem_cache *zfcp_fc_req_cache;
 extern void zfcp_fc_enqueue_event(struct zfcp_adapter *,
 				enum fc_host_event_code event_code, u32);
 extern void zfcp_fc_post_event(struct work_struct *);
@@ -95,8 +98,12 @@ extern int zfcp_fc_gs_setup(struct zfcp_adapter *);
 extern void zfcp_fc_gs_destroy(struct zfcp_adapter *);
 extern int zfcp_fc_exec_bsg_job(struct fc_bsg_job *);
 extern int zfcp_fc_timeout_bsg_job(struct fc_bsg_job *);
+extern void zfcp_fc_sym_name_update(struct work_struct *);
+extern void zfcp_fc_conditional_port_scan(struct zfcp_adapter *);
+extern void zfcp_fc_inverse_conditional_port_scan(struct zfcp_adapter *);
 
 /* zfcp_fsf.c */
+extern struct kmem_cache *zfcp_fsf_qtcb_cache;
 extern int zfcp_fsf_open_port(struct zfcp_erp_action *);
 extern int zfcp_fsf_open_wka_port(struct zfcp_fc_wka_port *);
 extern int zfcp_fsf_close_wka_port(struct zfcp_fc_wka_port *);
@@ -139,9 +146,9 @@ extern struct zfcp_fsf_req *zfcp_fsf_get_req(struct zfcp_qdio *,
 					     struct qdio_buffer *);
 
 /* zfcp_scsi.c */
-extern struct zfcp_data zfcp_data;
-extern int zfcp_adapter_scsi_register(struct zfcp_adapter *);
-extern void zfcp_adapter_scsi_unregister(struct zfcp_adapter *);
+extern struct scsi_transport_template *zfcp_scsi_transport_template;
+extern int zfcp_scsi_adapter_register(struct zfcp_adapter *);
+extern void zfcp_scsi_adapter_unregister(struct zfcp_adapter *);
 extern struct fc_function_template zfcp_transport_functions;
 extern void zfcp_scsi_rport_work(struct work_struct *);
 extern void zfcp_scsi_schedule_rport_register(struct zfcp_port *);
@@ -154,6 +161,7 @@ extern void zfcp_scsi_dif_sense_error(struct scsi_cmnd *, int);
 extern struct attribute_group zfcp_sysfs_unit_attrs;
 extern struct attribute_group zfcp_sysfs_adapter_attrs;
 extern struct attribute_group zfcp_sysfs_port_attrs;
+extern struct mutex zfcp_sysfs_port_units_mutex;
 extern struct device_attribute *zfcp_sysfs_sdev_attrs[];
 extern struct device_attribute *zfcp_sysfs_shost_attrs[];
 

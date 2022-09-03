@@ -11,22 +11,16 @@
  * published by the Free Software Foundation.
  */
 
-#include <linux/module.h>
 #include <linux/clk.h>
-#include <linux/mutex.h>
 #include <linux/gpio.h>
-#include <sound/pcm.h>
-#include <sound/pcm_params.h>
+#include <linux/module.h>
+
 #include <sound/soc.h>
 #include <sound/s3c24xx_uda134x.h>
-#include <sound/uda134x.h>
 
-#include <plat/regs-iis.h>
+#include "regs-iis.h"
 
-#include "dma.h"
 #include "s3c24xx-i2s.h"
-#include "../codecs/uda134x.h"
-
 
 /* #define ENFORCE_RATES 1 */
 /*
@@ -73,17 +67,17 @@ static int s3c24xx_uda134x_startup(struct snd_pcm_substream *substream)
 	pr_debug("%s %d\n", __func__, clk_users);
 	if (clk_users == 0) {
 		xtal = clk_get(&s3c24xx_uda134x_snd_device->dev, "xtal");
-		if (!xtal) {
+		if (IS_ERR(xtal)) {
 			printk(KERN_ERR "%s cannot get xtal\n", __func__);
-			ret = -EBUSY;
+			ret = PTR_ERR(xtal);
 		} else {
 			pclk = clk_get(&s3c24xx_uda134x_snd_device->dev,
 				       "pclk");
-			if (!pclk) {
+			if (IS_ERR(pclk)) {
 				printk(KERN_ERR "%s cannot get pclk\n",
 				       __func__);
 				clk_put(xtal);
-				ret = -EBUSY;
+				ret = PTR_ERR(pclk);
 			}
 		}
 		if (!ret) {
@@ -226,15 +220,16 @@ static struct snd_soc_ops s3c24xx_uda134x_ops = {
 static struct snd_soc_dai_link s3c24xx_uda134x_dai_link = {
 	.name = "UDA134X",
 	.stream_name = "UDA134X",
-	.codec_name = "uda134x-hifi",
+	.codec_name = "uda134x-codec",
 	.codec_dai_name = "uda134x-hifi",
 	.cpu_dai_name = "s3c24xx-iis",
 	.ops = &s3c24xx_uda134x_ops,
-	.platform_name	= "samsung-audio",
+	.platform_name	= "s3c24xx-iis",
 };
 
 static struct snd_soc_card snd_soc_s3c24xx_uda134x = {
 	.name = "S3C24XX_UDA134X",
+	.owner = THIS_MODULE,
 	.dai_link = &s3c24xx_uda134x_dai_link,
 	.num_links = 1,
 };
@@ -321,6 +316,7 @@ static int s3c24xx_uda134x_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(s3c24xx_uda134x_snd_device,
 			     &snd_soc_s3c24xx_uda134x);
+	platform_device_add_data(s3c24xx_uda134x_snd_device, &s3c24xx_uda134x, sizeof(s3c24xx_uda134x));
 	ret = platform_device_add(s3c24xx_uda134x_snd_device);
 	if (ret) {
 		printk(KERN_ERR "S3C24XX_UDA134X SoC Audio: Unable to add\n");
@@ -348,19 +344,7 @@ static struct platform_driver s3c24xx_uda134x_driver = {
 	},
 };
 
-static int __init s3c24xx_uda134x_init(void)
-{
-	return platform_driver_register(&s3c24xx_uda134x_driver);
-}
-
-static void __exit s3c24xx_uda134x_exit(void)
-{
-	platform_driver_unregister(&s3c24xx_uda134x_driver);
-}
-
-
-module_init(s3c24xx_uda134x_init);
-module_exit(s3c24xx_uda134x_exit);
+module_platform_driver(s3c24xx_uda134x_driver);
 
 MODULE_AUTHOR("Zoltan Devai, Christian Pellegrin <chripell@evolware.org>");
 MODULE_DESCRIPTION("S3C24XX_UDA134X ALSA SoC audio driver");

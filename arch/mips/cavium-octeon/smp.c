@@ -15,8 +15,8 @@
 #include <linux/module.h>
 
 #include <asm/mmu_context.h>
-#include <asm/system.h>
 #include <asm/time.h>
+#include <asm/setup.h>
 
 #include <asm/octeon/octeon.h>
 
@@ -37,13 +37,15 @@ static irqreturn_t mailbox_interrupt(int irq, void *dev_id)
 	uint64_t action;
 
 	/* Load the mailbox register to figure out what we're supposed to do */
-	action = cvmx_read_csr(CVMX_CIU_MBOX_CLRX(coreid));
+	action = cvmx_read_csr(CVMX_CIU_MBOX_CLRX(coreid)) & 0xffff;
 
 	/* Clear the mailbox to clear the interrupt */
 	cvmx_write_csr(CVMX_CIU_MBOX_CLRX(coreid), action);
 
 	if (action & SMP_CALL_FUNCTION)
 		smp_call_function_interrupt();
+	if (action & SMP_RESCHEDULE_YOURSELF)
+		scheduler_ipi();
 
 	/* Check if we've been told to flush the icache */
 	if (action & SMP_ICACHE_FLUSH)
@@ -53,7 +55,7 @@ static irqreturn_t mailbox_interrupt(int irq, void *dev_id)
 
 /**
  * Cause the function described by call_data to be executed on the passed
- * cpu.  When the function has finished, increment the finished field of
+ * cpu.	 When the function has finished, increment the finished field of
  * call_data.
  */
 void octeon_send_ipi_single(int cpu, unsigned int action)
@@ -76,7 +78,7 @@ static inline void octeon_send_ipi_mask(const struct cpumask *mask,
 }
 
 /**
- * Detect available CPUs, populate cpu_possible_map
+ * Detect available CPUs, populate cpu_possible_mask
  */
 static void octeon_smp_hotplug_setup(void)
 {
@@ -124,8 +126,8 @@ static void octeon_smp_setup(void)
 
 #ifdef CONFIG_HOTPLUG_CPU
 	/*
-	 * The possible CPUs are all those present on the chip.  We
-	 * will assign CPU numbers for possible cores as well.  Cores
+	 * The possible CPUs are all those present on the chip.	 We
+	 * will assign CPU numbers for possible cores as well.	Cores
 	 * are always consecutively numberd from 0.
 	 */
 	for (id = 0; id < num_cores && id < NR_CPUS; id++) {
@@ -171,20 +173,9 @@ static void octeon_boot_secondary(int cpu, struct task_struct *idle)
  * After we've done initial boot, this function is called to allow the
  * board code to clean up state, if needed
  */
-static void octeon_init_secondary(void)
+static void __cpuinit octeon_init_secondary(void)
 {
-	const int coreid = cvmx_get_core_num();
-	union cvmx_ciu_intx_sum0 interrupt_enable;
 	unsigned int sr;
-
-#ifdef CONFIG_HOTPLUG_CPU
-	struct linux_app_boot_info *labi;
-
-	labi = (struct linux_app_boot_info *)PHYS_TO_XKSEG_CACHED(LABI_ADDR_IN_BOOTLOADER);
-
-	if (labi->labi_signature != LABI_SIGNATURE)
-		panic("The bootloader version on this board is incorrect.");
-#endif
 
 	sr = set_c0_status(ST0_BEV);
 	write_c0_ebase((u32)ebase);
@@ -192,20 +183,8 @@ static void octeon_init_secondary(void)
 
 	octeon_check_cpu_bist();
 	octeon_init_cvmcount();
-	/*
-	pr_info("SMP: CPU%d (CoreId %lu) started\n", cpu, coreid);
-	*/
-	/* Enable Mailbox interrupts to this core. These are the only
-	   interrupts allowed on line 3 */
-	cvmx_write_csr(CVMX_CIU_MBOX_CLRX(coreid), 0xffffffff);
-	interrupt_enable.u64 = 0;
-	interrupt_enable.s.mbox = 0x3;
-	cvmx_write_csr(CVMX_CIU_INTX_EN0((coreid * 2)), interrupt_enable.u64);
-	cvmx_write_csr(CVMX_CIU_INTX_EN0((coreid * 2 + 1)), 0);
-	cvmx_write_csr(CVMX_CIU_INTX_EN1((coreid * 2)), 0);
-	cvmx_write_csr(CVMX_CIU_INTX_EN1((coreid * 2 + 1)), 0);
-	/* Enable core interrupt processing for 2,3 and 7 */
-	set_c0_status(0x8c01);
+
+	octeon_irq_setup_secondary();
 }
 
 /**
@@ -214,14 +193,23 @@ static void octeon_init_secondary(void)
  */
 void octeon_prepare_cpus(unsigned int max_cpus)
 {
-	cvmx_write_csr(CVMX_CIU_MBOX_CLRX(cvmx_get_core_num()), 0xffffffff);
-	if (request_irq(OCTEON_IRQ_MBOX0, mailbox_interrupt, IRQF_DISABLED,
-			"mailbox0", mailbox_interrupt)) {
-		panic("Cannot request_irq(OCTEON_IRQ_MBOX0)\n");
-	}
-	if (request_irq(OCTEON_IRQ_MBOX1, mailbox_interrupt, IRQF_DISABLED,
-			"mailbox1", mailbox_interrupt)) {
-		panic("Cannot request_irq(OCTEON_IRQ_MBOX1)\n");
+#ifdef CONFIG_HOTPLUG_CPU
+	struct linux_app_boot_info *labi;
+
+	labi = (struct linux_app_boot_info *)PHYS_TO_XKSEG_CACHED(LABI_ADDR_IN_BOOTLOADER);
+
+	if (labi->labi_signature != LABI_SIGNATURE)
+		panic("The bootloader version on this board is incorrect.");
+#endif
+	/*
+	 * Only the low order mailbox bits are used for IPIs, leave
+	 * the other bits alone.
+	 */
+	cvmx_write_csr(CVMX_CIU_MBOX_CLRX(cvmx_get_core_num()), 0xffff);
+	if (request_irq(OCTEON_IRQ_MBOX0, mailbox_interrupt,
+			IRQF_PERCPU | IRQF_NO_THREAD, "SMP-IPI",
+			mailbox_interrupt)) {
+		panic("Cannot request_irq(OCTEON_IRQ_MBOX0)");
 	}
 }
 
@@ -244,6 +232,7 @@ static void octeon_smp_finish(void)
 
 	/* to generate the first CPU timer interrupt */
 	write_c0_compare(read_c0_count() + mips_hpt_frequency / HZ);
+	local_irq_enable();
 }
 
 /**
@@ -268,8 +257,6 @@ DEFINE_PER_CPU(int, cpu_state);
 
 extern void fixup_irqs(void);
 
-static DEFINE_SPINLOCK(smp_reserve_lock);
-
 static int octeon_cpu_disable(void)
 {
 	unsigned int cpu = smp_processor_id();
@@ -277,9 +264,7 @@ static int octeon_cpu_disable(void)
 	if (cpu == 0)
 		return -EBUSY;
 
-	spin_lock(&smp_reserve_lock);
-
-	cpu_clear(cpu, cpu_online_map);
+	set_cpu_online(cpu, false);
 	cpu_clear(cpu, cpu_callin_map);
 	local_irq_disable();
 	fixup_irqs();
@@ -287,8 +272,6 @@ static int octeon_cpu_disable(void)
 
 	flush_cache_all();
 	local_flush_tlb_all();
-
-	spin_unlock(&smp_reserve_lock);
 
 	return 0;
 }
@@ -349,7 +332,7 @@ extern void kernel_entry(unsigned long arg1, ...);
 
 static void start_after_reset(void)
 {
-	kernel_entry(0, 0, 0);  /* set a2 = 0 for secondary core */
+	kernel_entry(0, 0, 0);	/* set a2 = 0 for secondary core */
 }
 
 static int octeon_update_boot_vector(unsigned int cpu)
@@ -418,7 +401,7 @@ static int __cpuinit register_cavium_notifier(void)
 }
 late_initcall(register_cavium_notifier);
 
-#endif  /* CONFIG_HOTPLUG_CPU */
+#endif	/* CONFIG_HOTPLUG_CPU */
 
 struct plat_smp_ops octeon_smp_ops = {
 	.send_ipi_single	= octeon_send_ipi_single,

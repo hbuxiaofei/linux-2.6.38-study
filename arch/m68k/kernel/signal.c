@@ -42,6 +42,8 @@
 #include <linux/personality.h>
 #include <linux/tty.h>
 #include <linux/binfmts.h>
+#include <linux/module.h>
+#include <linux/tracehook.h>
 
 #include <asm/setup.h>
 #include <asm/uaccess.h>
@@ -49,13 +51,24 @@
 #include <asm/traps.h>
 #include <asm/ucontext.h>
 
-#define _BLOCKABLE (~(sigmask(SIGKILL) | sigmask(SIGSTOP)))
+#ifdef CONFIG_MMU
 
-const int frame_extra_sizes[16] = {
+/*
+ * Handle the slight differences in classic 68k and ColdFire trap frames.
+ */
+#ifdef CONFIG_COLDFIRE
+#define	FORMAT		4
+#define	FMT4SIZE	0
+#else
+#define	FORMAT		0
+#define	FMT4SIZE	sizeof(((struct frame *)0)->un.fmt4)
+#endif
+
+static const int frame_size_change[16] = {
   [1]	= -1, /* sizeof(((struct frame *)0)->un.fmt1), */
   [2]	= sizeof(((struct frame *)0)->un.fmt2),
   [3]	= sizeof(((struct frame *)0)->un.fmt3),
-  [4]	= sizeof(((struct frame *)0)->un.fmt4),
+  [4]	= FMT4SIZE,
   [5]	= -1, /* sizeof(((struct frame *)0)->un.fmt5), */
   [6]	= -1, /* sizeof(((struct frame *)0)->un.fmt6), */
   [7]	= sizeof(((struct frame *)0)->un.fmt7),
@@ -69,64 +82,147 @@ const int frame_extra_sizes[16] = {
   [15]	= -1, /* sizeof(((struct frame *)0)->un.fmtf), */
 };
 
-/*
- * Atomically swap in the new signal mask, and wait for a signal.
- */
-asmlinkage int
-sys_sigsuspend(int unused0, int unused1, old_sigset_t mask)
+static inline int frame_extra_sizes(int f)
 {
-	mask &= _BLOCKABLE;
-	spin_lock_irq(&current->sighand->siglock);
-	current->saved_sigmask = current->blocked;
-	siginitset(&current->blocked, mask);
-	recalc_sigpending();
-	spin_unlock_irq(&current->sighand->siglock);
-
-	current->state = TASK_INTERRUPTIBLE;
-	schedule();
-	set_restore_sigmask();
-
-	return -ERESTARTNOHAND;
+	return frame_size_change[f];
 }
 
-asmlinkage int
-sys_sigaction(int sig, const struct old_sigaction __user *act,
-	      struct old_sigaction __user *oact)
+int handle_kernel_fault(struct pt_regs *regs)
 {
-	struct k_sigaction new_ka, old_ka;
-	int ret;
+	const struct exception_table_entry *fixup;
+	struct pt_regs *tregs;
 
-	if (act) {
-		old_sigset_t mask;
-		if (!access_ok(VERIFY_READ, act, sizeof(*act)) ||
-		    __get_user(new_ka.sa.sa_handler, &act->sa_handler) ||
-		    __get_user(new_ka.sa.sa_restorer, &act->sa_restorer) ||
-		    __get_user(new_ka.sa.sa_flags, &act->sa_flags) ||
-		    __get_user(mask, &act->sa_mask))
-			return -EFAULT;
-		siginitset(&new_ka.sa.sa_mask, mask);
+	/* Are we prepared to handle this kernel fault? */
+	fixup = search_exception_tables(regs->pc);
+	if (!fixup)
+		return 0;
+
+	/* Create a new four word stack frame, discarding the old one. */
+	regs->stkadj = frame_extra_sizes(regs->format);
+	tregs =	(struct pt_regs *)((long)regs + regs->stkadj);
+	tregs->vector = regs->vector;
+	tregs->format = FORMAT;
+	tregs->pc = fixup->fixup;
+	tregs->sr = regs->sr;
+
+	return 1;
+}
+
+void ptrace_signal_deliver(void)
+{
+	struct pt_regs *regs = signal_pt_regs();
+	if (regs->orig_d0 < 0)
+		return;
+	switch (regs->d0) {
+	case -ERESTARTNOHAND:
+	case -ERESTARTSYS:
+	case -ERESTARTNOINTR:
+		regs->d0 = regs->orig_d0;
+		regs->orig_d0 = -1;
+		regs->pc -= 2;
+		break;
 	}
-
-	ret = do_sigaction(sig, act ? &new_ka : NULL, oact ? &old_ka : NULL);
-
-	if (!ret && oact) {
-		if (!access_ok(VERIFY_WRITE, oact, sizeof(*oact)) ||
-		    __put_user(old_ka.sa.sa_handler, &oact->sa_handler) ||
-		    __put_user(old_ka.sa.sa_restorer, &oact->sa_restorer) ||
-		    __put_user(old_ka.sa.sa_flags, &oact->sa_flags) ||
-		    __put_user(old_ka.sa.sa_mask.sig[0], &oact->sa_mask))
-			return -EFAULT;
-	}
-
-	return ret;
 }
 
-asmlinkage int
-sys_sigaltstack(const stack_t __user *uss, stack_t __user *uoss)
+static inline void push_cache (unsigned long vaddr)
 {
-	return do_sigaltstack(uss, uoss, rdusp());
+	/*
+	 * Using the old cache_push_v() was really a big waste.
+	 *
+	 * What we are trying to do is to flush 8 bytes to ram.
+	 * Flushing 2 cache lines of 16 bytes is much cheaper than
+	 * flushing 1 or 2 pages, as previously done in
+	 * cache_push_v().
+	 *                                                     Jes
+	 */
+	if (CPU_IS_040) {
+		unsigned long temp;
+
+		__asm__ __volatile__ (".chip 68040\n\t"
+				      "nop\n\t"
+				      "ptestr (%1)\n\t"
+				      "movec %%mmusr,%0\n\t"
+				      ".chip 68k"
+				      : "=r" (temp)
+				      : "a" (vaddr));
+
+		temp &= PAGE_MASK;
+		temp |= vaddr & ~PAGE_MASK;
+
+		__asm__ __volatile__ (".chip 68040\n\t"
+				      "nop\n\t"
+				      "cpushl %%bc,(%0)\n\t"
+				      ".chip 68k"
+				      : : "a" (temp));
+	}
+	else if (CPU_IS_060) {
+		unsigned long temp;
+		__asm__ __volatile__ (".chip 68060\n\t"
+				      "plpar (%0)\n\t"
+				      ".chip 68k"
+				      : "=a" (temp)
+				      : "0" (vaddr));
+		__asm__ __volatile__ (".chip 68060\n\t"
+				      "cpushl %%bc,(%0)\n\t"
+				      ".chip 68k"
+				      : : "a" (temp));
+	} else if (!CPU_IS_COLDFIRE) {
+		/*
+		 * 68030/68020 have no writeback cache;
+		 * still need to clear icache.
+		 * Note that vaddr is guaranteed to be long word aligned.
+		 */
+		unsigned long temp;
+		asm volatile ("movec %%cacr,%0" : "=r" (temp));
+		temp += 4;
+		asm volatile ("movec %0,%%caar\n\t"
+			      "movec %1,%%cacr"
+			      : : "r" (vaddr), "r" (temp));
+		asm volatile ("movec %0,%%caar\n\t"
+			      "movec %1,%%cacr"
+			      : : "r" (vaddr + 4), "r" (temp));
+	}
 }
 
+static inline void adjustformat(struct pt_regs *regs)
+{
+}
+
+static inline void save_a5_state(struct sigcontext *sc, struct pt_regs *regs)
+{
+}
+
+#else /* CONFIG_MMU */
+
+void ret_from_user_signal(void);
+void ret_from_user_rt_signal(void);
+
+static inline int frame_extra_sizes(int f)
+{
+	/* No frame size adjustments required on non-MMU CPUs */
+	return 0;
+}
+
+static inline void adjustformat(struct pt_regs *regs)
+{
+	((struct switch_stack *)regs - 1)->a5 = current->mm->start_data;
+	/*
+	 * set format byte to make stack appear modulo 4, which it will
+	 * be when doing the rte
+	 */
+	regs->format = 0x4;
+}
+
+static inline void save_a5_state(struct sigcontext *sc, struct pt_regs *regs)
+{
+	sc->sc_a5 = ((struct switch_stack *)regs - 1)->a5;
+}
+
+static inline void push_cache(unsigned long vaddr)
+{
+}
+
+#endif /* CONFIG_MMU */
 
 /*
  * Do a signal return; undo the signal stack.
@@ -157,6 +253,12 @@ struct rt_sigframe
 	struct ucontext uc;
 };
 
+#define FPCONTEXT_SIZE	216
+#define uc_fpstate	uc_filler[0]
+#define uc_formatvec	uc_filler[FPCONTEXT_SIZE/4]
+#define uc_extra	uc_filler[FPCONTEXT_SIZE/4+1]
+
+#ifdef CONFIG_FPU
 
 static unsigned char fpu_version;	/* version number of fpu, set by setup_frame */
 
@@ -173,7 +275,8 @@ static inline int restore_fpu_state(struct sigcontext *sc)
 
 	if (CPU_IS_060 ? sc->sc_fpstate[2] : sc->sc_fpstate[0]) {
 	    /* Verify the frame format.  */
-	    if (!CPU_IS_060 && (sc->sc_fpstate[0] != fpu_version))
+	    if (!(CPU_IS_060 || CPU_IS_COLDFIRE) &&
+		 (sc->sc_fpstate[0] != fpu_version))
 		goto out;
 	    if (CPU_IS_020_OR_030) {
 		if (m68k_fputype & FPU_68881 &&
@@ -192,34 +295,53 @@ static inline int restore_fpu_state(struct sigcontext *sc)
                       sc->sc_fpstate[3] == 0x60 ||
 		      sc->sc_fpstate[3] == 0xe0))
 		    goto out;
+	    } else if (CPU_IS_COLDFIRE) {
+		if (!(sc->sc_fpstate[0] == 0x00 ||
+		      sc->sc_fpstate[0] == 0x05 ||
+		      sc->sc_fpstate[0] == 0xe5))
+		    goto out;
 	    } else
 		goto out;
 
-	    __asm__ volatile (".chip 68k/68881\n\t"
-			      "fmovemx %0,%%fp0-%%fp1\n\t"
-			      "fmoveml %1,%%fpcr/%%fpsr/%%fpiar\n\t"
-			      ".chip 68k"
-			      : /* no outputs */
-			      : "m" (*sc->sc_fpregs), "m" (*sc->sc_fpcntl));
+	    if (CPU_IS_COLDFIRE) {
+		__asm__ volatile ("fmovemd %0,%%fp0-%%fp1\n\t"
+				  "fmovel %1,%%fpcr\n\t"
+				  "fmovel %2,%%fpsr\n\t"
+				  "fmovel %3,%%fpiar"
+				  : /* no outputs */
+				  : "m" (sc->sc_fpregs[0]),
+				    "m" (sc->sc_fpcntl[0]),
+				    "m" (sc->sc_fpcntl[1]),
+				    "m" (sc->sc_fpcntl[2]));
+	    } else {
+		__asm__ volatile (".chip 68k/68881\n\t"
+				  "fmovemx %0,%%fp0-%%fp1\n\t"
+				  "fmoveml %1,%%fpcr/%%fpsr/%%fpiar\n\t"
+				  ".chip 68k"
+				  : /* no outputs */
+				  : "m" (*sc->sc_fpregs),
+				    "m" (*sc->sc_fpcntl));
+	    }
 	}
-	__asm__ volatile (".chip 68k/68881\n\t"
-			  "frestore %0\n\t"
-			  ".chip 68k" : : "m" (*sc->sc_fpstate));
+
+	if (CPU_IS_COLDFIRE) {
+		__asm__ volatile ("frestore %0" : : "m" (*sc->sc_fpstate));
+	} else {
+		__asm__ volatile (".chip 68k/68881\n\t"
+				  "frestore %0\n\t"
+				  ".chip 68k"
+				  : : "m" (*sc->sc_fpstate));
+	}
 	err = 0;
 
 out:
 	return err;
 }
 
-#define FPCONTEXT_SIZE	216
-#define uc_fpstate	uc_filler[0]
-#define uc_formatvec	uc_filler[FPCONTEXT_SIZE/4]
-#define uc_extra	uc_filler[FPCONTEXT_SIZE/4+1]
-
 static inline int rt_restore_fpu_state(struct ucontext __user *uc)
 {
 	unsigned char fpstate[FPCONTEXT_SIZE];
-	int context_size = CPU_IS_060 ? 8 : 0;
+	int context_size = CPU_IS_060 ? 8 : (CPU_IS_COLDFIRE ? 12 : 0);
 	fpregset_t fpregs;
 	int err = 1;
 
@@ -238,10 +360,11 @@ static inline int rt_restore_fpu_state(struct ucontext __user *uc)
 	if (__get_user(*(long *)fpstate, (long __user *)&uc->uc_fpstate))
 		goto out;
 	if (CPU_IS_060 ? fpstate[2] : fpstate[0]) {
-		if (!CPU_IS_060)
+		if (!(CPU_IS_060 || CPU_IS_COLDFIRE))
 			context_size = fpstate[1];
 		/* Verify the frame format.  */
-		if (!CPU_IS_060 && (fpstate[0] != fpu_version))
+		if (!(CPU_IS_060 || CPU_IS_COLDFIRE) &&
+		     (fpstate[0] != fpu_version))
 			goto out;
 		if (CPU_IS_020_OR_030) {
 			if (m68k_fputype & FPU_68881 &&
@@ -260,36 +383,210 @@ static inline int rt_restore_fpu_state(struct ucontext __user *uc)
 			      fpstate[3] == 0x60 ||
 			      fpstate[3] == 0xe0))
 				goto out;
+		} else if (CPU_IS_COLDFIRE) {
+			if (!(fpstate[3] == 0x00 ||
+			      fpstate[3] == 0x05 ||
+			      fpstate[3] == 0xe5))
+				goto out;
 		} else
 			goto out;
 		if (__copy_from_user(&fpregs, &uc->uc_mcontext.fpregs,
 				     sizeof(fpregs)))
 			goto out;
-		__asm__ volatile (".chip 68k/68881\n\t"
-				  "fmovemx %0,%%fp0-%%fp7\n\t"
-				  "fmoveml %1,%%fpcr/%%fpsr/%%fpiar\n\t"
-				  ".chip 68k"
-				  : /* no outputs */
-				  : "m" (*fpregs.f_fpregs),
-				    "m" (*fpregs.f_fpcntl));
+
+		if (CPU_IS_COLDFIRE) {
+			__asm__ volatile ("fmovemd %0,%%fp0-%%fp7\n\t"
+					  "fmovel %1,%%fpcr\n\t"
+					  "fmovel %2,%%fpsr\n\t"
+					  "fmovel %3,%%fpiar"
+					  : /* no outputs */
+					  : "m" (fpregs.f_fpregs[0]),
+					    "m" (fpregs.f_fpcntl[0]),
+					    "m" (fpregs.f_fpcntl[1]),
+					    "m" (fpregs.f_fpcntl[2]));
+		} else {
+			__asm__ volatile (".chip 68k/68881\n\t"
+					  "fmovemx %0,%%fp0-%%fp7\n\t"
+					  "fmoveml %1,%%fpcr/%%fpsr/%%fpiar\n\t"
+					  ".chip 68k"
+					  : /* no outputs */
+					  : "m" (*fpregs.f_fpregs),
+					    "m" (*fpregs.f_fpcntl));
+		}
 	}
 	if (context_size &&
 	    __copy_from_user(fpstate + 4, (long __user *)&uc->uc_fpstate + 1,
 			     context_size))
 		goto out;
-	__asm__ volatile (".chip 68k/68881\n\t"
-			  "frestore %0\n\t"
-			  ".chip 68k" : : "m" (*fpstate));
+
+	if (CPU_IS_COLDFIRE) {
+		__asm__ volatile ("frestore %0" : : "m" (*fpstate));
+	} else {
+		__asm__ volatile (".chip 68k/68881\n\t"
+				  "frestore %0\n\t"
+				  ".chip 68k"
+				  : : "m" (*fpstate));
+	}
 	err = 0;
 
 out:
 	return err;
 }
 
+/*
+ * Set up a signal frame.
+ */
+static inline void save_fpu_state(struct sigcontext *sc, struct pt_regs *regs)
+{
+	if (FPU_IS_EMU) {
+		/* save registers */
+		memcpy(sc->sc_fpcntl, current->thread.fpcntl, 12);
+		memcpy(sc->sc_fpregs, current->thread.fp, 24);
+		return;
+	}
+
+	if (CPU_IS_COLDFIRE) {
+		__asm__ volatile ("fsave %0"
+				  : : "m" (*sc->sc_fpstate) : "memory");
+	} else {
+		__asm__ volatile (".chip 68k/68881\n\t"
+				  "fsave %0\n\t"
+				  ".chip 68k"
+				  : : "m" (*sc->sc_fpstate) : "memory");
+	}
+
+	if (CPU_IS_060 ? sc->sc_fpstate[2] : sc->sc_fpstate[0]) {
+		fpu_version = sc->sc_fpstate[0];
+		if (CPU_IS_020_OR_030 &&
+		    regs->vector >= (VEC_FPBRUC * 4) &&
+		    regs->vector <= (VEC_FPNAN * 4)) {
+			/* Clear pending exception in 68882 idle frame */
+			if (*(unsigned short *) sc->sc_fpstate == 0x1f38)
+				sc->sc_fpstate[0x38] |= 1 << 3;
+		}
+
+		if (CPU_IS_COLDFIRE) {
+			__asm__ volatile ("fmovemd %%fp0-%%fp1,%0\n\t"
+					  "fmovel %%fpcr,%1\n\t"
+					  "fmovel %%fpsr,%2\n\t"
+					  "fmovel %%fpiar,%3"
+					  : "=m" (sc->sc_fpregs[0]),
+					    "=m" (sc->sc_fpcntl[0]),
+					    "=m" (sc->sc_fpcntl[1]),
+					    "=m" (sc->sc_fpcntl[2])
+					  : /* no inputs */
+					  : "memory");
+		} else {
+			__asm__ volatile (".chip 68k/68881\n\t"
+					  "fmovemx %%fp0-%%fp1,%0\n\t"
+					  "fmoveml %%fpcr/%%fpsr/%%fpiar,%1\n\t"
+					  ".chip 68k"
+					  : "=m" (*sc->sc_fpregs),
+					    "=m" (*sc->sc_fpcntl)
+					  : /* no inputs */
+					  : "memory");
+		}
+	}
+}
+
+static inline int rt_save_fpu_state(struct ucontext __user *uc, struct pt_regs *regs)
+{
+	unsigned char fpstate[FPCONTEXT_SIZE];
+	int context_size = CPU_IS_060 ? 8 : (CPU_IS_COLDFIRE ? 12 : 0);
+	int err = 0;
+
+	if (FPU_IS_EMU) {
+		/* save fpu control register */
+		err |= copy_to_user(uc->uc_mcontext.fpregs.f_fpcntl,
+				current->thread.fpcntl, 12);
+		/* save all other fpu register */
+		err |= copy_to_user(uc->uc_mcontext.fpregs.f_fpregs,
+				current->thread.fp, 96);
+		return err;
+	}
+
+	if (CPU_IS_COLDFIRE) {
+		__asm__ volatile ("fsave %0" : : "m" (*fpstate) : "memory");
+	} else {
+		__asm__ volatile (".chip 68k/68881\n\t"
+				  "fsave %0\n\t"
+				  ".chip 68k"
+				  : : "m" (*fpstate) : "memory");
+	}
+
+	err |= __put_user(*(long *)fpstate, (long __user *)&uc->uc_fpstate);
+	if (CPU_IS_060 ? fpstate[2] : fpstate[0]) {
+		fpregset_t fpregs;
+		if (!(CPU_IS_060 || CPU_IS_COLDFIRE))
+			context_size = fpstate[1];
+		fpu_version = fpstate[0];
+		if (CPU_IS_020_OR_030 &&
+		    regs->vector >= (VEC_FPBRUC * 4) &&
+		    regs->vector <= (VEC_FPNAN * 4)) {
+			/* Clear pending exception in 68882 idle frame */
+			if (*(unsigned short *) fpstate == 0x1f38)
+				fpstate[0x38] |= 1 << 3;
+		}
+		if (CPU_IS_COLDFIRE) {
+			__asm__ volatile ("fmovemd %%fp0-%%fp7,%0\n\t"
+					  "fmovel %%fpcr,%1\n\t"
+					  "fmovel %%fpsr,%2\n\t"
+					  "fmovel %%fpiar,%3"
+					  : "=m" (fpregs.f_fpregs[0]),
+					    "=m" (fpregs.f_fpcntl[0]),
+					    "=m" (fpregs.f_fpcntl[1]),
+					    "=m" (fpregs.f_fpcntl[2])
+					  : /* no inputs */
+					  : "memory");
+		} else {
+			__asm__ volatile (".chip 68k/68881\n\t"
+					  "fmovemx %%fp0-%%fp7,%0\n\t"
+					  "fmoveml %%fpcr/%%fpsr/%%fpiar,%1\n\t"
+					  ".chip 68k"
+					  : "=m" (*fpregs.f_fpregs),
+					    "=m" (*fpregs.f_fpcntl)
+					  : /* no inputs */
+					  : "memory");
+		}
+		err |= copy_to_user(&uc->uc_mcontext.fpregs, &fpregs,
+				    sizeof(fpregs));
+	}
+	if (context_size)
+		err |= copy_to_user((long __user *)&uc->uc_fpstate + 1, fpstate + 4,
+				    context_size);
+	return err;
+}
+
+#else /* CONFIG_FPU */
+
+/*
+ * For the case with no FPU configured these all do nothing.
+ */
+static inline int restore_fpu_state(struct sigcontext *sc)
+{
+	return 0;
+}
+
+static inline int rt_restore_fpu_state(struct ucontext __user *uc)
+{
+	return 0;
+}
+
+static inline void save_fpu_state(struct sigcontext *sc, struct pt_regs *regs)
+{
+}
+
+static inline int rt_save_fpu_state(struct ucontext __user *uc, struct pt_regs *regs)
+{
+	return 0;
+}
+
+#endif /* CONFIG_FPU */
+
 static int mangle_kernel_stack(struct pt_regs *regs, int formatvec,
 			       void __user *fp)
 {
-	int fsize = frame_extra_sizes[formatvec >> 12];
+	int fsize = frame_extra_sizes(formatvec >> 12);
 	if (fsize < 0) {
 		/*
 		 * user process trying to return with weird frame format
@@ -314,8 +611,12 @@ static int mangle_kernel_stack(struct pt_regs *regs, int formatvec,
 		regs->format = formatvec >> 12;
 		regs->vector = formatvec & 0xfff;
 #define frame_offset (sizeof(struct pt_regs)+sizeof(struct switch_stack))
-		__asm__ __volatile__
-			("   movel %0,%/a0\n\t"
+		__asm__ __volatile__ (
+#ifdef CONFIG_COLDFIRE
+			 "   movel %0,%/sp\n\t"
+			 "   bra ret_from_signal\n"
+#else
+			 "   movel %0,%/a0\n\t"
 			 "   subl %1,%/a0\n\t"     /* make room on stack */
 			 "   movel %/a0,%/sp\n\t"  /* set stack pointer */
 			 /* move switch_stack and pt_regs */
@@ -328,6 +629,7 @@ static int mangle_kernel_stack(struct pt_regs *regs, int formatvec,
 			 "2: movel %4@+,%/a0@+\n\t"
 			 "   dbra %1,2b\n\t"
 			 "   bral ret_from_signal\n"
+#endif
 			 : /* no outputs, it doesn't ever return */
 			 : "a" (sw), "d" (fsize), "d" (frame_offset/4-1),
 			   "n" (frame_offset), "a" (buf + fsize/4)
@@ -342,7 +644,7 @@ restore_sigcontext(struct pt_regs *regs, struct sigcontext __user *usc, void __u
 {
 	int formatvec;
 	struct sigcontext context;
-	int err;
+	int err = 0;
 
 	/* Always make any pending restarted system calls return -EINTR */
 	current_thread_info()->restart_block.fn = do_no_restart_syscall;
@@ -413,8 +715,9 @@ rt_restore_ucontext(struct pt_regs *regs, struct switch_stack *sw,
 	err |= __get_user(temp, &uc->uc_formatvec);
 
 	err |= rt_restore_fpu_state(uc);
+	err |= restore_altstack(&uc->uc_stack);
 
-	if (err || do_sigaltstack(&uc->uc_stack, NULL, usp) == -EFAULT)
+	if (err)
 		goto badframe;
 
 	if (mangle_kernel_stack(regs, temp, &uc->uc_extra))
@@ -442,9 +745,7 @@ asmlinkage int do_sigreturn(unsigned long __unused)
 			      sizeof(frame->extramask))))
 		goto badframe;
 
-	sigdelsetmask(&set, ~_BLOCKABLE);
-	current->blocked = set;
-	recalc_sigpending();
+	set_current_blocked(&set);
 
 	if (restore_sigcontext(regs, &frame->sc, frame + 1))
 		goto badframe;
@@ -468,9 +769,7 @@ asmlinkage int do_rt_sigreturn(unsigned long __unused)
 	if (__copy_from_user(&set, &frame->uc.uc_sigmask, sizeof(set)))
 		goto badframe;
 
-	sigdelsetmask(&set, ~_BLOCKABLE);
-	current->blocked = set;
-	recalc_sigpending();
+	set_current_blocked(&set);
 
 	if (rt_restore_ucontext(regs, sw, &frame->uc))
 		goto badframe;
@@ -479,95 +778,6 @@ asmlinkage int do_rt_sigreturn(unsigned long __unused)
 badframe:
 	force_sig(SIGSEGV, current);
 	return 0;
-}
-
-/*
- * Set up a signal frame.
- */
-
-static inline void save_fpu_state(struct sigcontext *sc, struct pt_regs *regs)
-{
-	if (FPU_IS_EMU) {
-		/* save registers */
-		memcpy(sc->sc_fpcntl, current->thread.fpcntl, 12);
-		memcpy(sc->sc_fpregs, current->thread.fp, 24);
-		return;
-	}
-
-	__asm__ volatile (".chip 68k/68881\n\t"
-			  "fsave %0\n\t"
-			  ".chip 68k"
-			  : : "m" (*sc->sc_fpstate) : "memory");
-
-	if (CPU_IS_060 ? sc->sc_fpstate[2] : sc->sc_fpstate[0]) {
-		fpu_version = sc->sc_fpstate[0];
-		if (CPU_IS_020_OR_030 &&
-		    regs->vector >= (VEC_FPBRUC * 4) &&
-		    regs->vector <= (VEC_FPNAN * 4)) {
-			/* Clear pending exception in 68882 idle frame */
-			if (*(unsigned short *) sc->sc_fpstate == 0x1f38)
-				sc->sc_fpstate[0x38] |= 1 << 3;
-		}
-		__asm__ volatile (".chip 68k/68881\n\t"
-				  "fmovemx %%fp0-%%fp1,%0\n\t"
-				  "fmoveml %%fpcr/%%fpsr/%%fpiar,%1\n\t"
-				  ".chip 68k"
-				  : "=m" (*sc->sc_fpregs),
-				    "=m" (*sc->sc_fpcntl)
-				  : /* no inputs */
-				  : "memory");
-	}
-}
-
-static inline int rt_save_fpu_state(struct ucontext __user *uc, struct pt_regs *regs)
-{
-	unsigned char fpstate[FPCONTEXT_SIZE];
-	int context_size = CPU_IS_060 ? 8 : 0;
-	int err = 0;
-
-	if (FPU_IS_EMU) {
-		/* save fpu control register */
-		err |= copy_to_user(uc->uc_mcontext.fpregs.f_fpcntl,
-				current->thread.fpcntl, 12);
-		/* save all other fpu register */
-		err |= copy_to_user(uc->uc_mcontext.fpregs.f_fpregs,
-				current->thread.fp, 96);
-		return err;
-	}
-
-	__asm__ volatile (".chip 68k/68881\n\t"
-			  "fsave %0\n\t"
-			  ".chip 68k"
-			  : : "m" (*fpstate) : "memory");
-
-	err |= __put_user(*(long *)fpstate, (long __user *)&uc->uc_fpstate);
-	if (CPU_IS_060 ? fpstate[2] : fpstate[0]) {
-		fpregset_t fpregs;
-		if (!CPU_IS_060)
-			context_size = fpstate[1];
-		fpu_version = fpstate[0];
-		if (CPU_IS_020_OR_030 &&
-		    regs->vector >= (VEC_FPBRUC * 4) &&
-		    regs->vector <= (VEC_FPNAN * 4)) {
-			/* Clear pending exception in 68882 idle frame */
-			if (*(unsigned short *) fpstate == 0x1f38)
-				fpstate[0x38] |= 1 << 3;
-		}
-		__asm__ volatile (".chip 68k/68881\n\t"
-				  "fmovemx %%fp0-%%fp7,%0\n\t"
-				  "fmoveml %%fpcr/%%fpsr/%%fpiar,%1\n\t"
-				  ".chip 68k"
-				  : "=m" (*fpregs.f_fpregs),
-				    "=m" (*fpregs.f_fpcntl)
-				  : /* no inputs */
-				  : "memory");
-		err |= copy_to_user(&uc->uc_mcontext.fpregs, &fpregs,
-				    sizeof(fpregs));
-	}
-	if (context_size)
-		err |= copy_to_user((long __user *)&uc->uc_fpstate + 1, fpstate + 4,
-				    context_size);
-	return err;
 }
 
 static void setup_sigcontext(struct sigcontext *sc, struct pt_regs *regs,
@@ -582,6 +792,7 @@ static void setup_sigcontext(struct sigcontext *sc, struct pt_regs *regs,
 	sc->sc_sr = regs->sr;
 	sc->sc_pc = regs->pc;
 	sc->sc_formatvec = regs->format << 12 | regs->vector;
+	save_a5_state(sc, regs);
 	save_fpu_state(sc, regs);
 }
 
@@ -615,67 +826,6 @@ static inline int rt_setup_ucontext(struct ucontext __user *uc, struct pt_regs *
 	return err;
 }
 
-static inline void push_cache (unsigned long vaddr)
-{
-	/*
-	 * Using the old cache_push_v() was really a big waste.
-	 *
-	 * What we are trying to do is to flush 8 bytes to ram.
-	 * Flushing 2 cache lines of 16 bytes is much cheaper than
-	 * flushing 1 or 2 pages, as previously done in
-	 * cache_push_v().
-	 *                                                     Jes
-	 */
-	if (CPU_IS_040) {
-		unsigned long temp;
-
-		__asm__ __volatile__ (".chip 68040\n\t"
-				      "nop\n\t"
-				      "ptestr (%1)\n\t"
-				      "movec %%mmusr,%0\n\t"
-				      ".chip 68k"
-				      : "=r" (temp)
-				      : "a" (vaddr));
-
-		temp &= PAGE_MASK;
-		temp |= vaddr & ~PAGE_MASK;
-
-		__asm__ __volatile__ (".chip 68040\n\t"
-				      "nop\n\t"
-				      "cpushl %%bc,(%0)\n\t"
-				      ".chip 68k"
-				      : : "a" (temp));
-	}
-	else if (CPU_IS_060) {
-		unsigned long temp;
-		__asm__ __volatile__ (".chip 68060\n\t"
-				      "plpar (%0)\n\t"
-				      ".chip 68k"
-				      : "=a" (temp)
-				      : "0" (vaddr));
-		__asm__ __volatile__ (".chip 68060\n\t"
-				      "cpushl %%bc,(%0)\n\t"
-				      ".chip 68k"
-				      : : "a" (temp));
-	}
-	else {
-		/*
-		 * 68030/68020 have no writeback cache;
-		 * still need to clear icache.
-		 * Note that vaddr is guaranteed to be long word aligned.
-		 */
-		unsigned long temp;
-		asm volatile ("movec %%cacr,%0" : "=r" (temp));
-		temp += 4;
-		asm volatile ("movec %0,%%caar\n\t"
-			      "movec %1,%%cacr"
-			      : : "r" (vaddr), "r" (temp));
-		asm volatile ("movec %0,%%caar\n\t"
-			      "movec %1,%%cacr"
-			      : : "r" (vaddr + 4), "r" (temp));
-	}
-}
-
 static inline void __user *
 get_sigframe(struct k_sigaction *ka, struct pt_regs *regs, size_t frame_size)
 {
@@ -696,7 +846,7 @@ static int setup_frame (int sig, struct k_sigaction *ka,
 			 sigset_t *set, struct pt_regs *regs)
 {
 	struct sigframe __user *frame;
-	int fsize = frame_extra_sizes[regs->format];
+	int fsize = frame_extra_sizes(regs->format);
 	struct sigcontext context;
 	int err = 0;
 
@@ -731,10 +881,14 @@ static int setup_frame (int sig, struct k_sigaction *ka,
 	err |= copy_to_user (&frame->sc, &context, sizeof(context));
 
 	/* Set up to return from userspace.  */
+#ifdef CONFIG_MMU
 	err |= __put_user(frame->retcode, &frame->pretcode);
 	/* moveq #,d0; trap #0 */
 	err |= __put_user(0x70004e40 + (__NR_sigreturn << 16),
 			  (long __user *)(frame->retcode));
+#else
+	err |= __put_user((void *) ret_from_user_signal, &frame->pretcode);
+#endif
 
 	if (err)
 		goto give_sigsegv;
@@ -747,6 +901,7 @@ static int setup_frame (int sig, struct k_sigaction *ka,
 	 */
 	wrusp ((unsigned long) frame);
 	regs->pc = (unsigned long) ka->sa.sa_handler;
+	adjustformat(regs);
 
 	/*
 	 * This is subtle; if we build more than one sigframe, all but the
@@ -781,7 +936,7 @@ static int setup_rt_frame (int sig, struct k_sigaction *ka, siginfo_t *info,
 			    sigset_t *set, struct pt_regs *regs)
 {
 	struct rt_sigframe __user *frame;
-	int fsize = frame_extra_sizes[regs->format];
+	int fsize = frame_extra_sizes(regs->format);
 	int err = 0;
 
 	if (fsize < 0) {
@@ -810,15 +965,12 @@ static int setup_rt_frame (int sig, struct k_sigaction *ka, siginfo_t *info,
 	/* Create the ucontext.  */
 	err |= __put_user(0, &frame->uc.uc_flags);
 	err |= __put_user(NULL, &frame->uc.uc_link);
-	err |= __put_user((void __user *)current->sas_ss_sp,
-			  &frame->uc.uc_stack.ss_sp);
-	err |= __put_user(sas_ss_flags(rdusp()),
-			  &frame->uc.uc_stack.ss_flags);
-	err |= __put_user(current->sas_ss_size, &frame->uc.uc_stack.ss_size);
+	err |= __save_altstack(&frame->uc.uc_stack, rdusp());
 	err |= rt_setup_ucontext(&frame->uc, regs);
 	err |= copy_to_user (&frame->uc.uc_sigmask, set, sizeof(*set));
 
 	/* Set up to return from userspace.  */
+#ifdef CONFIG_MMU
 	err |= __put_user(frame->retcode, &frame->pretcode);
 #ifdef __mcoldfire__
 	/* movel #__NR_rt_sigreturn,d0; trap #0 */
@@ -831,6 +983,9 @@ static int setup_rt_frame (int sig, struct k_sigaction *ka, siginfo_t *info,
 			  (long __user *)(frame->retcode + 0));
 	err |= __put_user(0x4e40, (short __user *)(frame->retcode + 4));
 #endif
+#else
+	err |= __put_user((void *) ret_from_user_rt_signal, &frame->pretcode);
+#endif /* CONFIG_MMU */
 
 	if (err)
 		goto give_sigsegv;
@@ -843,6 +998,7 @@ static int setup_rt_frame (int sig, struct k_sigaction *ka, siginfo_t *info,
 	 */
 	wrusp ((unsigned long) frame);
 	regs->pc = (unsigned long) ka->sa.sa_handler;
+	adjustformat(regs);
 
 	/*
 	 * This is subtle; if we build more than one sigframe, all but the
@@ -906,28 +1062,14 @@ handle_restart(struct pt_regs *regs, struct k_sigaction *ka, int has_handler)
 	}
 }
 
-void ptrace_signal_deliver(struct pt_regs *regs, void *cookie)
-{
-	if (regs->orig_d0 < 0)
-		return;
-	switch (regs->d0) {
-	case -ERESTARTNOHAND:
-	case -ERESTARTSYS:
-	case -ERESTARTNOINTR:
-		regs->d0 = regs->orig_d0;
-		regs->orig_d0 = -1;
-		regs->pc -= 2;
-		break;
-	}
-}
-
 /*
  * OK, we're invoking a handler
  */
 static void
 handle_signal(int sig, struct k_sigaction *ka, siginfo_t *info,
-	      sigset_t *oldset, struct pt_regs *regs)
+	      struct pt_regs *regs)
 {
+	sigset_t *oldset = sigmask_to_save();
 	int err;
 	/* are we from a system call? */
 	if (regs->orig_d0 >= 0)
@@ -943,17 +1085,12 @@ handle_signal(int sig, struct k_sigaction *ka, siginfo_t *info,
 	if (err)
 		return;
 
-	sigorsets(&current->blocked,&current->blocked,&ka->sa.sa_mask);
-	if (!(ka->sa.sa_flags & SA_NODEFER))
-		sigaddset(&current->blocked,sig);
-	recalc_sigpending();
+	signal_delivered(sig, info, ka, regs, 0);
 
 	if (test_thread_flag(TIF_DELAYED_TRACE)) {
 		regs->sr &= ~0x8000;
 		send_sig(SIGTRAP, current, 1);
 	}
-
-	clear_thread_flag(TIF_RESTORE_SIGMASK);
 }
 
 /*
@@ -961,24 +1098,18 @@ handle_signal(int sig, struct k_sigaction *ka, siginfo_t *info,
  * want to handle. Thus you cannot kill init even with a SIGKILL even by
  * mistake.
  */
-asmlinkage void do_signal(struct pt_regs *regs)
+static void do_signal(struct pt_regs *regs)
 {
 	siginfo_t info;
 	struct k_sigaction ka;
 	int signr;
-	sigset_t *oldset;
 
 	current->thread.esp0 = (unsigned long) regs;
-
-	if (test_thread_flag(TIF_RESTORE_SIGMASK))
-		oldset = &current->saved_sigmask;
-	else
-		oldset = &current->blocked;
 
 	signr = get_signal_to_deliver(&info, &ka, regs, NULL);
 	if (signr > 0) {
 		/* Whee!  Actually deliver the signal.  */
-		handle_signal(signr, &ka, &info, oldset, regs);
+		handle_signal(signr, &ka, &info, regs);
 		return;
 	}
 
@@ -988,8 +1119,14 @@ asmlinkage void do_signal(struct pt_regs *regs)
 		handle_restart(regs, NULL, 0);
 
 	/* If there's no signal to deliver, we just restore the saved mask.  */
-	if (test_thread_flag(TIF_RESTORE_SIGMASK)) {
-		clear_thread_flag(TIF_RESTORE_SIGMASK);
-		sigprocmask(SIG_SETMASK, &current->saved_sigmask, NULL);
-	}
+	restore_saved_sigmask();
+}
+
+void do_notify_resume(struct pt_regs *regs)
+{
+	if (test_thread_flag(TIF_SIGPENDING))
+		do_signal(regs);
+
+	if (test_and_clear_thread_flag(TIF_NOTIFY_RESUME))
+		tracehook_notify_resume(regs);
 }

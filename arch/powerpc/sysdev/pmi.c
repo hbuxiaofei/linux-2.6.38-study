@@ -28,6 +28,7 @@
 #include <linux/slab.h>
 #include <linux/completion.h>
 #include <linux/spinlock.h>
+#include <linux/module.h>
 #include <linux/workqueue.h>
 #include <linux/of_device.h>
 #include <linux/of_platform.h>
@@ -121,8 +122,7 @@ static void pmi_notify_handlers(struct work_struct *work)
 	spin_unlock(&data->handler_spinlock);
 }
 
-static int pmi_of_probe(struct platform_device *dev,
-			const struct of_device_id *match)
+static int pmi_of_probe(struct platform_device *dev)
 {
 	struct device_node *np = dev->dev.of_node;
 	int rc;
@@ -205,7 +205,7 @@ static int pmi_of_remove(struct platform_device *dev)
 	return 0;
 }
 
-static struct of_platform_driver pmi_of_platform_driver = {
+static struct platform_driver pmi_of_platform_driver = {
 	.probe		= pmi_of_probe,
 	.remove		= pmi_of_remove,
 	.driver = {
@@ -214,18 +214,7 @@ static struct of_platform_driver pmi_of_platform_driver = {
 		.of_match_table = pmi_match,
 	},
 };
-
-static int __init pmi_module_init(void)
-{
-	return of_register_platform_driver(&pmi_of_platform_driver);
-}
-module_init(pmi_module_init);
-
-static void __exit pmi_module_exit(void)
-{
-	of_unregister_platform_driver(&pmi_of_platform_driver);
-}
-module_exit(pmi_module_exit);
+module_platform_driver(pmi_of_platform_driver);
 
 int pmi_send_message(pmi_message_t msg)
 {

@@ -24,13 +24,12 @@
  * not any responsibility to update it.
  */
 
+#include <linux/export.h>
 #include <linux/types.h>
 #include <linux/stddef.h>
 #include <linux/compiler.h>
-#include <linux/module.h>
 
 #include <linux/string.h>
-#include <asm/system.h>
 
 #ifdef __HAVE_ARCH_MEMCPY
 #ifndef CONFIG_OPT_LIB_FUNCTION
@@ -63,8 +62,8 @@ void *memcpy(void *v_dst, const void *v_src, __kernel_size_t c)
 	if (likely(c >= 4)) {
 		unsigned  value, buf_hold;
 
-		/* Align the dstination to a word boundry. */
-		/* This is done in an endian independant manner. */
+		/* Align the destination to a word boundary. */
+		/* This is done in an endian independent manner. */
 		switch ((unsigned long)dst & 3) {
 		case 1:
 			*dst++ = *src++;
@@ -80,7 +79,7 @@ void *memcpy(void *v_dst, const void *v_src, __kernel_size_t c)
 		i_dst = (void *)dst;
 
 		/* Choose a copy scheme based on the source */
-		/* alignment relative to dstination. */
+		/* alignment relative to destination. */
 		switch ((unsigned long)src & 3) {
 		case 0x0:	/* Both byte offsets are aligned */
 			i_src  = (const void *)src;
@@ -104,12 +103,12 @@ void *memcpy(void *v_dst, const void *v_src, __kernel_size_t c)
 			}
 #else
 			/* Load the holding buffer */
-			buf_hold = (*i_src++ & 0xFFFFFF00) >>8;
+			buf_hold = (*i_src++ & 0xFFFFFF00) >> 8;
 
 			for (; c >= 4; c -= 4) {
 				value = *i_src++;
 				*i_dst++ = buf_hold | ((value & 0xFF) << 24);
-				buf_hold = (value & 0xFFFFFF00) >>8;
+				buf_hold = (value & 0xFFFFFF00) >> 8;
 			}
 #endif
 			/* Realign the source */
@@ -130,12 +129,12 @@ void *memcpy(void *v_dst, const void *v_src, __kernel_size_t c)
 			}
 #else
 			/* Load the holding buffer */
-			buf_hold = (*i_src++ & 0xFFFF0000 )>>16;
+			buf_hold = (*i_src++ & 0xFFFF0000) >> 16;
 
 			for (; c >= 4; c -= 4) {
 				value = *i_src++;
-				*i_dst++ = buf_hold | ((value & 0xFFFF)<<16);
-				buf_hold = (value & 0xFFFF0000) >>16;
+				*i_dst++ = buf_hold | ((value & 0xFFFF) << 16);
+				buf_hold = (value & 0xFFFF0000) >> 16;
 			}
 #endif
 			/* Realign the source */
@@ -173,7 +172,7 @@ void *memcpy(void *v_dst, const void *v_src, __kernel_size_t c)
 	}
 
 	/* Finish off any remaining bytes */
-	/* simple fast copy, ... unless a cache boundry is crossed */
+	/* simple fast copy, ... unless a cache boundary is crossed */
 	switch (c) {
 	case 3:
 		*dst++ = *src++;

@@ -55,7 +55,6 @@
 #include <linux/mutex.h>
 #include <asm/io.h>
 #include <asm/irq.h>
-#include <asm/system.h>
 #include <asm/byteorder.h>
 
 	/* FIXME ohci.h is ONLY for internal use by the OHCI driver.
@@ -74,7 +73,7 @@ MODULE_LICENSE("GPL");
 #define INT_MODULE_PARM(n, v) static int n = v;module_param(n, int, 0444)
 INT_MODULE_PARM(testing, 0);
 /* Some boards misreport power switching/overcurrent*/
-static int distrust_firmware = 1;
+static bool distrust_firmware = 1;
 module_param(distrust_firmware, bool, 0);
 MODULE_PARM_DESC(distrust_firmware, "true to distrust firmware power/overcurren"
 	"t setup");
@@ -2604,13 +2603,14 @@ static int u132_roothub_descriptor(struct u132 *u132,
 	retval = u132_read_pcimem(u132, roothub.b, &rh_b);
 	if (retval)
 		return retval;
-	memset(desc->bitmap, 0xff, sizeof(desc->bitmap));
-	desc->bitmap[0] = rh_b & RH_B_DR;
+	memset(desc->u.hs.DeviceRemovable, 0xff,
+			sizeof(desc->u.hs.DeviceRemovable));
+	desc->u.hs.DeviceRemovable[0] = rh_b & RH_B_DR;
 	if (u132->num_ports > 7) {
-		desc->bitmap[1] = (rh_b & RH_B_DR) >> 8;
-		desc->bitmap[2] = 0xff;
+		desc->u.hs.DeviceRemovable[1] = (rh_b & RH_B_DR) >> 8;
+		desc->u.hs.DeviceRemovable[2] = 0xff;
 	} else
-		desc->bitmap[1] = 0xff;
+		desc->u.hs.DeviceRemovable[1] = 0xff;
 	return 0;
 }
 
@@ -2990,7 +2990,7 @@ static struct hc_driver u132_hc_driver = {
 * synchronously - but instead should immediately stop activity to the
 * device and asynchronously call usb_remove_hcd()
 */
-static int __devexit u132_remove(struct platform_device *pdev)
+static int u132_remove(struct platform_device *pdev)
 {
 	struct usb_hcd *hcd = platform_get_drvdata(pdev);
 	if (hcd) {
@@ -3084,7 +3084,7 @@ static void u132_initialise(struct u132 *u132, struct platform_device *pdev)
 	mutex_unlock(&u132->sw_lock);
 }
 
-static int __devinit u132_probe(struct platform_device *pdev)
+static int u132_probe(struct platform_device *pdev)
 {
 	struct usb_hcd *hcd;
 	int retval;
@@ -3141,10 +3141,11 @@ static int __devinit u132_probe(struct platform_device *pdev)
 
 
 #ifdef CONFIG_PM
-/* for this device there's no useful distinction between the controller
-* and its root hub, except that the root hub only gets direct PM calls
-* when CONFIG_USB_SUSPEND is enabled.
-*/
+/*
+ * for this device there's no useful distinction between the controller
+ * and its root hub, except that the root hub only gets direct PM calls
+ * when CONFIG_PM_RUNTIME is enabled.
+ */
 static int u132_suspend(struct platform_device *pdev, pm_message_t state)
 {
 	struct usb_hcd *hcd = platform_get_drvdata(pdev);
@@ -3212,7 +3213,7 @@ static int u132_resume(struct platform_device *pdev)
 */
 static struct platform_driver u132_platform_driver = {
 	.probe = u132_probe,
-	.remove = __devexit_p(u132_remove),
+	.remove = u132_remove,
 	.suspend = u132_suspend,
 	.resume = u132_resume,
 	.driver = {
@@ -3229,8 +3230,7 @@ static int __init u132_hcd_init(void)
 	mutex_init(&u132_module_lock);
 	if (usb_disabled())
 		return -ENODEV;
-	printk(KERN_INFO "driver %s built at %s on %s\n", hcd_name, __TIME__,
-		__DATE__);
+	printk(KERN_INFO "driver %s\n", hcd_name);
 	workqueue = create_singlethread_workqueue("u132");
 	retval = platform_driver_register(&u132_platform_driver);
 	return retval;

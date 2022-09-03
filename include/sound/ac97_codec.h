@@ -28,9 +28,9 @@
 #include <linux/bitops.h>
 #include <linux/device.h>
 #include <linux/workqueue.h>
-#include "pcm.h"
-#include "control.h"
-#include "info.h"
+#include <sound/pcm.h>
+#include <sound/control.h>
+#include <sound/info.h>
 
 /* maximum number of devices on the AC97 bus */
 #define	AC97_BUS_MAX_DEVICES	4
@@ -96,6 +96,10 @@
 #define AC97_FUNC_INFO		0x68	/* Function Information */
 #define AC97_SENSE_INFO		0x6a	/* Sense Details */
 
+/* volume controls */
+#define AC97_MUTE_MASK_MONO	0x8000
+#define AC97_MUTE_MASK_STEREO	0x8080
+
 /* slot allocation */
 #define AC97_SLOT_TAG		0
 #define AC97_SLOT_CMD_ADDR	1
@@ -138,6 +142,7 @@
 #define AC97_BC_18BIT_ADC	0x0100	/* 18-bit ADC resolution */
 #define AC97_BC_20BIT_ADC	0x0200	/* 20-bit ADC resolution */
 #define AC97_BC_ADC_MASK	0x0300
+#define AC97_BC_3D_TECH_ID_MASK	0x7c00	/* Per-vendor ID of 3D enhancement */
 
 /* general purpose */
 #define AC97_GP_DRSS_MASK	0x0c00	/* double rate slot select */
@@ -380,7 +385,7 @@
 #define AC97_SCAP_DETECT_BY_VENDOR (1<<8) /* use vendor registers for read tests */
 #define AC97_SCAP_NO_SPDIF	(1<<9)	/* don't build SPDIF controls */
 #define AC97_SCAP_EAPD_LED	(1<<10)	/* EAPD as mute LED */
-#define AC97_SCAP_POWER_SAVE	(1<<11)	/* capable for aggresive power-saving */
+#define AC97_SCAP_POWER_SAVE	(1<<11)	/* capable for aggressive power-saving */
 
 /* ac97->flags */
 #define AC97_HAS_PC_BEEP	(1<<0)	/* force PC Speaker usage */
@@ -417,6 +422,7 @@
  */
 
 struct snd_ac97;
+struct snd_pcm_chmap;
 
 struct snd_ac97_build_ops {
 	int (*build_3d) (struct snd_ac97 *ac97);
@@ -523,6 +529,8 @@ struct snd_ac97 {
 	struct delayed_work power_work;
 #endif
 	struct device dev;
+
+	struct snd_pcm_chmap *chmaps[2]; /* channel-maps (optional) */
 };
 
 #define to_ac97_t(d) container_of(d, struct snd_ac97, dev)

@@ -3,7 +3,7 @@
  *  JZ4740 platform time support
  *
  *  This program is free software; you can redistribute it and/or modify it
- *  under  the terms of the GNU General  Public License as published by the
+ *  under  the terms of the GNU General	 Public License as published by the
  *  Free Software Foundation;  either version 2 of the License, or (at your
  *  option) any later version.
  *
@@ -20,10 +20,10 @@
 #include <linux/clockchips.h>
 
 #include <asm/mach-jz4740/irq.h>
+#include <asm/mach-jz4740/timer.h>
 #include <asm/time.h>
 
 #include "clock.h"
-#include "timer.h"
 
 #define TIMER_CLOCKEVENT 0
 #define TIMER_CLOCKSOURCE 1
@@ -89,7 +89,7 @@ static int jz4740_clockevent_set_next(unsigned long evt,
 
 static struct clock_event_device jz4740_clockevent = {
 	.name = "jz4740-timer",
-	.features = CLOCK_EVT_FEAT_PERIODIC,
+	.features = CLOCK_EVT_FEAT_PERIODIC | CLOCK_EVT_FEAT_ONESHOT,
 	.set_next_event = jz4740_clockevent_set_next,
 	.set_mode = jz4740_clockevent_set_mode,
 	.rating = 200,
@@ -121,8 +121,7 @@ void __init plat_time_init(void)
 
 	clockevents_register_device(&jz4740_clockevent);
 
-	clocksource_set_clock(&jz4740_clocksource, clk_rate);
-	ret = clocksource_register(&jz4740_clocksource);
+	ret = clocksource_register_hz(&jz4740_clocksource, clk_rate);
 
 	if (ret)
 		printk(KERN_ERR "Failed to register clocksource: %d\n", ret);

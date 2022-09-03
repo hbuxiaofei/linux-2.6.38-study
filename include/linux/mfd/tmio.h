@@ -1,9 +1,12 @@
 #ifndef MFD_TMIO_H
 #define MFD_TMIO_H
 
+#include <linux/device.h>
 #include <linux/fb.h>
 #include <linux/io.h>
+#include <linux/jiffies.h>
 #include <linux/platform_device.h>
+#include <linux/pm_runtime.h>
 
 #define tmio_ioread8(addr) readb(addr)
 #define tmio_ioread16(addr) readw(addr)
@@ -61,6 +64,17 @@
  * Some controllers can support SDIO IRQ signalling.
  */
 #define TMIO_MMC_SDIO_IRQ		(1 << 2)
+/*
+ * Some controllers require waiting for the SD bus to become
+ * idle before writing to some registers.
+ */
+#define TMIO_MMC_HAS_IDLE_WAIT		(1 << 4)
+/*
+ * A GPIO is used for card hotplug detection. We need an extra flag for this,
+ * because 0 is a valid GPIO number too, and requiring users to specify
+ * cd_gpio < 0 to disable GPIO hotplug would break backwards compatibility.
+ */
+#define TMIO_MMC_USE_GPIO_CD		(1 << 5)
 
 int tmio_core_mmc_enable(void __iomem *cnf, int shift, unsigned long base);
 int tmio_core_mmc_resume(void __iomem *cnf, int shift, unsigned long base);
@@ -73,18 +87,27 @@ struct tmio_mmc_dma {
 	int alignment_shift;
 };
 
+struct tmio_mmc_host;
+
 /*
  * data for the MMC controller
  */
 struct tmio_mmc_data {
 	unsigned int			hclk;
 	unsigned long			capabilities;
+	unsigned long			capabilities2;
 	unsigned long			flags;
 	u32				ocr_mask;	/* available voltages */
 	struct tmio_mmc_dma		*dma;
+	struct device			*dev;
+	unsigned int			cd_gpio;
 	void (*set_pwr)(struct platform_device *host, int state);
 	void (*set_clk_div)(struct platform_device *host, int state);
 	int (*get_cd)(struct platform_device *host);
+	int (*write16_hook)(struct tmio_mmc_host *host, int addr);
+	/* clock management callbacks */
+	int (*clk_enable)(struct platform_device *pdev, unsigned int *f);
+	void (*clk_disable)(struct platform_device *pdev);
 };
 
 /*

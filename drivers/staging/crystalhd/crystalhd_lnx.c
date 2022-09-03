@@ -15,10 +15,11 @@
   along with this driver.  If not, see <http://www.gnu.org/licenses/>.
 ***************************************************************************/
 
+#include "crystalhd.h"
+
 #include <linux/mutex.h>
 #include <linux/slab.h>
 
-#include "crystalhd_lnx.h"
 
 static DEFINE_MUTEX(chd_dec_mutex);
 static struct class *crystalhd_class;
@@ -298,7 +299,6 @@ static int chd_dec_open(struct inode *in, struct file *fd)
 	enum BC_STATUS sts = BC_STS_SUCCESS;
 	struct crystalhd_user *uc = NULL;
 
-	BCMLOG_ENTER;
 	if (!adp) {
 		BCMLOG_ERR("Invalid adp\n");
 		return -EINVAL;
@@ -327,7 +327,6 @@ static int chd_dec_close(struct inode *in, struct file *fd)
 	struct crystalhd_adp *adp = chd_get_adp();
 	struct crystalhd_user *uc;
 
-	BCMLOG_ENTER;
 	if (!adp) {
 		BCMLOG_ERR("Invalid adp\n");
 		return -EINVAL;
@@ -354,7 +353,7 @@ static const struct file_operations chd_dec_fops = {
 	.llseek = noop_llseek,
 };
 
-static int __devinit chd_dec_init_chdev(struct crystalhd_adp *adp)
+static int chd_dec_init_chdev(struct crystalhd_adp *adp)
 {
 	struct crystalhd_ioctl_data *temp;
 	struct device *dev;
@@ -374,13 +373,15 @@ static int __devinit chd_dec_init_chdev(struct crystalhd_adp *adp)
 	/* register crystalhd class */
 	crystalhd_class = class_create(THIS_MODULE, "crystalhd");
 	if (IS_ERR(crystalhd_class)) {
+		rc = PTR_ERR(crystalhd_class);
 		BCMLOG_ERR("failed to create class\n");
-		goto fail;
+		goto class_create_fail;
 	}
 
 	dev = device_create(crystalhd_class, NULL, MKDEV(adp->chd_dec_major, 0),
 			    NULL, "crystalhd");
 	if (IS_ERR(dev)) {
+		rc = PTR_ERR(dev);
 		BCMLOG_ERR("failed to create device\n");
 		goto device_create_fail;
 	}
@@ -393,8 +394,7 @@ static int __devinit chd_dec_init_chdev(struct crystalhd_adp *adp)
 
 	/* Allocate general purpose ioctl pool. */
 	for (i = 0; i < CHD_IODATA_POOL_SZ; i++) {
-		/* FIXME: jarod: why atomic? */
-		temp = kzalloc(sizeof(struct crystalhd_ioctl_data), GFP_ATOMIC);
+		temp = kzalloc(sizeof(struct crystalhd_ioctl_data), GFP_KERNEL);
 		if (!temp) {
 			BCMLOG_ERR("ioctl data pool kzalloc failed\n");
 			rc = -ENOMEM;
@@ -412,11 +412,13 @@ elem_pool_fail:
 	device_destroy(crystalhd_class, MKDEV(adp->chd_dec_major, 0));
 device_create_fail:
 	class_destroy(crystalhd_class);
+class_create_fail:
+	unregister_chrdev(adp->chd_dec_major, CRYSTALHD_API_NAME);
 fail:
 	return rc;
 }
 
-static void __devexit chd_dec_release_chdev(struct crystalhd_adp *adp)
+static void chd_dec_release_chdev(struct crystalhd_adp *adp)
 {
 	struct crystalhd_ioctl_data *temp = NULL;
 	if (!adp)
@@ -441,7 +443,7 @@ static void __devexit chd_dec_release_chdev(struct crystalhd_adp *adp)
 	crystalhd_delete_elem_pool(adp);
 }
 
-static int __devinit chd_pci_reserve_mem(struct crystalhd_adp *pinfo)
+static int chd_pci_reserve_mem(struct crystalhd_adp *pinfo)
 {
 	int rc;
 	unsigned long bar2 = pci_resource_start(pinfo->pdev, 2);
@@ -494,7 +496,7 @@ static int __devinit chd_pci_reserve_mem(struct crystalhd_adp *pinfo)
 	return 0;
 }
 
-static void __devexit chd_pci_release_mem(struct crystalhd_adp *pinfo)
+static void chd_pci_release_mem(struct crystalhd_adp *pinfo)
 {
 	if (!pinfo)
 		return;
@@ -509,12 +511,10 @@ static void __devexit chd_pci_release_mem(struct crystalhd_adp *pinfo)
 }
 
 
-static void __devexit chd_dec_pci_remove(struct pci_dev *pdev)
+static void chd_dec_pci_remove(struct pci_dev *pdev)
 {
 	struct crystalhd_adp *pinfo;
 	enum BC_STATUS sts = BC_STS_SUCCESS;
-
-	BCMLOG_ENTER;
 
 	pinfo = pci_get_drvdata(pdev);
 	if (!pinfo) {
@@ -537,7 +537,7 @@ static void __devexit chd_dec_pci_remove(struct pci_dev *pdev)
 	g_adp_info = NULL;
 }
 
-static int __devinit chd_dec_pci_probe(struct pci_dev *pdev,
+static int chd_dec_pci_probe(struct pci_dev *pdev,
 			     const struct pci_device_id *entry)
 {
 	struct crystalhd_adp *pinfo;
@@ -549,8 +549,7 @@ static int __devinit chd_dec_pci_probe(struct pci_dev *pdev,
 	       pdev->vendor, pdev->device, pdev->subsystem_vendor,
 	       pdev->subsystem_device);
 
-	/* FIXME: jarod: why atomic? */
-	pinfo = kzalloc(sizeof(struct crystalhd_adp), GFP_ATOMIC);
+	pinfo = kzalloc(sizeof(struct crystalhd_adp), GFP_KERNEL);
 	if (!pinfo) {
 		BCMLOG_ERR("Failed to allocate memory\n");
 		return -ENOMEM;
@@ -561,10 +560,10 @@ static int __devinit chd_dec_pci_probe(struct pci_dev *pdev,
 	rc = pci_enable_device(pdev);
 	if (rc) {
 		BCMLOG_ERR("Failed to enable PCI device\n");
-		return rc;
+		goto err;
 	}
 
-	snprintf(pinfo->name, 31, "crystalhd_pci_e:%d:%d:%d",
+	snprintf(pinfo->name, sizeof(pinfo->name), "crystalhd_pci_e:%d:%d:%d",
 		 pdev->bus->number, PCI_SLOT(pdev->devfn),
 		 PCI_FUNC(pdev->devfn));
 
@@ -572,7 +571,8 @@ static int __devinit chd_dec_pci_probe(struct pci_dev *pdev,
 	if (rc) {
 		BCMLOG_ERR("Failed to setup memory regions.\n");
 		pci_disable_device(pdev);
-		return -ENOMEM;
+		rc = -ENOMEM;
+		goto err;
 	}
 
 	pinfo->present	= 1;
@@ -587,7 +587,8 @@ static int __devinit chd_dec_pci_probe(struct pci_dev *pdev,
 	if (rc) {
 		BCMLOG_ERR("_enable_int err:%d\n", rc);
 		pci_disable_device(pdev);
-		return -ENODEV;
+		rc = -ENODEV;
+		goto err;
 	}
 
 	/* Set dma mask... */
@@ -600,14 +601,16 @@ static int __devinit chd_dec_pci_probe(struct pci_dev *pdev,
 	} else {
 		BCMLOG_ERR("Unabled to setup DMA %d\n", rc);
 		pci_disable_device(pdev);
-		return -ENODEV;
+		rc = -ENODEV;
+		goto err;
 	}
 
 	sts = crystalhd_setup_cmd_context(&pinfo->cmds, pinfo);
 	if (sts != BC_STS_SUCCESS) {
 		BCMLOG_ERR("cmd setup :%d\n", sts);
 		pci_disable_device(pdev);
-		return -ENODEV;
+		rc = -ENODEV;
+		goto err;
 	}
 
 	pci_set_master(pdev);
@@ -617,6 +620,10 @@ static int __devinit chd_dec_pci_probe(struct pci_dev *pdev,
 	g_adp_info = pinfo;
 
 	return 0;
+
+err:
+	kfree(pinfo);
+	return rc;
 }
 
 #ifdef CONFIG_PM
@@ -704,7 +711,7 @@ MODULE_DEVICE_TABLE(pci, chd_dec_pci_id_table);
 static struct pci_driver bc_chd_70012_driver = {
 	.name     = "Broadcom 70012 Decoder",
 	.probe    = chd_dec_pci_probe,
-	.remove   = __devexit_p(chd_dec_pci_remove),
+	.remove   = chd_dec_pci_remove,
 	.id_table = chd_dec_pci_id_table,
 #ifdef CONFIG_PM
 	.suspend  = chd_dec_pci_suspend,

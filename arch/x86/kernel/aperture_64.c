@@ -13,14 +13,13 @@
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/init.h>
-#include <linux/bootmem.h>
+#include <linux/memblock.h>
 #include <linux/mmzone.h>
 #include <linux/pci_ids.h>
 #include <linux/pci.h>
 #include <linux/bitops.h>
 #include <linux/ioport.h>
 #include <linux/suspend.h>
-#include <linux/kmemleak.h>
 #include <asm/e820.h>
 #include <asm/io.h>
 #include <asm/iommu.h>
@@ -29,6 +28,22 @@
 #include <asm/dma.h>
 #include <asm/amd_nb.h>
 #include <asm/x86_init.h>
+
+/*
+ * Using 512M as goal, in case kexec will load kernel_big
+ * that will do the on-position decompress, and could overlap with
+ * with the gart aperture that is used.
+ * Sequence:
+ * kernel_small
+ * ==> kexec (with kdump trigger path or gart still enabled)
+ * ==> kernel_small (gart area become e820_reserved)
+ * ==> kexec (with kdump trigger path or gart still enabled)
+ * ==> kerne_big (uncompressed size will be big than 64M or 128M)
+ * So don't use 512M below as gart iommu, leave the space for kernel
+ * code for safe.
+ */
+#define GART_MIN_ADDR	(512ULL << 20)
+#define GART_MAX_ADDR	(1ULL   << 32)
 
 int gart_iommu_aperture;
 int gart_iommu_aperture_disabled __initdata;
@@ -57,7 +72,7 @@ static void __init insert_aperture_resource(u32 aper_base, u32 aper_size)
 static u32 __init allocate_aperture(void)
 {
 	u32 aper_size;
-	void *p;
+	unsigned long addr;
 
 	/* aper_size should <= 1G */
 	if (fallback_aper_order > 5)
@@ -70,40 +85,22 @@ static u32 __init allocate_aperture(void)
 	 * memory. Unfortunately we cannot move it up because that would
 	 * make the IOMMU useless.
 	 */
-	/*
-	 * using 512M as goal, in case kexec will load kernel_big
-	 * that will do the on position decompress, and  could overlap with
-	 * that positon with gart that is used.
-	 * sequende:
-	 * kernel_small
-	 * ==> kexec (with kdump trigger path or previous doesn't shutdown gart)
-	 * ==> kernel_small(gart area become e820_reserved)
-	 * ==> kexec (with kdump trigger path or previous doesn't shutdown gart)
-	 * ==> kerne_big (uncompressed size will be big than 64M or 128M)
-	 * so don't use 512M below as gart iommu, leave the space for kernel
-	 * code for safe
-	 */
-	p = __alloc_bootmem_nopanic(aper_size, aper_size, 512ULL<<20);
-	/*
-	 * Kmemleak should not scan this block as it may not be mapped via the
-	 * kernel direct mapping.
-	 */
-	kmemleak_ignore(p);
-	if (!p || __pa(p)+aper_size > 0xffffffff) {
+	addr = memblock_find_in_range(GART_MIN_ADDR, GART_MAX_ADDR,
+				      aper_size, aper_size);
+	if (!addr) {
 		printk(KERN_ERR
-			"Cannot allocate aperture memory hole (%p,%uK)\n",
-				p, aper_size>>10);
-		if (p)
-			free_bootmem(__pa(p), aper_size);
+			"Cannot allocate aperture memory hole (%lx,%uK)\n",
+				addr, aper_size>>10);
 		return 0;
 	}
+	memblock_reserve(addr, aper_size);
 	printk(KERN_INFO "Mapping aperture over %d KB of RAM @ %lx\n",
-			aper_size >> 10, __pa(p));
-	insert_aperture_resource((u32)__pa(p), aper_size);
-	register_nosave_region((u32)__pa(p) >> PAGE_SHIFT,
-				(u32)__pa(p+aper_size) >> PAGE_SHIFT);
+			aper_size >> 10, addr);
+	insert_aperture_resource((u32)addr, aper_size);
+	register_nosave_region(addr >> PAGE_SHIFT,
+			       (addr+aper_size) >> PAGE_SHIFT);
 
-	return (u32)__pa(p);
+	return (u32)addr;
 }
 
 
@@ -500,7 +497,7 @@ out:
 		 * Don't enable translation yet but enable GART IO and CPU
 		 * accesses and set DISTLBWALKPRB since GART table memory is UC.
 		 */
-		u32 ctl = DISTLBWALKPRB | aper_order << 1;
+		u32 ctl = aper_order << 1;
 
 		bus = amd_nb_bus_dev_ranges[i].bus;
 		dev_base = amd_nb_bus_dev_ranges[i].dev_base;

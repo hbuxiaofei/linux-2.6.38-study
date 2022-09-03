@@ -15,7 +15,6 @@
 #include <linux/sys.h>
 #include <linux/linkage.h>
 #include <asm/smp.h>
-#include <asm/system.h>
 #include <asm/irqflags.h>
 #include <asm/thread_info.h>
 #include <asm/intctl-regs.h>
@@ -52,6 +51,16 @@ ENTRY(ret_from_fork)
 	GET_THREAD_INFO a2
 
 	# return 0 to indicate child process
+	clr	d0
+	mov	d0,(REG_D0,fp)
+	jmp	syscall_exit
+
+ENTRY(ret_from_kernel_thread)
+	call	schedule_tail[],0
+	mov	(REG_D0,fp),d0
+	mov	(REG_A0,fp),a0
+	calls	(a0)
+	GET_THREAD_INFO a2		# A2 must be set on return from sys_exit()
 	clr	d0
 	mov	d0,(REG_D0,fp)
 	jmp	syscall_exit
@@ -95,10 +104,14 @@ restore_all:
 ###############################################################################
 	ALIGN
 syscall_exit_work:
-	btst	_TIF_SYSCALL_TRACE,d2
-	beq	work_pending
+	mov	(REG_EPSW,fp),d0
+	and	EPSW_nSL,d0
+	beq	resume_kernel		# returning to supervisor mode
+
 	LOCAL_IRQ_ENABLE		# could let syscall_trace_exit() call
 					# schedule() instead
+	btst	_TIF_SYSCALL_TRACE,d2
+	beq	work_pending
 	mov	fp,d0
 	call	syscall_trace_exit[],0	# do_syscall_trace(regs)
 	jmp	resume_userspace
@@ -111,6 +124,7 @@ work_pending:
 work_resched:
 	call	schedule[],0
 
+resume_userspace:
 	# make sure we don't miss an interrupt setting need_resched or
 	# sigpending between sampling and the rti
 	LOCAL_IRQ_DISABLE
@@ -119,6 +133,8 @@ work_resched:
 	mov	(TI_flags,a2),d2
 	btst	_TIF_WORK_MASK,d2
 	beq	restore_all
+
+	LOCAL_IRQ_ENABLE
 	btst	_TIF_NEED_RESCHED,d2
 	bne	work_resched
 
@@ -156,17 +172,6 @@ ret_from_intr:
 					# returning to userspace
 	and	EPSW_nSL,d0
 	beq	resume_kernel		# returning to supervisor mode
-
-ENTRY(resume_userspace)
-	# make sure we don't miss an interrupt setting need_resched or
-	# sigpending between sampling and the rti
-	LOCAL_IRQ_DISABLE
-
-	# is there any work to be done on int/exception return?
-	mov	(TI_flags,a2),d2
-	btst	_TIF_WORK_MASK,d2
-	bne	work_pending
-	jmp	restore_all
 
 #ifdef CONFIG_PREEMPT
 ENTRY(resume_kernel)
@@ -266,7 +271,11 @@ ENTRY(raw_bus_error)
 
 ###############################################################################
 #
-# Miscellaneous exception entry points
+# NMI exception entry points
+#
+# This is used by ordinary interrupt channels that have the GxICR_NMI bit set
+# in addition to the main NMI and Watchdog channels.  SMP NMI IPIs use this
+# facility.
 #
 ###############################################################################
 ENTRY(nmi_handler)
@@ -281,7 +290,7 @@ ENTRY(nmi_handler)
 	and	NMIAGR_GN,d0
 	lsr	0x2,d0
 	cmp	CALL_FUNCTION_NMI_IPI,d0
-	bne	5f			# if not call function, jump
+	bne	nmi_not_smp_callfunc	# if not call function, jump
 
 	# function call nmi ipi
 	add	4,sp			# no need to store TBR
@@ -295,59 +304,38 @@ ENTRY(nmi_handler)
 	call	smp_nmi_call_function_interrupt[],0
 	RESTORE_ALL
 
-5:
-#ifdef CONFIG_GDBSTUB
-	cmp	GDB_NMI_IPI,d0
-	bne	3f			# if not gdb nmi ipi, jump
+nmi_not_smp_callfunc:
+#ifdef CONFIG_KERNEL_DEBUGGER
+	cmp	DEBUGGER_NMI_IPI,d0
+	bne	nmi_not_debugger	# if not kernel debugger NMI IPI, jump
 
-	# gdb nmi ipi
+	# kernel debugger NMI IPI
 	add	4,sp			# no need to store TBR
 	mov	GxICR_DETECT,d0		# clear NMI
-	movbu	d0,(GxICR(GDB_NMI_IPI))
-	movhu	(GxICR(GDB_NMI_IPI)),d0
+	movbu	d0,(GxICR(DEBUGGER_NMI_IPI))
+	movhu	(GxICR(DEBUGGER_NMI_IPI)),d0
 	and	~EPSW_NMID,epsw		# enable NMI
-#ifdef CONFIG_MN10300_CACHE_ENABLED
-	mov	(gdbstub_nmi_opr_type),d0
-	cmp	GDBSTUB_NMI_CACHE_PURGE,d0
-	bne	4f			# if not gdb cache purge, jump
 
-	# gdb cache purge nmi ipi
-	add	-20,sp
-	mov	d1,(4,sp)
-	mov	a0,(8,sp)
-	mov	a1,(12,sp)
-	mov	mdr,d0
-	mov	d0,(16,sp)
-	call	gdbstub_local_purge_cache[],0
-	mov	0x1,d0
-	mov	(CPUID),d1
-	asl	d1,d0
-	mov	gdbstub_nmi_cpumask,a0
-	bclr	d0,(a0)
-	mov	(4,sp),d1
-	mov	(8,sp),a0
-	mov	(12,sp),a1
-	mov	(16,sp),d0
-	mov	d0,mdr
-	add	20,sp
-	mov	(sp),d0
-	add	4,sp
-	rti
-4:
-#endif /* CONFIG_MN10300_CACHE_ENABLED */
-	# gdb wait nmi ipi
 	mov     (sp),d0
 	SAVE_ALL
-	call    gdbstub_nmi_wait[],0
+	mov	fp,d0			# arg 0: stacked register file
+	mov	a2,d1			# arg 1: exception number
+	call    debugger_nmi_interrupt[],0
 	RESTORE_ALL
-3:
-#endif /* CONFIG_GDBSTUB */
+
+nmi_not_debugger:
+#endif /* CONFIG_KERNEL_DEBUGGER */
 	mov     (sp),d0                 # restore TBR to d0
 	add     4,sp
 #endif /* CONFIG_SMP */
 
 	bra	__common_exception_nonmi
 
+###############################################################################
+#
+# General exception entry point
+#
+###############################################################################
 ENTRY(__common_exception)
 	add	-4,sp
 	mov	d0,(sp)
@@ -606,7 +594,7 @@ ENTRY(sys_call_table)
 	.long sys_ni_syscall	/* vm86 */
 	.long sys_ni_syscall	/* Old sys_query_module */
 	.long sys_poll
-	.long sys_nfsservctl
+	.long sys_ni_syscall	/* was nfsservctl */
 	.long sys_setresgid16	/* 170 */
 	.long sys_getresgid16
 	.long sys_prctl
@@ -776,6 +764,7 @@ ENTRY(sys_call_table)
 	.long sys_rt_tgsigqueueinfo
 	.long sys_perf_event_open
 	.long sys_recvmmsg
+	.long sys_setns
 
 
 nr_syscalls=(.-sys_call_table)/4

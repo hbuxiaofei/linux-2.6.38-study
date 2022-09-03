@@ -1,8 +1,7 @@
 /*
- *  arch/s390/hypfs/hypfs.h
  *    Hypervisor filesystem for Linux on s390.
  *
- *    Copyright (C) IBM Corp. 2006
+ *    Copyright IBM Corp. 2006
  *    Author(s): Michael Holzheu <holzheu@de.ibm.com>
  */
 
@@ -47,7 +46,7 @@ struct hypfs_dbfs_data {
 	void			*buf;
 	void			*buf_free_ptr;
 	size_t			size;
-	struct hypfs_dbfs_file	*dbfs_file;;
+	struct hypfs_dbfs_file	*dbfs_file;
 	struct kref		kref;
 };
 

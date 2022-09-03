@@ -24,6 +24,7 @@
 #ifndef __ASSEMBLY__
 #include <linux/threads.h>
 #include <linux/cpumask.h>
+#include <linux/thread_info.h>
 #endif
 
 #ifdef CONFIG_SMP
@@ -34,7 +35,7 @@
 #define LOCAL_TIMER_IPI		193
 #define FLUSH_CACHE_IPI		194
 #define CALL_FUNCTION_NMI_IPI	195
-#define GDB_NMI_IPI		196
+#define DEBUGGER_NMI_IPI	196
 
 #define SMP_BOOT_IRQ		195
 
@@ -43,6 +44,7 @@
 #define LOCAL_TIMER_GxICR_LV	GxICR_LEVEL_4
 #define FLUSH_CACHE_GxICR_LV	GxICR_LEVEL_0
 #define SMP_BOOT_GxICR_LV	GxICR_LEVEL_0
+#define DEBUGGER_GxICR_LV	CONFIG_DEBUGGER_IRQ_LEVEL
 
 #define TIME_OUT_COUNT_BOOT_IPI	100
 #define DELAY_TIME_BOOT_IPI	75000
@@ -61,8 +63,9 @@
  * An alternate way of dealing with this could be to use the EPSW.S bits to
  * cache this information for systems with up to four CPUs.
  */
+#define arch_smp_processor_id()	(CPUID)
 #if 0
-#define raw_smp_processor_id()	(CPUID)
+#define raw_smp_processor_id()	(arch_smp_processor_id())
 #else
 #define raw_smp_processor_id()	(current_thread_info()->cpu)
 #endif
@@ -83,7 +86,7 @@ extern cpumask_t cpu_boot_map;
 extern void smp_init_cpus(void);
 extern void smp_cache_interrupt(void);
 extern void send_IPI_allbutself(int irq);
-extern int smp_nmi_call_function(smp_call_func_t func, void *info, int wait);
+extern int smp_nmi_call_function(void (*func)(void *), void *info, int wait);
 
 extern void arch_send_call_function_single_ipi(int cpu);
 extern void arch_send_call_function_ipi_mask(const struct cpumask *mask);
@@ -98,6 +101,7 @@ extern void __cpu_die(unsigned int cpu);
 #ifndef __ASSEMBLY__
 
 static inline void smp_init_cpus(void) {}
+#define raw_smp_processor_id() 0
 
 #endif /* __ASSEMBLY__ */
 #endif /* CONFIG_SMP */

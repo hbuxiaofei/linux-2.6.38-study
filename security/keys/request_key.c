@@ -8,7 +8,7 @@
  * as published by the Free Software Foundation; either version
  * 2 of the License, or (at your option) any later version.
  *
- * See Documentation/keys-request-key.txt
+ * See Documentation/security/keys-request-key.txt
  */
 
 #include <linux/module.h>
@@ -71,9 +71,8 @@ EXPORT_SYMBOL(complete_request_key);
  * This is called in context of freshly forked kthread before kernel_execve(),
  * so we can simply install the desired session_keyring at this point.
  */
-static int umh_keys_init(struct subprocess_info *info)
+static int umh_keys_init(struct subprocess_info *info, struct cred *cred)
 {
-	struct cred *cred = (struct cred*)current_cred();
 	struct key *keyring = info->data;
 
 	return install_session_keyring_to_cred(cred, keyring);
@@ -92,17 +91,17 @@ static void umh_keys_cleanup(struct subprocess_info *info)
  * Call a usermode helper with a specific session keyring.
  */
 static int call_usermodehelper_keys(char *path, char **argv, char **envp,
-			 struct key *session_keyring, enum umh_wait wait)
+					struct key *session_keyring, int wait)
 {
-	gfp_t gfp_mask = (wait == UMH_NO_WAIT) ? GFP_ATOMIC : GFP_KERNEL;
-	struct subprocess_info *info =
-		call_usermodehelper_setup(path, argv, envp, gfp_mask);
+	struct subprocess_info *info;
 
+	info = call_usermodehelper_setup(path, argv, envp, GFP_KERNEL,
+					  umh_keys_init, umh_keys_cleanup,
+					  session_keyring);
 	if (!info)
 		return -ENOMEM;
 
-	call_usermodehelper_setfns(info, umh_keys_init, umh_keys_cleanup,
-					key_get(session_keyring));
+	key_get(session_keyring);
 	return call_usermodehelper_exec(info, wait);
 }
 
@@ -134,6 +133,7 @@ static int call_sbin_request_key(struct key_construction *cons,
 
 	cred = get_current_cred();
 	keyring = keyring_alloc(desc, cred->fsuid, cred->fsgid, cred,
+				KEY_POS_ALL | KEY_USR_VIEW | KEY_USR_READ,
 				KEY_ALLOC_QUOTA_OVERRUN, NULL);
 	put_cred(cred);
 	if (IS_ERR(keyring)) {
@@ -147,8 +147,8 @@ static int call_sbin_request_key(struct key_construction *cons,
 		goto error_link;
 
 	/* record the UID and GID */
-	sprintf(uid_str, "%d", cred->fsuid);
-	sprintf(gid_str, "%d", cred->fsgid);
+	sprintf(uid_str, "%d", from_kuid(&init_user_ns, cred->fsuid));
+	sprintf(gid_str, "%d", from_kgid(&init_user_ns, cred->fsgid));
 
 	/* we say which key is under construction */
 	sprintf(key_str, "%d", key->serial);
@@ -158,12 +158,12 @@ static int call_sbin_request_key(struct key_construction *cons,
 		cred->thread_keyring ? cred->thread_keyring->serial : 0);
 
 	prkey = 0;
-	if (cred->tgcred->process_keyring)
-		prkey = cred->tgcred->process_keyring->serial;
+	if (cred->process_keyring)
+		prkey = cred->process_keyring->serial;
 	sprintf(keyring_str[1], "%d", prkey);
 
 	rcu_read_lock();
-	session = rcu_dereference(cred->tgcred->session_keyring);
+	session = rcu_dereference(cred->session_keyring);
 	if (!session)
 		session = cred->user->session_keyring;
 	sskey = session->serial;
@@ -305,14 +305,14 @@ static void construct_get_dest_keyring(struct key **_dest_keyring)
 				break;
 
 		case KEY_REQKEY_DEFL_PROCESS_KEYRING:
-			dest_keyring = key_get(cred->tgcred->process_keyring);
+			dest_keyring = key_get(cred->process_keyring);
 			if (dest_keyring)
 				break;
 
 		case KEY_REQKEY_DEFL_SESSION_KEYRING:
 			rcu_read_lock();
 			dest_keyring = key_get(
-				rcu_dereference(cred->tgcred->session_keyring));
+				rcu_dereference(cred->session_keyring));
 			rcu_read_unlock();
 
 			if (dest_keyring)
@@ -355,6 +355,7 @@ static int construct_alloc_key(struct key_type *type,
 	const struct cred *cred = current_cred();
 	unsigned long prealloc;
 	struct key *key;
+	key_perm_t perm;
 	key_ref_t key_ref;
 	int ret;
 
@@ -363,8 +364,15 @@ static int construct_alloc_key(struct key_type *type,
 	*_key = NULL;
 	mutex_lock(&user->cons_lock);
 
+	perm = KEY_POS_VIEW | KEY_POS_SEARCH | KEY_POS_LINK | KEY_POS_SETATTR;
+	perm |= KEY_USR_VIEW;
+	if (type->read)
+		perm |= KEY_POS_READ;
+	if (type == &key_type_keyring || type->update)
+		perm |= KEY_POS_WRITE;
+
 	key = key_alloc(type, description, cred->fsuid, cred->fsgid, cred,
-			KEY_POS_ALL, flags);
+			perm, flags);
 	if (IS_ERR(key))
 		goto alloc_failed;
 
@@ -450,7 +458,7 @@ static struct key *construct_key_and_link(struct key_type *type,
 
 	kenter("");
 
-	user = key_user_lookup(current_fsuid(), current_user_ns());
+	user = key_user_lookup(current_fsuid());
 	if (!user)
 		return ERR_PTR(-ENOMEM);
 
@@ -470,7 +478,7 @@ static struct key *construct_key_and_link(struct key_type *type,
 	} else if (ret == -EINPROGRESS) {
 		ret = 0;
 	} else {
-		key = ERR_PTR(ret);
+		goto couldnt_alloc_key;
 	}
 
 	key_put(dest_keyring);
@@ -480,6 +488,7 @@ static struct key *construct_key_and_link(struct key_type *type,
 construction_failed:
 	key_negate_and_link(key, key_negative_timeout, NULL, NULL);
 	key_put(key);
+couldnt_alloc_key:
 	key_put(dest_keyring);
 	kleave(" = %d", ret);
 	return ERR_PTR(ret);
@@ -530,8 +539,7 @@ struct key *request_key_and_link(struct key_type *type,
 	       dest_keyring, flags);
 
 	/* search all the process keyrings for a key */
-	key_ref = search_process_keyrings(type, description, type->match,
-					  cred);
+	key_ref = search_process_keyrings(type, description, type->match, cred);
 
 	if (!IS_ERR(key_ref)) {
 		key = key_ref_to_ptr(key_ref);
@@ -585,7 +593,7 @@ int wait_for_key_construction(struct key *key, bool intr)
 	if (ret < 0)
 		return ret;
 	if (test_bit(KEY_FLAG_NEGATIVE, &key->flags))
-		return -ENOKEY;
+		return key->type_data.reject_error;
 	return key_validate(key);
 }
 EXPORT_SYMBOL(wait_for_key_construction);

@@ -25,6 +25,8 @@
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/slab.h>
@@ -39,9 +41,6 @@
 
 #define TC1100_INSTANCE_WIRELESS		1
 #define TC1100_INSTANCE_JOGDIAL		2
-
-#define TC1100_LOGPREFIX "tc1100-wmi: "
-#define TC1100_INFO KERN_INFO TC1100_LOGPREFIX
 
 MODULE_AUTHOR("Jamey Hicks, Carlos Corbacho");
 MODULE_DESCRIPTION("HP Compaq TC1100 Tablet WMI Extras");
@@ -188,7 +187,7 @@ static int __init tc1100_probe(struct platform_device *device)
 }
 
 
-static int __devexit tc1100_remove(struct platform_device *device)
+static int tc1100_remove(struct platform_device *device)
 {
 	sysfs_remove_group(&device->dev.kobj, &tc1100_attribute_group);
 
@@ -242,7 +241,7 @@ static struct platform_driver tc1100_driver = {
 		.pm = &tc1100_pm_ops,
 #endif
 	},
-	.remove = __devexit_p(tc1100_remove),
+	.remove = tc1100_remove,
 };
 
 static int __init tc1100_init(void)
@@ -264,7 +263,7 @@ static int __init tc1100_init(void)
 	if (error)
 		goto err_device_del;
 
-	printk(TC1100_INFO "HP Compaq TC1100 Tablet WMI Extras loaded\n");
+	pr_info("HP Compaq TC1100 Tablet WMI Extras loaded\n");
 	return 0;
 
  err_device_del:

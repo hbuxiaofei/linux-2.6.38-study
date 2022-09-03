@@ -8,6 +8,9 @@ struct inode;
 struct super_block;
 struct vfsmount;
 
+/* limit the handle size to NFSv4 handle size now */
+#define MAX_HANDLE_SZ 128
+
 /*
  * The fileid_type identifies how the file within the filesystem is encoded.
  * In theory this is freely set and parsed by the filesystem, but we try to
@@ -80,6 +83,22 @@ enum fid_type {
 	 * 64 bit parent inode number.
 	 */
 	FILEID_NILFS_WITH_PARENT = 0x62,
+
+	/*
+	 * 32 bit generation number, 40 bit i_pos.
+	 */
+	FILEID_FAT_WITHOUT_PARENT = 0x71,
+
+	/*
+	 * 32 bit generation number, 40 bit i_pos,
+	 * 32 bit parent generation number, 40 bit parent i_pos
+	 */
+	FILEID_FAT_WITH_PARENT = 0x72,
+
+	/*
+	 * Filesystems must not use 0xff file ID.
+	 */
+	FILEID_INVALID = 0xff,
 };
 
 struct fid {
@@ -117,12 +136,14 @@ struct fid {
  * encode_fh:
  *    @encode_fh should store in the file handle fragment @fh (using at most
  *    @max_len bytes) information that can be used by @decode_fh to recover the
- *    file refered to by the &struct dentry @de.  If the @connectable flag is
+ *    file referred to by the &struct dentry @de.  If the @connectable flag is
  *    set, the encode_fh() should store sufficient information so that a good
  *    attempt can be made to find not only the file but also it's place in the
  *    filesystem.   This typically means storing a reference to de->d_parent in
- *    the filehandle fragment.  encode_fh() should return the number of bytes
- *    stored or a negative error code such as %-ENOSPC
+ *    the filehandle fragment.  encode_fh() should return the fileid_type on
+ *    success and on error returns 255 (if the space needed to encode fh is
+ *    greater than @max_len*4 bytes). On error @max_len contains the minimum
+ *    size(in 4 byte unit) needed to encode the file handle.
  *
  * fh_to_dentry:
  *    @fh_to_dentry is given a &struct super_block (@sb) and a file handle
@@ -160,8 +181,8 @@ struct fid {
  */
 
 struct export_operations {
-	int (*encode_fh)(struct dentry *de, __u32 *fh, int *max_len,
-			int connectable);
+	int (*encode_fh)(struct inode *inode, __u32 *fh, int *max_len,
+			struct inode *parent);
 	struct dentry * (*fh_to_dentry)(struct super_block *sb, struct fid *fid,
 			int fh_len, int fh_type);
 	struct dentry * (*fh_to_parent)(struct super_block *sb, struct fid *fid,
@@ -172,6 +193,8 @@ struct export_operations {
 	int (*commit_metadata)(struct inode *inode);
 };
 
+extern int exportfs_encode_inode_fh(struct inode *inode, struct fid *fid,
+				    int *max_len, struct inode *parent);
 extern int exportfs_encode_fh(struct dentry *dentry, struct fid *fid,
 	int *max_len, int connectable);
 extern struct dentry *exportfs_decode_fh(struct vfsmount *mnt, struct fid *fid,

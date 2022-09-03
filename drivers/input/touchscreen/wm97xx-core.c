@@ -335,7 +335,7 @@ static void wm97xx_pen_irq_worker(struct work_struct *work)
 	 */
 	if (!wm->mach_ops->acc_enabled || wm->mach_ops->acc_pen_down) {
 		if (wm->pen_is_down && !pen_was_down) {
-			/* Data is not availiable immediately on pen down */
+			/* Data is not available immediately on pen down */
 			queue_delayed_work(wm->ts_workq, &wm->ts_reader, 1);
 		}
 
@@ -354,7 +354,7 @@ static void wm97xx_pen_irq_worker(struct work_struct *work)
  * Codec PENDOWN irq handler
  *
  * We have to disable the codec interrupt in the handler because it
- * can take upto 1ms to clear the interrupt source. We schedule a task
+ * can take up to 1ms to clear the interrupt source. We schedule a task
  * in a work queue to do the actual interaction with the chip.  The
  * interrupt is then enabled again in the slow handler when the source
  * has been cleared.
@@ -442,6 +442,16 @@ static int wm97xx_read_samples(struct wm97xx *wm)
 			"pen down: x=%x:%d, y=%x:%d, pressure=%x:%d\n",
 			data.x >> 12, data.x & 0xfff, data.y >> 12,
 			data.y & 0xfff, data.p >> 12, data.p & 0xfff);
+
+		if (abs_x[0] > (data.x & 0xfff) ||
+		    abs_x[1] < (data.x & 0xfff) ||
+		    abs_y[0] > (data.y & 0xfff) ||
+		    abs_y[1] < (data.y & 0xfff)) {
+			dev_dbg(wm->dev, "Measurement out of range, dropping it\n");
+			rc = RC_AGAIN;
+			goto out;
+		}
+
 		input_report_abs(wm->input_dev, ABS_X, data.x & 0xfff);
 		input_report_abs(wm->input_dev, ABS_Y, data.y & 0xfff);
 		input_report_abs(wm->input_dev, ABS_PRESSURE, data.p & 0xfff);
@@ -455,6 +465,7 @@ static int wm97xx_read_samples(struct wm97xx *wm)
 		wm->ts_reader_interval = wm->ts_reader_min_interval;
 	}
 
+out:
 	mutex_unlock(&wm->codec_mutex);
 	return rc;
 }

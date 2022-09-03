@@ -13,14 +13,13 @@
 #define _ASM_IRQFLAGS_H
 
 #include <asm/cpu-regs.h>
-#ifndef __ASSEMBLY__
-#include <linux/smp.h>
-#endif
+/* linux/smp.h <- linux/irqflags.h needs asm/smp.h first */
+#include <asm/smp.h>
 
 /*
  * interrupt control
  * - "disabled": run in IM1/2
- *   - level 0 - GDB stub
+ *   - level 0 - kernel debugger
  *   - level 1 - virtual serial DMA (if present)
  *   - level 5 - normal interrupt priority
  *   - level 6 - timer interrupt

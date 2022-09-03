@@ -21,14 +21,12 @@
 #include <net/act_api.h>
 #include <net/pkt_cls.h>
 
-struct basic_head
-{
+struct basic_head {
 	u32			hgenerator;
 	struct list_head	flist;
 };
 
-struct basic_filter
-{
+struct basic_filter {
 	u32			handle;
 	struct tcf_exts		exts;
 	struct tcf_ematch_tree	ematches;
@@ -41,7 +39,7 @@ static const struct tcf_ext_map basic_ext_map = {
 	.police = TCA_BASIC_POLICE
 };
 
-static int basic_classify(struct sk_buff *skb, struct tcf_proto *tp,
+static int basic_classify(struct sk_buff *skb, const struct tcf_proto *tp,
 			  struct tcf_result *res)
 {
 	int r;
@@ -92,8 +90,7 @@ static int basic_init(struct tcf_proto *tp)
 	return 0;
 }
 
-static inline void basic_delete_filter(struct tcf_proto *tp,
-				       struct basic_filter *f)
+static void basic_delete_filter(struct tcf_proto *tp, struct basic_filter *f)
 {
 	tcf_unbind_filter(tp, &f->res);
 	tcf_exts_destroy(tp, &f->exts);
@@ -135,15 +132,16 @@ static const struct nla_policy basic_policy[TCA_BASIC_MAX + 1] = {
 	[TCA_BASIC_EMATCHES]	= { .type = NLA_NESTED },
 };
 
-static inline int basic_set_parms(struct tcf_proto *tp, struct basic_filter *f,
-				  unsigned long base, struct nlattr **tb,
-				  struct nlattr *est)
+static int basic_set_parms(struct net *net, struct tcf_proto *tp,
+			   struct basic_filter *f, unsigned long base,
+			   struct nlattr **tb,
+			   struct nlattr *est)
 {
 	int err = -EINVAL;
 	struct tcf_exts e;
 	struct tcf_ematch_tree t;
 
-	err = tcf_exts_validate(tp, tb, est, &e, &basic_ext_map);
+	err = tcf_exts_validate(net, tp, tb, est, &e, &basic_ext_map);
 	if (err < 0)
 		return err;
 
@@ -165,7 +163,8 @@ errout:
 	return err;
 }
 
-static int basic_change(struct tcf_proto *tp, unsigned long base, u32 handle,
+static int basic_change(struct net *net, struct sk_buff *in_skb,
+			struct tcf_proto *tp, unsigned long base, u32 handle,
 			struct nlattr **tca, unsigned long *arg)
 {
 	int err;
@@ -184,7 +183,7 @@ static int basic_change(struct tcf_proto *tp, unsigned long base, u32 handle,
 	if (f != NULL) {
 		if (handle && f->handle != handle)
 			return -EINVAL;
-		return basic_set_parms(tp, f, base, tb, tca[TCA_RATE]);
+		return basic_set_parms(net, tp, f, base, tb, tca[TCA_RATE]);
 	}
 
 	err = -ENOBUFS;
@@ -203,14 +202,14 @@ static int basic_change(struct tcf_proto *tp, unsigned long base, u32 handle,
 		} while (--i > 0 && basic_get(tp, head->hgenerator));
 
 		if (i <= 0) {
-			printk(KERN_ERR "Insufficient number of handles\n");
+			pr_err("Insufficient number of handles\n");
 			goto errout;
 		}
 
 		f->handle = head->hgenerator;
 	}
 
-	err = basic_set_parms(tp, f, base, tb, tca[TCA_RATE]);
+	err = basic_set_parms(net, tp, f, base, tb, tca[TCA_RATE]);
 	if (err < 0)
 		goto errout;
 
@@ -260,8 +259,9 @@ static int basic_dump(struct tcf_proto *tp, unsigned long fh,
 	if (nest == NULL)
 		goto nla_put_failure;
 
-	if (f->res.classid)
-		NLA_PUT_U32(skb, TCA_BASIC_CLASSID, f->res.classid);
+	if (f->res.classid &&
+	    nla_put_u32(skb, TCA_BASIC_CLASSID, f->res.classid))
+		goto nla_put_failure;
 
 	if (tcf_exts_dump(skb, &f->exts, &basic_ext_map) < 0 ||
 	    tcf_em_tree_dump(skb, &f->ematches, TCA_BASIC_EMATCHES) < 0)

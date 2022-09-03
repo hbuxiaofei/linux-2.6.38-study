@@ -38,6 +38,8 @@ enum nfs4_callback_opnum {
 struct cb_process_state {
 	__be32			drc_status;
 	struct nfs_client	*clp;
+	u32			slotid;
+	struct net		*net;
 };
 
 struct cb_compound_hdr_arg {
@@ -140,7 +142,7 @@ extern __be32 nfs4_callback_recallany(struct cb_recallanyargs *args,
 
 struct cb_recallslotargs {
 	struct sockaddr	*crsa_addr;
-	uint32_t	crsa_target_max_slots;
+	uint32_t	crsa_target_highest_slotid;
 };
 extern __be32 nfs4_callback_recallslot(struct cb_recallslotargs *args,
 					 void *dummy,
@@ -161,12 +163,26 @@ struct cb_layoutrecallargs {
 	};
 };
 
-extern unsigned nfs4_callback_layoutrecall(
+extern __be32 nfs4_callback_layoutrecall(
 	struct cb_layoutrecallargs *args,
 	void *dummy, struct cb_process_state *cps);
 
-extern void nfs4_check_drain_bc_complete(struct nfs4_session *ses);
-extern void nfs4_cb_take_slot(struct nfs_client *clp);
+struct cb_devicenotifyitem {
+	uint32_t		cbd_notify_type;
+	uint32_t		cbd_layout_type;
+	struct nfs4_deviceid	cbd_dev_id;
+	uint32_t		cbd_immediate;
+};
+
+struct cb_devicenotifyargs {
+	int				 ndevs;
+	struct cb_devicenotifyitem	 *devs;
+};
+
+extern __be32 nfs4_callback_devicenotify(
+	struct cb_devicenotifyargs *args,
+	void *dummy, struct cb_process_state *cps);
+
 #endif /* CONFIG_NFS_V4_1 */
 extern int check_gss_callback_principal(struct nfs_client *, struct svc_rqst *);
 extern __be32 nfs4_callback_getattr(struct cb_getattrargs *args,
@@ -174,9 +190,9 @@ extern __be32 nfs4_callback_getattr(struct cb_getattrargs *args,
 				    struct cb_process_state *cps);
 extern __be32 nfs4_callback_recall(struct cb_recallargs *args, void *dummy,
 				   struct cb_process_state *cps);
-#ifdef CONFIG_NFS_V4
+#if IS_ENABLED(CONFIG_NFS_V4)
 extern int nfs_callback_up(u32 minorversion, struct rpc_xprt *xprt);
-extern void nfs_callback_down(int minorversion);
+extern void nfs_callback_down(int minorversion, struct net *net);
 extern int nfs4_validate_delegation_stateid(struct nfs_delegation *delegation,
 					    const nfs4_stateid *stateid);
 extern int nfs4_set_callback_sessionid(struct nfs_client *clp);
@@ -191,6 +207,5 @@ extern int nfs4_set_callback_sessionid(struct nfs_client *clp);
 
 extern unsigned int nfs_callback_set_tcpport;
 extern unsigned short nfs_callback_tcpport;
-extern unsigned short nfs_callback_tcpport6;
 
 #endif /* __LINUX_FS_NFS_CALLBACK_H */

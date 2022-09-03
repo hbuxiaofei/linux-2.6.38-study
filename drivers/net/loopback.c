@@ -41,7 +41,6 @@
 #include <linux/in.h>
 #include <linux/init.h>
 
-#include <asm/system.h>
 #include <asm/uaccess.h>
 #include <asm/io.h>
 
@@ -78,6 +77,11 @@ static netdev_tx_t loopback_xmit(struct sk_buff *skb,
 
 	skb_orphan(skb);
 
+	/* Before queueing this packet to netif_rx(),
+	 * make sure dst is refcounted.
+	 */
+	skb_dst_force(skb);
+
 	skb->protocol = eth_type_trans(skb, dev);
 
 	/* it's OK to use per_cpu_ptr() because BHs are off */
@@ -108,10 +112,10 @@ static struct rtnl_link_stats64 *loopback_get_stats64(struct net_device *dev,
 
 		lb_stats = per_cpu_ptr(dev->lstats, i);
 		do {
-			start = u64_stats_fetch_begin(&lb_stats->syncp);
+			start = u64_stats_fetch_begin_bh(&lb_stats->syncp);
 			tbytes = lb_stats->bytes;
 			tpackets = lb_stats->packets;
-		} while (u64_stats_fetch_retry(&lb_stats->syncp, start));
+		} while (u64_stats_fetch_retry_bh(&lb_stats->syncp, start));
 		bytes   += tbytes;
 		packets += tpackets;
 	}
@@ -129,10 +133,6 @@ static u32 always_on(struct net_device *dev)
 
 static const struct ethtool_ops loopback_ethtool_ops = {
 	.get_link		= always_on,
-	.set_tso		= ethtool_op_set_tso,
-	.get_tx_csum		= always_on,
-	.get_sg			= always_on,
-	.get_rx_csum		= always_on,
 };
 
 static int loopback_dev_init(struct net_device *dev)
@@ -162,19 +162,24 @@ static const struct net_device_ops loopback_ops = {
  */
 static void loopback_setup(struct net_device *dev)
 {
-	dev->mtu		= (16 * 1024) + 20 + 20 + 12;
+	dev->mtu		= 64 * 1024;
 	dev->hard_header_len	= ETH_HLEN;	/* 14	*/
 	dev->addr_len		= ETH_ALEN;	/* 6	*/
 	dev->tx_queue_len	= 0;
 	dev->type		= ARPHRD_LOOPBACK;	/* 0x0001*/
 	dev->flags		= IFF_LOOPBACK;
 	dev->priv_flags	       &= ~IFF_XMIT_DST_RELEASE;
+	dev->hw_features	= NETIF_F_ALL_TSO | NETIF_F_UFO;
 	dev->features 		= NETIF_F_SG | NETIF_F_FRAGLIST
-		| NETIF_F_TSO
-		| NETIF_F_NO_CSUM
+		| NETIF_F_ALL_TSO
+		| NETIF_F_UFO
+		| NETIF_F_HW_CSUM
+		| NETIF_F_RXCSUM
 		| NETIF_F_HIGHDMA
 		| NETIF_F_LLTX
-		| NETIF_F_NETNS_LOCAL;
+		| NETIF_F_NETNS_LOCAL
+		| NETIF_F_VLAN_CHALLENGED
+		| NETIF_F_LOOPBACK;
 	dev->ethtool_ops	= &loopback_ethtool_ops;
 	dev->header_ops		= &eth_header_ops;
 	dev->netdev_ops		= &loopback_ops;
@@ -197,6 +202,7 @@ static __net_init int loopback_net_init(struct net *net)
 	if (err)
 		goto out_free_netdev;
 
+	BUG_ON(dev->ifindex != LOOPBACK_IFINDEX);
 	net->loopback_dev = dev;
 	return 0;
 

@@ -3,7 +3,7 @@
  * MSM7K, QSD io support
  *
  * Copyright (C) 2007 Google, Inc.
- * Copyright (c) 2008-2010, Code Aurora Forum. All rights reserved.
+ * Copyright (c) 2008-2011, Code Aurora Forum. All rights reserved.
  * Author: Brian Swetland <swetland@google.com>
  *
  * This software is licensed under the terms of the GNU General Public
@@ -20,6 +20,7 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/io.h>
+#include <linux/export.h>
 
 #include <mach/hardware.h>
 #include <asm/page.h>
@@ -28,28 +29,32 @@
 
 #include <mach/board.h>
 
-#define MSM_DEVICE(name) { \
+#include "common.h"
+
+#define MSM_CHIP_DEVICE_TYPE(name, chip, mem_type) {			      \
 		.virtual = (unsigned long) MSM_##name##_BASE, \
-		.pfn = __phys_to_pfn(MSM_##name##_PHYS), \
-		.length = MSM_##name##_SIZE, \
-		.type = MT_DEVICE_NONSHARED, \
+		.pfn = __phys_to_pfn(chip##_##name##_PHYS), \
+		.length = chip##_##name##_SIZE, \
+		.type = mem_type, \
 	 }
 
-#if defined(CONFIG_ARCH_MSM7X00A) || defined(CONFIG_ARCH_MSM7X27) \
-	|| defined(CONFIG_ARCH_MSM7X25)
+#define MSM_DEVICE_TYPE(name, mem_type) \
+		MSM_CHIP_DEVICE_TYPE(name, MSM, mem_type)
+#define MSM_CHIP_DEVICE(name, chip) \
+		MSM_CHIP_DEVICE_TYPE(name, chip, MT_DEVICE)
+#define MSM_DEVICE(name) MSM_CHIP_DEVICE(name, MSM)
+
+#if defined(CONFIG_ARCH_MSM7X00A)
 static struct map_desc msm_io_desc[] __initdata = {
-	MSM_DEVICE(VIC),
-	MSM_DEVICE(CSR),
-	MSM_DEVICE(GPT),
-	MSM_DEVICE(DMOV),
-	MSM_DEVICE(GPIO1),
-	MSM_DEVICE(GPIO2),
-	MSM_DEVICE(CLK_CTL),
-#ifdef CONFIG_MSM_DEBUG_UART
-	MSM_DEVICE(DEBUG_UART),
-#endif
-#ifdef CONFIG_ARCH_MSM7X30
-	MSM_DEVICE(GCC),
+	MSM_DEVICE_TYPE(VIC, MT_DEVICE_NONSHARED),
+	MSM_CHIP_DEVICE_TYPE(CSR, MSM7X00, MT_DEVICE_NONSHARED),
+	MSM_DEVICE_TYPE(DMOV, MT_DEVICE_NONSHARED),
+	MSM_CHIP_DEVICE_TYPE(GPIO1, MSM7X00, MT_DEVICE_NONSHARED),
+	MSM_CHIP_DEVICE_TYPE(GPIO2, MSM7X00, MT_DEVICE_NONSHARED),
+	MSM_DEVICE_TYPE(CLK_CTL, MT_DEVICE_NONSHARED),
+#if defined(CONFIG_DEBUG_MSM_UART1) || defined(CONFIG_DEBUG_MSM_UART2) || \
+	defined(CONFIG_DEBUG_MSM_UART3)
+	MSM_DEVICE_TYPE(DEBUG_UART, MT_DEVICE_NONSHARED),
 #endif
 	{
 		.virtual =  (unsigned long) MSM_SHARED_RAM_BASE,
@@ -73,17 +78,17 @@ void __init msm_map_common_io(void)
 #ifdef CONFIG_ARCH_QSD8X50
 static struct map_desc qsd8x50_io_desc[] __initdata = {
 	MSM_DEVICE(VIC),
-	MSM_DEVICE(CSR),
-	MSM_DEVICE(TMR),
+	MSM_CHIP_DEVICE(CSR, QSD8X50),
 	MSM_DEVICE(DMOV),
-	MSM_DEVICE(GPIO1),
-	MSM_DEVICE(GPIO2),
+	MSM_CHIP_DEVICE(GPIO1, QSD8X50),
+	MSM_CHIP_DEVICE(GPIO2, QSD8X50),
 	MSM_DEVICE(CLK_CTL),
 	MSM_DEVICE(SIRC),
 	MSM_DEVICE(SCPLL),
 	MSM_DEVICE(AD5),
 	MSM_DEVICE(MDC),
-#ifdef CONFIG_MSM_DEBUG_UART
+#if defined(CONFIG_DEBUG_MSM_UART1) || defined(CONFIG_DEBUG_MSM_UART2) || \
+	defined(CONFIG_DEBUG_MSM_UART3)
 	MSM_DEVICE(DEBUG_UART),
 #endif
 	{
@@ -102,12 +107,13 @@ void __init msm_map_qsd8x50_io(void)
 
 #ifdef CONFIG_ARCH_MSM8X60
 static struct map_desc msm8x60_io_desc[] __initdata = {
-	MSM_DEVICE(QGIC_DIST),
-	MSM_DEVICE(QGIC_CPU),
-	MSM_DEVICE(TMR),
-	MSM_DEVICE(TMR0),
-	MSM_DEVICE(ACC),
-	MSM_DEVICE(GCC),
+	MSM_CHIP_DEVICE(QGIC_DIST, MSM8X60),
+	MSM_CHIP_DEVICE(QGIC_CPU, MSM8X60),
+	MSM_CHIP_DEVICE(TMR, MSM8X60),
+	MSM_CHIP_DEVICE(TMR0, MSM8X60),
+#ifdef CONFIG_DEBUG_MSM8660_UART
+	MSM_DEVICE(DEBUG_UART),
+#endif
 };
 
 void __init msm_map_msm8x60_io(void)
@@ -116,14 +122,30 @@ void __init msm_map_msm8x60_io(void)
 }
 #endif /* CONFIG_ARCH_MSM8X60 */
 
+#ifdef CONFIG_ARCH_MSM8960
+static struct map_desc msm8960_io_desc[] __initdata = {
+	MSM_CHIP_DEVICE(QGIC_DIST, MSM8960),
+	MSM_CHIP_DEVICE(QGIC_CPU, MSM8960),
+	MSM_CHIP_DEVICE(TMR, MSM8960),
+	MSM_CHIP_DEVICE(TMR0, MSM8960),
+#ifdef CONFIG_DEBUG_MSM8960_UART
+	MSM_DEVICE(DEBUG_UART),
+#endif
+};
+
+void __init msm_map_msm8960_io(void)
+{
+	iotable_init(msm8960_io_desc, ARRAY_SIZE(msm8960_io_desc));
+}
+#endif /* CONFIG_ARCH_MSM8960 */
+
 #ifdef CONFIG_ARCH_MSM7X30
 static struct map_desc msm7x30_io_desc[] __initdata = {
 	MSM_DEVICE(VIC),
-	MSM_DEVICE(CSR),
-	MSM_DEVICE(TMR),
+	MSM_CHIP_DEVICE(CSR, MSM7X30),
 	MSM_DEVICE(DMOV),
-	MSM_DEVICE(GPIO1),
-	MSM_DEVICE(GPIO2),
+	MSM_CHIP_DEVICE(GPIO1, MSM7X30),
+	MSM_CHIP_DEVICE(GPIO2, MSM7X30),
 	MSM_DEVICE(CLK_CTL),
 	MSM_DEVICE(CLK_CTL_SH2),
 	MSM_DEVICE(AD5),
@@ -132,7 +154,8 @@ static struct map_desc msm7x30_io_desc[] __initdata = {
 	MSM_DEVICE(SAW),
 	MSM_DEVICE(GCC),
 	MSM_DEVICE(TCSR),
-#ifdef CONFIG_MSM_DEBUG_UART
+#if defined(CONFIG_DEBUG_MSM_UART1) || defined(CONFIG_DEBUG_MSM_UART2) || \
+	defined(CONFIG_DEBUG_MSM_UART3)
 	MSM_DEVICE(DEBUG_UART),
 #endif
 	{
@@ -149,8 +172,8 @@ void __init msm_map_msm7x30_io(void)
 }
 #endif /* CONFIG_ARCH_MSM7X30 */
 
-void __iomem *
-__msm_ioremap(unsigned long phys_addr, size_t size, unsigned int mtype)
+void __iomem *__msm_ioremap_caller(unsigned long phys_addr, size_t size,
+				   unsigned int mtype, void *caller)
 {
 	if (mtype == MT_DEVICE) {
 		/* The peripherals in the 88000000 - D0000000 range
@@ -161,7 +184,5 @@ __msm_ioremap(unsigned long phys_addr, size_t size, unsigned int mtype)
 			mtype = MT_DEVICE_NONSHARED;
 	}
 
-	return __arm_ioremap_caller(phys_addr, size, mtype,
-		__builtin_return_address(0));
+	return __arm_ioremap_caller(phys_addr, size, mtype, caller);
 }
-EXPORT_SYMBOL(__msm_ioremap);

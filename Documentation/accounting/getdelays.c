@@ -51,7 +51,6 @@ int dbg;
 int print_delays;
 int print_io_accounting;
 int print_task_context_switch_counts;
-__u64 stime, utime;
 
 #define PRINTF(fmt, arg...) {			\
 	    if (dbg) {				\
@@ -98,10 +97,9 @@ static int create_nl_socket(int protocol)
 	if (rcvbufsz)
 		if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF,
 				&rcvbufsz, sizeof(rcvbufsz)) < 0) {
-			fprintf(stderr, "Unable to set socket rcv buf size "
-					"to %d\n",
+			fprintf(stderr, "Unable to set socket rcv buf size to %d\n",
 				rcvbufsz);
-			return -1;
+			goto error;
 		}
 
 	memset(&local, 0, sizeof(local));
@@ -177,6 +175,8 @@ static int get_family_id(int sd)
 	rc = send_cmd(sd, GENL_ID_CTRL, getpid(), CTRL_CMD_GETFAMILY,
 			CTRL_ATTR_FAMILY_NAME, (void *)name,
 			strlen(TASKSTATS_GENL_NAME)+1);
+	if (rc < 0)
+		return 0;	/* sendto() failure? */
 
 	rep_len = recv(sd, &ans, sizeof(ans), 0);
 	if (ans.n.nlmsg_type == NLMSG_ERROR ||
@@ -191,30 +191,37 @@ static int get_family_id(int sd)
 	return id;
 }
 
+#define average_ms(t, c) (t / 1000000ULL / (c ? c : 1))
+
 static void print_delayacct(struct taskstats *t)
 {
-	printf("\n\nCPU   %15s%15s%15s%15s\n"
-	       "      %15llu%15llu%15llu%15llu\n"
-	       "IO    %15s%15s\n"
-	       "      %15llu%15llu\n"
-	       "SWAP  %15s%15s\n"
-	       "      %15llu%15llu\n"
-	       "RECLAIM  %12s%15s\n"
-	       "      %15llu%15llu\n",
-	       "count", "real total", "virtual total", "delay total",
+	printf("\n\nCPU   %15s%15s%15s%15s%15s\n"
+	       "      %15llu%15llu%15llu%15llu%15.3fms\n"
+	       "IO    %15s%15s%15s\n"
+	       "      %15llu%15llu%15llums\n"
+	       "SWAP  %15s%15s%15s\n"
+	       "      %15llu%15llu%15llums\n"
+	       "RECLAIM  %12s%15s%15s\n"
+	       "      %15llu%15llu%15llums\n",
+	       "count", "real total", "virtual total",
+	       "delay total", "delay average",
 	       (unsigned long long)t->cpu_count,
 	       (unsigned long long)t->cpu_run_real_total,
 	       (unsigned long long)t->cpu_run_virtual_total,
 	       (unsigned long long)t->cpu_delay_total,
-	       "count", "delay total",
+	       average_ms((double)t->cpu_delay_total, t->cpu_count),
+	       "count", "delay total", "delay average",
 	       (unsigned long long)t->blkio_count,
 	       (unsigned long long)t->blkio_delay_total,
-	       "count", "delay total",
+	       average_ms(t->blkio_delay_total, t->blkio_count),
+	       "count", "delay total", "delay average",
 	       (unsigned long long)t->swapin_count,
 	       (unsigned long long)t->swapin_delay_total,
-	       "count", "delay total",
+	       average_ms(t->swapin_delay_total, t->swapin_count),
+	       "count", "delay total", "delay average",
 	       (unsigned long long)t->freepages_count,
-	       (unsigned long long)t->freepages_delay_total);
+	       (unsigned long long)t->freepages_delay_total,
+	       average_ms(t->freepages_delay_total, t->freepages_count));
 }
 
 static void task_context_switch_counts(struct taskstats *t)
@@ -433,8 +440,6 @@ int main(int argc, char *argv[])
 	}
 
 	do {
-		int i;
-
 		rep_len = recv(nl_sd, &msg, sizeof(msg), 0);
 		PRINTF("received %d bytes\n", rep_len);
 
@@ -459,7 +464,6 @@ int main(int argc, char *argv[])
 
 		na = (struct nlattr *) GENLMSG_DATA(&msg);
 		len = 0;
-		i = 0;
 		while (len < rep_len) {
 			len += NLA_ALIGN(na->nla_len);
 			switch (na->nla_type) {

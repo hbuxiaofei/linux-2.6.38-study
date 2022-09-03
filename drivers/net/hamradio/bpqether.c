@@ -69,7 +69,6 @@
 #include <linux/if_arp.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
-#include <asm/system.h>
 #include <asm/uaccess.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
@@ -88,7 +87,7 @@
 
 #include <linux/bpqether.h>
 
-static const char banner[] __initdata = KERN_INFO \
+static const char banner[] __initconst = KERN_INFO \
 	"AX.25: bpqether driver version 004\n";
 
 static char bcast_addr[6]={0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
@@ -400,13 +399,14 @@ static void *bpq_seq_start(struct seq_file *seq, loff_t *pos)
 static void *bpq_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 {
 	struct list_head *p;
+	struct bpqdev *bpqdev = v;
 
 	++*pos;
 
 	if (v == SEQ_START_TOKEN)
-		p = rcu_dereference(bpq_devices.next);
+		p = rcu_dereference(list_next_rcu(&bpq_devices));
 	else
-		p = rcu_dereference(((struct bpqdev *)v)->bpq_list.next);
+		p = rcu_dereference(list_next_rcu(&bpqdev->bpq_list));
 
 	return (p == &bpq_devices) ? NULL 
 		: list_entry(p, struct bpqdev, bpq_list);
@@ -515,10 +515,6 @@ static int bpq_new_device(struct net_device *edev)
 	memcpy(bpq->dest_addr, bcast_addr, sizeof(bpq_eth_addr));
 	memcpy(bpq->acpt_addr, bcast_addr, sizeof(bpq_eth_addr));
 
-	err = dev_alloc_name(ndev, ndev->name);
-	if (err < 0) 
-		goto error;
-
 	err = register_netdevice(ndev);
 	if (err)
 		goto error;
@@ -590,7 +586,8 @@ static int bpq_device_event(struct notifier_block *this,unsigned long event, voi
 static int __init bpq_init_driver(void)
 {
 #ifdef CONFIG_PROC_FS
-	if (!proc_net_fops_create(&init_net, "bpqether", S_IRUGO, &bpq_info_fops)) {
+	if (!proc_create("bpqether", S_IRUGO, init_net.proc_net,
+			 &bpq_info_fops)) {
 		printk(KERN_ERR
 			"bpq: cannot create /proc/net/bpqether entry.\n");
 		return -ENOENT;
@@ -614,7 +611,7 @@ static void __exit bpq_cleanup_driver(void)
 
 	unregister_netdevice_notifier(&bpq_dev_notifier);
 
-	proc_net_remove(&init_net, "bpqether");
+	remove_proc_entry("bpqether", init_net.proc_net);
 
 	rtnl_lock();
 	while (!list_empty(&bpq_devices)) {

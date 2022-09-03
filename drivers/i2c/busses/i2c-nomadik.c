@@ -14,16 +14,19 @@
  */
 #include <linux/init.h>
 #include <linux/module.h>
-#include <linux/platform_device.h>
-#include <linux/delay.h>
+#include <linux/amba/bus.h>
+#include <linux/atomic.h>
 #include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/i2c.h>
 #include <linux/err.h>
 #include <linux/clk.h>
 #include <linux/io.h>
-
-#include <plat/i2c.h>
+#include <linux/pm_runtime.h>
+#include <linux/platform_data/i2c-nomadik.h>
+#include <linux/of.h>
+#include <linux/of_i2c.h>
+#include <linux/pinctrl/consumer.h>
 
 #define DRIVER_NAME "nmk-i2c"
 
@@ -62,11 +65,11 @@
 /* Master controller (MCR) register */
 #define I2C_MCR_OP		(0x1 << 0)	/* Operation */
 #define I2C_MCR_A7		(0x7f << 1)	/* 7-bit address */
-#define I2C_MCR_EA10		(0x7 << 8) 	/* 10-bit Extended address */
+#define I2C_MCR_EA10		(0x7 << 8)	/* 10-bit Extended address */
 #define I2C_MCR_SB		(0x1 << 11)	/* Extended address */
 #define I2C_MCR_AM		(0x3 << 12)	/* Address type */
-#define I2C_MCR_STOP		(0x1 << 14) 	/* Stop condition */
-#define I2C_MCR_LENGTH		(0x7ff << 15) 	/* Transaction length */
+#define I2C_MCR_STOP		(0x1 << 14)	/* Stop condition */
+#define I2C_MCR_LENGTH		(0x7ff << 15)	/* Transaction length */
 
 /* Status register (SR) */
 #define I2C_SR_OP		(0x3 << 0)	/* Operation */
@@ -76,7 +79,7 @@
 #define I2C_SR_LENGTH		(0x7ff << 9)	/* Transfer length */
 
 /* Interrupt mask set/clear (IMSCR) bits */
-#define I2C_IT_TXFE 		(0x1 << 0)
+#define I2C_IT_TXFE		(0x1 << 0)
 #define I2C_IT_TXFNE		(0x1 << 1)
 #define I2C_IT_TXFF		(0x1 << 2)
 #define I2C_IT_TXFOVR		(0x1 << 3)
@@ -103,9 +106,6 @@
 /* maximum threshold value */
 #define MAX_I2C_FIFO_THRESHOLD	15
 
-/* per-transfer delay, required for the hardware to stabilize */
-#define I2C_DELAY		150
-
 enum i2c_status {
 	I2C_NOP,
 	I2C_ON_GOING,
@@ -120,15 +120,12 @@ enum i2c_operation {
 	I2C_READ = 0x01
 };
 
-/* controller response timeout in ms */
-#define I2C_TIMEOUT_MS	2000
-
 /**
  * struct i2c_nmk_client - client specific data
  * @slave_adr: 7-bit slave address
- * @count: no. bytes to be transfered
+ * @count: no. bytes to be transferred
  * @buffer: client data buffer
- * @xfer_bytes: bytes transfered till now
+ * @xfer_bytes: bytes transferred till now
  * @operation: current I2C operation
  */
 struct i2c_nmk_client {
@@ -140,29 +137,40 @@ struct i2c_nmk_client {
 };
 
 /**
- * struct nmk_i2c_dev - private data structure of the controller
- * @pdev: parent platform device
- * @adap: corresponding I2C adapter
- * @irq: interrupt line for the controller
- * @virtbase: virtual io memory area
- * @clk: hardware i2c block clock
- * @cfg: machine provided controller configuration
- * @cli: holder of client specific data
- * @stop: stop condition
- * @xfer_complete: acknowledge completion for a I2C message
- * @result: controller propogated result
+ * struct nmk_i2c_dev - private data structure of the controller.
+ * @adev: parent amba device.
+ * @adap: corresponding I2C adapter.
+ * @irq: interrupt line for the controller.
+ * @virtbase: virtual io memory area.
+ * @clk: hardware i2c block clock.
+ * @cfg: machine provided controller configuration.
+ * @cli: holder of client specific data.
+ * @stop: stop condition.
+ * @xfer_complete: acknowledge completion for a I2C message.
+ * @result: controller propogated result.
+ * @pinctrl: pinctrl handle.
+ * @pins_default: default state for the pins.
+ * @pins_idle: idle state for the pins.
+ * @pins_sleep: sleep state for the pins.
+ * @busy: Busy doing transfer.
  */
 struct nmk_i2c_dev {
-	struct platform_device		*pdev;
-	struct i2c_adapter 		adap;
-	int 				irq;
+	struct amba_device		*adev;
+	struct i2c_adapter		adap;
+	int				irq;
 	void __iomem			*virtbase;
 	struct clk			*clk;
 	struct nmk_i2c_controller	cfg;
 	struct i2c_nmk_client		cli;
-	int 				stop;
+	int				stop;
 	struct completion		xfer_complete;
-	int 				result;
+	int				result;
+	/* Three pin states - default, idle & sleep */
+	struct pinctrl			*pinctrl;
+	struct pinctrl_state		*pins_default;
+	struct pinctrl_state		*pins_idle;
+	struct pinctrl_state		*pins_sleep;
+	bool				busy;
 };
 
 /* controller's abort causes */
@@ -209,7 +217,7 @@ static int flush_i2c_fifo(struct nmk_i2c_dev *dev)
 	writel((I2C_CR_FTX | I2C_CR_FRX), dev->virtbase + I2C_CR);
 
 	for (i = 0; i < LOOP_ATTEMPTS; i++) {
-		timeout = jiffies + msecs_to_jiffies(I2C_TIMEOUT_MS);
+		timeout = jiffies + dev->adap.timeout;
 
 		while (!time_after(jiffies, timeout)) {
 			if ((readl(dev->virtbase + I2C_CR) &
@@ -218,8 +226,9 @@ static int flush_i2c_fifo(struct nmk_i2c_dev *dev)
 		}
 	}
 
-	dev_err(&dev->pdev->dev, "flushing operation timed out "
-		"giving up after %d attempts", LOOP_ATTEMPTS);
+	dev_err(&dev->adev->dev,
+		"flushing operation timed out giving up after %d attempts",
+		LOOP_ATTEMPTS);
 
 	return -ETIMEDOUT;
 }
@@ -253,11 +262,9 @@ static int init_hw(struct nmk_i2c_dev *dev)
 {
 	int stat;
 
-	clk_enable(dev->clk);
-
 	stat = flush_i2c_fifo(dev);
 	if (stat)
-		return stat;
+		goto exit;
 
 	/* disable the controller */
 	i2c_clr_bit(dev->virtbase + I2C_CR , I2C_CR_PE);
@@ -268,26 +275,41 @@ static int init_hw(struct nmk_i2c_dev *dev)
 
 	dev->cli.operation = I2C_NO_OPERATION;
 
-	clk_disable(dev->clk);
-
-	udelay(I2C_DELAY);
-	return 0;
+exit:
+	return stat;
 }
 
 /* enable peripheral, master mode operation */
-#define DEFAULT_I2C_REG_CR 	((1 << 1) | I2C_CR_PE)
+#define DEFAULT_I2C_REG_CR	((1 << 1) | I2C_CR_PE)
 
 /**
  * load_i2c_mcr_reg() - load the MCR register
  * @dev: private data of controller
+ * @flags: message flags
  */
-static u32 load_i2c_mcr_reg(struct nmk_i2c_dev *dev)
+static u32 load_i2c_mcr_reg(struct nmk_i2c_dev *dev, u16 flags)
 {
 	u32 mcr = 0;
+	unsigned short slave_adr_3msb_bits;
 
-	/* 7-bit address transaction */
-	mcr |= GEN_MASK(1, I2C_MCR_AM, 12);
 	mcr |= GEN_MASK(dev->cli.slave_adr, I2C_MCR_A7, 1);
+
+	if (unlikely(flags & I2C_M_TEN)) {
+		/* 10-bit address transaction */
+		mcr |= GEN_MASK(2, I2C_MCR_AM, 12);
+		/*
+		 * Get the top 3 bits.
+		 * EA10 represents extended address in MCR. This includes
+		 * the extension (MSB bits) of the 7 bit address loaded
+		 * in A7
+		 */
+		slave_adr_3msb_bits = (dev->cli.slave_adr >> 7) & 0x7;
+
+		mcr |= GEN_MASK(slave_adr_3msb_bits, I2C_MCR_EA10, 8);
+	} else {
+		/* 7-bit address transaction */
+		mcr |= GEN_MASK(1, I2C_MCR_AM, 12);
+	}
 
 	/* start byte procedure not applied */
 	mcr |= GEN_MASK(0, I2C_MCR_SB, 11);
@@ -330,16 +352,12 @@ static void setup_i2c_controller(struct nmk_i2c_dev *dev)
 	 * slsu defines the data setup time after SCL clock
 	 * stretching in terms of i2c clk cycles. The
 	 * needed setup time for the three modes are 250ns,
-	 * 100ns, 10ns repectively thus leading to the values
+	 * 100ns, 10ns respectively thus leading to the values
 	 * of 14, 6, 2 for a 48 MHz i2c clk.
 	 */
 	writel(dev->cfg.slsu << 16, dev->virtbase + I2C_SCR);
 
 	i2c_clk = clk_get_rate(dev->clk);
-
-	/* fallback to std. mode if machine has not provided it */
-	if (dev->cfg.clk_freq == 0)
-		dev->cfg.clk_freq = 100000;
 
 	/*
 	 * The spec says, in case of std. mode the divider is
@@ -364,12 +382,12 @@ static void setup_i2c_controller(struct nmk_i2c_dev *dev)
 	/*
 	 * set the speed mode. Currently we support
 	 * only standard and fast mode of operation
-	 * TODO - support for fast mode plus (upto 1Mb/s)
+	 * TODO - support for fast mode plus (up to 1Mb/s)
 	 * and high speed (up to 3.4 Mb/s)
 	 */
 	if (dev->cfg.sm > I2C_FREQ_MODE_FAST) {
-		dev_err(&dev->pdev->dev, "do not support this mode "
-			"defaulting to std. mode\n");
+		dev_err(&dev->adev->dev,
+			"do not support this mode defaulting to std. mode\n");
 		brcr2 = i2c_clk/(100000 * 2) & 0xffff;
 		writel((brcr1 | brcr2), dev->virtbase + I2C_BRCR);
 		writel(I2C_FREQ_MODE_STANDARD << 4,
@@ -385,19 +403,19 @@ static void setup_i2c_controller(struct nmk_i2c_dev *dev)
 /**
  * read_i2c() - Read from I2C client device
  * @dev: private data of I2C Driver
+ * @flags: message flags
  *
  * This function reads from i2c client device when controller is in
  * master mode. There is a completion timeout. If there is no transfer
  * before timeout error is returned.
  */
-static int read_i2c(struct nmk_i2c_dev *dev)
+static int read_i2c(struct nmk_i2c_dev *dev, u16 flags)
 {
 	u32 status = 0;
-	u32 mcr;
-	u32 irq_mask = 0;
+	u32 mcr, irq_mask;
 	int timeout;
 
-	mcr = load_i2c_mcr_reg(dev);
+	mcr = load_i2c_mcr_reg(dev, flags);
 	writel(mcr, dev->virtbase + I2C_MCR);
 
 	/* load the current CR value */
@@ -423,39 +441,50 @@ static int read_i2c(struct nmk_i2c_dev *dev)
 	writel(readl(dev->virtbase + I2C_IMSCR) | irq_mask,
 			dev->virtbase + I2C_IMSCR);
 
-	timeout = wait_for_completion_interruptible_timeout(
-		&dev->xfer_complete, msecs_to_jiffies(I2C_TIMEOUT_MS));
-
-	if (timeout < 0) {
-		dev_err(&dev->pdev->dev,
-			"wait_for_completion_interruptible_timeout"
-			"returned %d waiting for event\n", timeout);
-		status = timeout;
-	}
+	timeout = wait_for_completion_timeout(
+		&dev->xfer_complete, dev->adap.timeout);
 
 	if (timeout == 0) {
-		/* controller has timedout, re-init the h/w */
-		dev_err(&dev->pdev->dev, "controller timed out, re-init h/w\n");
-		(void) init_hw(dev);
+		/* Controller timed out */
+		dev_err(&dev->adev->dev, "read from slave 0x%x timed out\n",
+				dev->cli.slave_adr);
 		status = -ETIMEDOUT;
 	}
 	return status;
 }
 
+static void fill_tx_fifo(struct nmk_i2c_dev *dev, int no_bytes)
+{
+	int count;
+
+	for (count = (no_bytes - 2);
+			(count > 0) &&
+			(dev->cli.count != 0);
+			count--) {
+		/* write to the Tx FIFO */
+		writeb(*dev->cli.buffer,
+			dev->virtbase + I2C_TFR);
+		dev->cli.buffer++;
+		dev->cli.count--;
+		dev->cli.xfer_bytes++;
+	}
+
+}
+
 /**
  * write_i2c() - Write data to I2C client.
  * @dev: private data of I2C Driver
+ * @flags: message flags
  *
  * This function writes data to I2C client
  */
-static int write_i2c(struct nmk_i2c_dev *dev)
+static int write_i2c(struct nmk_i2c_dev *dev, u16 flags)
 {
 	u32 status = 0;
-	u32 mcr;
-	u32 irq_mask = 0;
+	u32 mcr, irq_mask;
 	int timeout;
 
-	mcr = load_i2c_mcr_reg(dev);
+	mcr = load_i2c_mcr_reg(dev, flags);
 
 	writel(mcr, dev->virtbase + I2C_MCR);
 
@@ -469,8 +498,13 @@ static int write_i2c(struct nmk_i2c_dev *dev)
 	init_completion(&dev->xfer_complete);
 
 	/* enable interrupts by settings the masks */
-	irq_mask = (I2C_IT_TXFNE | I2C_IT_TXFOVR |
-			I2C_IT_MAL | I2C_IT_BERR);
+	irq_mask = (I2C_IT_TXFOVR | I2C_IT_MAL | I2C_IT_BERR);
+
+	/* Fill the TX FIFO with transmit data */
+	fill_tx_fifo(dev, MAX_I2C_FIFO_THRESHOLD);
+
+	if (dev->cli.count != 0)
+		irq_mask |= I2C_IT_TXFNE;
 
 	/*
 	 * check if we want to transfer a single or multiple bytes, if so
@@ -487,21 +521,59 @@ static int write_i2c(struct nmk_i2c_dev *dev)
 	writel(readl(dev->virtbase + I2C_IMSCR) | irq_mask,
 			dev->virtbase + I2C_IMSCR);
 
-	timeout = wait_for_completion_interruptible_timeout(
-		&dev->xfer_complete, msecs_to_jiffies(I2C_TIMEOUT_MS));
-
-	if (timeout < 0) {
-		dev_err(&dev->pdev->dev,
-			"wait_for_completion_interruptible_timeout"
-			"returned %d waiting for event\n", timeout);
-		status = timeout;
-	}
+	timeout = wait_for_completion_timeout(
+		&dev->xfer_complete, dev->adap.timeout);
 
 	if (timeout == 0) {
-		/* controller has timedout, re-init the h/w */
-		dev_err(&dev->pdev->dev, "controller timed out, re-init h/w\n");
-		(void) init_hw(dev);
+		/* Controller timed out */
+		dev_err(&dev->adev->dev, "write to slave 0x%x timed out\n",
+				dev->cli.slave_adr);
 		status = -ETIMEDOUT;
+	}
+
+	return status;
+}
+
+/**
+ * nmk_i2c_xfer_one() - transmit a single I2C message
+ * @dev: device with a message encoded into it
+ * @flags: message flags
+ */
+static int nmk_i2c_xfer_one(struct nmk_i2c_dev *dev, u16 flags)
+{
+	int status;
+
+	if (flags & I2C_M_RD) {
+		/* read operation */
+		dev->cli.operation = I2C_READ;
+		status = read_i2c(dev, flags);
+	} else {
+		/* write operation */
+		dev->cli.operation = I2C_WRITE;
+		status = write_i2c(dev, flags);
+	}
+
+	if (status || (dev->result)) {
+		u32 i2c_sr;
+		u32 cause;
+
+		i2c_sr = readl(dev->virtbase + I2C_SR);
+		/*
+		 * Check if the controller I2C operation status
+		 * is set to ABORT(11b).
+		 */
+		if (((i2c_sr >> 2) & 0x3) == 0x3) {
+			/* get the abort cause */
+			cause =	(i2c_sr >> 4) & 0x7;
+			dev_err(&dev->adev->dev, "%s\n",
+				cause >= ARRAY_SIZE(abort_causes) ?
+				"unknown reason" :
+				abort_causes[cause]);
+		}
+
+		(void) init_hw(dev);
+
+		status = status ? status : dev->result;
 	}
 
 	return status;
@@ -519,13 +591,13 @@ static int write_i2c(struct nmk_i2c_dev *dev)
  *
  * NOTE:
  * READ TRANSFER : We impose a restriction of the first message to be the
- * 		index message for any read transaction.
- * 		- a no index is coded as '0',
- * 		- 2byte big endian index is coded as '3'
- * 		!!! msg[0].buf holds the actual index.
- * 		This is compatible with generic messages of smbus emulator
- * 		that send a one byte index.
- * 		eg. a I2C transation to read 2 bytes from index 0
+ *		index message for any read transaction.
+ *		- a no index is coded as '0',
+ *		- 2byte big endian index is coded as '3'
+ *		!!! msg[0].buf holds the actual index.
+ *		This is compatible with generic messages of smbus emulator
+ *		that send a one byte index.
+ *		eg. a I2C transation to read 2 bytes from index 0
  *			idx = 0;
  *			msg[0].addr = client->addr;
  *			msg[0].flags = 0x0;
@@ -559,53 +631,67 @@ static int nmk_i2c_xfer(struct i2c_adapter *i2c_adap,
 {
 	int status;
 	int i;
-	u32 cause;
 	struct nmk_i2c_dev *dev = i2c_get_adapdata(i2c_adap);
+	int j;
+
+	dev->busy = true;
+
+	pm_runtime_get_sync(&dev->adev->dev);
+
+	status = clk_prepare_enable(dev->clk);
+	if (status) {
+		dev_err(&dev->adev->dev, "can't prepare_enable clock\n");
+		goto out_clk;
+	}
+
+	/* Optionaly enable pins to be muxed in and configured */
+	if (!IS_ERR(dev->pins_default)) {
+		status = pinctrl_select_state(dev->pinctrl,
+				dev->pins_default);
+		if (status)
+			dev_err(&dev->adev->dev,
+				"could not set default pins\n");
+	}
 
 	status = init_hw(dev);
 	if (status)
-		return status;
+		goto out;
 
-	clk_enable(dev->clk);
+	/* Attempt three times to send the message queue */
+	for (j = 0; j < 3; j++) {
+		/* setup the i2c controller */
+		setup_i2c_controller(dev);
 
-	/* setup the i2c controller */
-	setup_i2c_controller(dev);
+		for (i = 0; i < num_msgs; i++) {
+			dev->cli.slave_adr	= msgs[i].addr;
+			dev->cli.buffer		= msgs[i].buf;
+			dev->cli.count		= msgs[i].len;
+			dev->stop = (i < (num_msgs - 1)) ? 0 : 1;
+			dev->result = 0;
 
-	for (i = 0; i < num_msgs; i++) {
-		if (unlikely(msgs[i].flags & I2C_M_TEN)) {
-			dev_err(&dev->pdev->dev, "10 bit addressing"
-					"not supported\n");
-			return -EINVAL;
+			status = nmk_i2c_xfer_one(dev, msgs[i].flags);
+			if (status != 0)
+				break;
 		}
-		dev->cli.slave_adr	= msgs[i].addr;
-		dev->cli.buffer		= msgs[i].buf;
-		dev->cli.count		= msgs[i].len;
-		dev->stop = (i < (num_msgs - 1)) ? 0 : 1;
-		dev->result = 0;
-
-		if (msgs[i].flags & I2C_M_RD) {
-			/* it is a read operation */
-			dev->cli.operation = I2C_READ;
-			status = read_i2c(dev);
-		} else {
-			/* write operation */
-			dev->cli.operation = I2C_WRITE;
-			status = write_i2c(dev);
-		}
-		if (status || (dev->result)) {
-			/* get the abort cause */
-			cause =	(readl(dev->virtbase + I2C_SR) >> 4) & 0x7;
-			dev_err(&dev->pdev->dev, "error during I2C"
-					"message xfer: %d\n", cause);
-			dev_err(&dev->pdev->dev, "%s\n",
-				cause >= ARRAY_SIZE(abort_causes)
-				? "unknown reason" : abort_causes[cause]);
-			clk_disable(dev->clk);
-			return status;
-		}
-		udelay(I2C_DELAY);
+		if (status == 0)
+			break;
 	}
-	clk_disable(dev->clk);
+
+out:
+	clk_disable_unprepare(dev->clk);
+out_clk:
+	/* Optionally let pins go into idle state */
+	if (!IS_ERR(dev->pins_idle)) {
+		status = pinctrl_select_state(dev->pinctrl,
+				dev->pins_idle);
+		if (status)
+			dev_err(&dev->adev->dev,
+				"could not set pins to idle state\n");
+	}
+
+	pm_runtime_put_sync(&dev->adev->dev);
+
+	dev->busy = false;
 
 	/* return the no. messages processed */
 	if (status)
@@ -643,8 +729,7 @@ static irqreturn_t i2c_irq_handler(int irq, void *arg)
 	struct nmk_i2c_dev *dev = arg;
 	u32 tft, rft;
 	u32 count;
-	u32 misr;
-	u32 src = 0;
+	u32 misr, src;
 
 	/* load Tx FIFO and Rx FIFO threshold values */
 	tft = readl(dev->virtbase + I2C_TFTR);
@@ -666,17 +751,7 @@ static irqreturn_t i2c_irq_handler(int irq, void *arg)
 			 */
 			disable_interrupts(dev, I2C_IT_TXFNE);
 		} else {
-			for (count = (MAX_I2C_FIFO_THRESHOLD - tft - 2);
-					(count > 0) &&
-					(dev->cli.count != 0);
-					count--) {
-				/* write to the Tx FIFO */
-				writeb(*dev->cli.buffer,
-					dev->virtbase + I2C_TFR);
-				dev->cli.buffer++;
-				dev->cli.count--;
-				dev->cli.xfer_bytes++;
-			}
+			fill_tx_fifo(dev, (MAX_I2C_FIFO_THRESHOLD - tft));
 			/*
 			 * if done, close the transfer by disabling the
 			 * corresponding TXFNE interrupt
@@ -729,18 +804,14 @@ static irqreturn_t i2c_irq_handler(int irq, void *arg)
 			}
 		}
 
-		i2c_set_bit(dev->virtbase + I2C_ICR, I2C_IT_MTD);
-		i2c_set_bit(dev->virtbase + I2C_ICR, I2C_IT_MTDWS);
-
-		disable_interrupts(dev,
-				(I2C_IT_TXFNE | I2C_IT_TXFE | I2C_IT_TXFF
-					| I2C_IT_TXFOVR | I2C_IT_RXFNF
-					| I2C_IT_RXFF | I2C_IT_RXFE));
+		disable_all_interrupts(dev);
+		clear_all_interrupts(dev);
 
 		if (dev->cli.count) {
-			dev->result = -1;
-			dev_err(&dev->pdev->dev, "%lu bytes still remain to be"
-					"xfered\n", dev->cli.count);
+			dev->result = -EIO;
+			dev_err(&dev->adev->dev,
+				"%lu bytes still remain to be xfered\n",
+				dev->cli.count);
 			(void) init_hw(dev);
 		}
 		complete(&dev->xfer_complete);
@@ -749,7 +820,7 @@ static irqreturn_t i2c_irq_handler(int irq, void *arg)
 
 	/* Master Arbitration lost interrupt */
 	case I2C_IT_MAL:
-		dev->result = -1;
+		dev->result = -EIO;
 		(void) init_hw(dev);
 
 		i2c_set_bit(dev->virtbase + I2C_ICR, I2C_IT_MAL);
@@ -763,7 +834,7 @@ static irqreturn_t i2c_irq_handler(int irq, void *arg)
 	 * during the transaction.
 	 */
 	case I2C_IT_BERR:
-		dev->result = -1;
+		dev->result = -EIO;
 		/* get the status */
 		if (((readl(dev->virtbase + I2C_SR) >> 2) & 0x3) == I2C_ABORT)
 			(void) init_hw(dev);
@@ -779,10 +850,10 @@ static irqreturn_t i2c_irq_handler(int irq, void *arg)
 	 * the Tx FIFO is full.
 	 */
 	case I2C_IT_TXFOVR:
-		dev->result = -1;
+		dev->result = -EIO;
 		(void) init_hw(dev);
 
-		dev_err(&dev->pdev->dev, "Tx Fifo Over run\n");
+		dev_err(&dev->adev->dev, "Tx Fifo Over run\n");
 		complete(&dev->xfer_complete);
 
 		break;
@@ -795,19 +866,77 @@ static irqreturn_t i2c_irq_handler(int irq, void *arg)
 	case I2C_IT_RFSE:
 	case I2C_IT_WTSR:
 	case I2C_IT_STD:
-		dev_err(&dev->pdev->dev, "unhandled Interrupt\n");
+		dev_err(&dev->adev->dev, "unhandled Interrupt\n");
 		break;
 	default:
-		dev_err(&dev->pdev->dev, "spurious Interrupt..\n");
+		dev_err(&dev->adev->dev, "spurious Interrupt..\n");
 		break;
 	}
 
 	return IRQ_HANDLED;
 }
 
+
+#ifdef CONFIG_PM
+static int nmk_i2c_suspend(struct device *dev)
+{
+	struct amba_device *adev = to_amba_device(dev);
+	struct nmk_i2c_dev *nmk_i2c = amba_get_drvdata(adev);
+	int ret;
+
+	if (nmk_i2c->busy)
+		return -EBUSY;
+
+	if (!IS_ERR(nmk_i2c->pins_sleep)) {
+		ret = pinctrl_select_state(nmk_i2c->pinctrl,
+				nmk_i2c->pins_sleep);
+		if (ret)
+			dev_err(dev, "could not set pins to sleep state\n");
+	}
+
+	return 0;
+}
+
+static int nmk_i2c_resume(struct device *dev)
+{
+	struct amba_device *adev = to_amba_device(dev);
+	struct nmk_i2c_dev *nmk_i2c = amba_get_drvdata(adev);
+	int ret;
+
+	/* First go to the default state */
+	if (!IS_ERR(nmk_i2c->pins_default)) {
+		ret = pinctrl_select_state(nmk_i2c->pinctrl,
+				nmk_i2c->pins_default);
+		if (ret)
+			dev_err(dev, "could not set pins to default state\n");
+	}
+	/* Then let's idle the pins until the next transfer happens */
+	if (!IS_ERR(nmk_i2c->pins_idle)) {
+		ret = pinctrl_select_state(nmk_i2c->pinctrl,
+				nmk_i2c->pins_idle);
+		if (ret)
+			dev_err(dev, "could not set pins to idle state\n");
+	}
+	return 0;
+}
+#else
+#define nmk_i2c_suspend	NULL
+#define nmk_i2c_resume	NULL
+#endif
+
+/*
+ * We use noirq so that we suspend late and resume before the wakeup interrupt
+ * to ensure that we do the !pm_runtime_suspended() check in resume before
+ * there has been a regular pm runtime resume (via pm_runtime_get_sync()).
+ */
+static const struct dev_pm_ops nmk_i2c_pm = {
+	.suspend_noirq	= nmk_i2c_suspend,
+	.resume_noirq	= nmk_i2c_resume,
+};
+
 static unsigned int nmk_i2c_functionality(struct i2c_adapter *adap)
 {
-	return I2C_FUNC_I2C | I2C_FUNC_SMBUS_EMUL;
+	return I2C_FUNC_I2C | I2C_FUNC_SMBUS_EMUL | I2C_FUNC_10BIT_ADDR;
 }
 
 static const struct i2c_algorithm nmk_i2c_algo = {
@@ -815,68 +944,134 @@ static const struct i2c_algorithm nmk_i2c_algo = {
 	.functionality	= nmk_i2c_functionality
 };
 
-static int __devinit nmk_i2c_probe(struct platform_device *pdev)
+static struct nmk_i2c_controller u8500_i2c = {
+	/*
+	 * Slave data setup time; 250ns, 100ns, and 10ns, which
+	 * is 14, 6 and 2 respectively for a 48Mhz i2c clock.
+	 */
+	.slsu           = 0xe,
+	.tft            = 1,      /* Tx FIFO threshold */
+	.rft            = 8,      /* Rx FIFO threshold */
+	.clk_freq       = 400000, /* fast mode operation */
+	.timeout        = 200,    /* Slave response timeout(ms) */
+	.sm             = I2C_FREQ_MODE_FAST,
+};
+
+static void nmk_i2c_of_probe(struct device_node *np,
+			struct nmk_i2c_controller *pdata)
+{
+	of_property_read_u32(np, "clock-frequency", &pdata->clk_freq);
+
+	/* This driver only supports 'standard' and 'fast' modes of operation. */
+	if (pdata->clk_freq <= 100000)
+		pdata->sm = I2C_FREQ_MODE_STANDARD;
+	else
+		pdata->sm = I2C_FREQ_MODE_FAST;
+}
+
+static atomic_t adapter_id = ATOMIC_INIT(0);
+
+static int nmk_i2c_probe(struct amba_device *adev, const struct amba_id *id)
 {
 	int ret = 0;
-	struct resource *res;
-	struct nmk_i2c_controller *pdata =
-			pdev->dev.platform_data;
+	struct nmk_i2c_controller *pdata = adev->dev.platform_data;
+	struct device_node *np = adev->dev.of_node;
 	struct nmk_i2c_dev	*dev;
 	struct i2c_adapter *adap;
 
+	if (!pdata) {
+		if (np) {
+			pdata = devm_kzalloc(&adev->dev, sizeof(*pdata), GFP_KERNEL);
+			if (!pdata) {
+				ret = -ENOMEM;
+				goto err_no_mem;
+			}
+			/* Provide the default configuration as a base. */
+			memcpy(pdata, &u8500_i2c, sizeof(struct nmk_i2c_controller));
+			nmk_i2c_of_probe(np, pdata);
+		} else
+			/* No i2c configuration found, using the default. */
+			pdata = &u8500_i2c;
+	}
+
 	dev = kzalloc(sizeof(struct nmk_i2c_dev), GFP_KERNEL);
 	if (!dev) {
-		dev_err(&pdev->dev, "cannot allocate memory\n");
+		dev_err(&adev->dev, "cannot allocate memory\n");
 		ret = -ENOMEM;
 		goto err_no_mem;
 	}
+	dev->busy = false;
+	dev->adev = adev;
+	amba_set_drvdata(adev, dev);
 
-	dev->pdev = pdev;
-	platform_set_drvdata(pdev, dev);
-
-	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	if (!res) {
-		ret = -ENOENT;
-		goto err_no_resource;
+	dev->pinctrl = devm_pinctrl_get(&adev->dev);
+	if (IS_ERR(dev->pinctrl)) {
+		ret = PTR_ERR(dev->pinctrl);
+		goto err_pinctrl;
 	}
 
-	if (request_mem_region(res->start, resource_size(res),
-		DRIVER_NAME "I/O region") == 	NULL)	{
-		ret = -EBUSY;
-		goto err_no_region;
+	dev->pins_default = pinctrl_lookup_state(dev->pinctrl,
+						 PINCTRL_STATE_DEFAULT);
+	if (IS_ERR(dev->pins_default)) {
+		dev_err(&adev->dev, "could not get default pinstate\n");
+	} else {
+		ret = pinctrl_select_state(dev->pinctrl,
+					   dev->pins_default);
+		if (ret)
+			dev_dbg(&adev->dev, "could not set default pinstate\n");
 	}
 
-	dev->virtbase = ioremap(res->start, resource_size(res));
+	dev->pins_idle = pinctrl_lookup_state(dev->pinctrl,
+					      PINCTRL_STATE_IDLE);
+	if (IS_ERR(dev->pins_idle)) {
+		dev_dbg(&adev->dev, "could not get idle pinstate\n");
+	} else {
+		/* If possible, let's go to idle until the first transfer */
+		ret = pinctrl_select_state(dev->pinctrl,
+					   dev->pins_idle);
+		if (ret)
+			dev_dbg(&adev->dev, "could not set idle pinstate\n");
+	}
+
+	dev->pins_sleep = pinctrl_lookup_state(dev->pinctrl,
+					       PINCTRL_STATE_SLEEP);
+	if (IS_ERR(dev->pins_sleep))
+		dev_dbg(&adev->dev, "could not get sleep pinstate\n");
+
+	dev->virtbase = ioremap(adev->res.start, resource_size(&adev->res));
 	if (!dev->virtbase) {
 		ret = -ENOMEM;
 		goto err_no_ioremap;
 	}
 
-	dev->irq = platform_get_irq(pdev, 0);
-	ret = request_irq(dev->irq, i2c_irq_handler, IRQF_DISABLED,
+	dev->irq = adev->irq[0];
+	ret = request_irq(dev->irq, i2c_irq_handler, 0,
 				DRIVER_NAME, dev);
 	if (ret) {
-		dev_err(&pdev->dev, "cannot claim the irq %d\n", dev->irq);
+		dev_err(&adev->dev, "cannot claim the irq %d\n", dev->irq);
 		goto err_irq;
 	}
 
-	dev->clk = clk_get(&pdev->dev, NULL);
+	pm_suspend_ignore_children(&adev->dev, true);
+
+	dev->clk = clk_get(&adev->dev, NULL);
 	if (IS_ERR(dev->clk)) {
-		dev_err(&pdev->dev, "could not get i2c clock\n");
+		dev_err(&adev->dev, "could not get i2c clock\n");
 		ret = PTR_ERR(dev->clk);
 		goto err_no_clk;
 	}
 
 	adap = &dev->adap;
-	adap->dev.parent = &pdev->dev;
+	adap->dev.of_node = np;
+	adap->dev.parent = &adev->dev;
 	adap->owner	= THIS_MODULE;
 	adap->class	= I2C_CLASS_HWMON | I2C_CLASS_SPD;
 	adap->algo	= &nmk_i2c_algo;
+	adap->timeout	= msecs_to_jiffies(pdata->timeout);
+	adap->nr = atomic_read(&adapter_id);
 	snprintf(adap->name, sizeof(adap->name),
-		 "Nomadik I2C%d at %lx", pdev->id, (unsigned long)res->start);
-
-	/* fetch the controller id */
-	adap->nr	= pdev->id;
+		 "Nomadik I2C%d at %pR", adap->nr, &adev->res);
+	atomic_inc(&adapter_id);
 
 	/* fetch the controller configuration from machine */
 	dev->cfg.clk_freq = pdata->clk_freq;
@@ -887,24 +1082,22 @@ static int __devinit nmk_i2c_probe(struct platform_device *pdev)
 
 	i2c_set_adapdata(adap, dev);
 
-	ret = init_hw(dev);
-	if (ret != 0) {
-		dev_err(&pdev->dev, "error in initializing i2c hardware\n");
-		goto err_init_hw;
-	}
-
-	dev_info(&pdev->dev, "initialize %s on virtual "
-		"base %p\n", adap->name, dev->virtbase);
+	dev_info(&adev->dev,
+		 "initialize %s on virtual base %p\n",
+		 adap->name, dev->virtbase);
 
 	ret = i2c_add_numbered_adapter(adap);
 	if (ret) {
-		dev_err(&pdev->dev, "failed to add adapter\n");
+		dev_err(&adev->dev, "failed to add adapter\n");
 		goto err_add_adap;
 	}
 
+	of_i2c_register_devices(adap);
+
+	pm_runtime_put(&adev->dev);
+
 	return 0;
 
- err_init_hw:
  err_add_adap:
 	clk_put(dev->clk);
  err_no_clk:
@@ -912,20 +1105,17 @@ static int __devinit nmk_i2c_probe(struct platform_device *pdev)
  err_irq:
 	iounmap(dev->virtbase);
  err_no_ioremap:
-	release_mem_region(res->start, resource_size(res));
- err_no_region:
-	platform_set_drvdata(pdev, NULL);
- err_no_resource:
 	kfree(dev);
+ err_pinctrl:
  err_no_mem:
 
 	return ret;
 }
 
-static int __devexit nmk_i2c_remove(struct platform_device *pdev)
+static int nmk_i2c_remove(struct amba_device *adev)
 {
-	struct resource *res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	struct nmk_i2c_dev *dev = platform_get_drvdata(pdev);
+	struct resource *res = &adev->res;
+	struct nmk_i2c_dev *dev = amba_get_drvdata(adev);
 
 	i2c_del_adapter(&dev->adap);
 	flush_i2c_fifo(dev);
@@ -938,29 +1128,45 @@ static int __devexit nmk_i2c_remove(struct platform_device *pdev)
 	if (res)
 		release_mem_region(res->start, resource_size(res));
 	clk_put(dev->clk);
-	platform_set_drvdata(pdev, NULL);
+	pm_runtime_disable(&adev->dev);
 	kfree(dev);
 
 	return 0;
 }
 
-static struct platform_driver nmk_i2c_driver = {
-	.driver = {
+static struct amba_id nmk_i2c_ids[] = {
+	{
+		.id	= 0x00180024,
+		.mask	= 0x00ffffff,
+	},
+	{
+		.id	= 0x00380024,
+		.mask	= 0x00ffffff,
+	},
+	{},
+};
+
+MODULE_DEVICE_TABLE(amba, nmk_i2c_ids);
+
+static struct amba_driver nmk_i2c_driver = {
+	.drv = {
 		.owner = THIS_MODULE,
 		.name = DRIVER_NAME,
+		.pm = &nmk_i2c_pm,
 	},
+	.id_table = nmk_i2c_ids,
 	.probe = nmk_i2c_probe,
-	.remove = __devexit_p(nmk_i2c_remove),
+	.remove = nmk_i2c_remove,
 };
 
 static int __init nmk_i2c_init(void)
 {
-	return platform_driver_register(&nmk_i2c_driver);
+	return amba_driver_register(&nmk_i2c_driver);
 }
 
 static void __exit nmk_i2c_exit(void)
 {
-	platform_driver_unregister(&nmk_i2c_driver);
+	amba_driver_unregister(&nmk_i2c_driver);
 }
 
 subsys_initcall(nmk_i2c_init);
@@ -969,4 +1175,3 @@ module_exit(nmk_i2c_exit);
 MODULE_AUTHOR("Sachin Verma, Srinidhi KASAGAR");
 MODULE_DESCRIPTION("Nomadik/Ux500 I2C driver");
 MODULE_LICENSE("GPL");
-MODULE_ALIAS("platform:" DRIVER_NAME);

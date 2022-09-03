@@ -409,9 +409,9 @@ int pnp_check_irq(struct pnp_dev *dev, struct resource *res)
 	return 1;
 }
 
+#ifdef CONFIG_ISA_DMA_API
 int pnp_check_dma(struct pnp_dev *dev, struct resource *res)
 {
-#ifndef CONFIG_IA64
 	int i;
 	struct pnp_dev *tdev;
 	struct resource *tres;
@@ -466,11 +466,8 @@ int pnp_check_dma(struct pnp_dev *dev, struct resource *res)
 	}
 
 	return 1;
-#else
-	/* IA64 does not have legacy DMA */
-	return 0;
-#endif
 }
+#endif /* CONFIG_ISA_DMA_API */
 
 unsigned long pnp_resource_type(struct resource *res)
 {
@@ -503,6 +500,22 @@ static struct pnp_resource *pnp_new_resource(struct pnp_dev *dev)
 		return NULL;
 
 	list_add_tail(&pnp_res->list, &dev->resources);
+	return pnp_res;
+}
+
+struct pnp_resource *pnp_add_resource(struct pnp_dev *dev,
+				      struct resource *res)
+{
+	struct pnp_resource *pnp_res;
+
+	pnp_res = pnp_new_resource(dev);
+	if (!pnp_res) {
+		dev_err(&dev->dev, "can't add resource %pR\n", res);
+		return NULL;
+	}
+
+	pnp_res->res = *res;
+	dev_dbg(&dev->dev, "%pR\n", res);
 	return pnp_res;
 }
 

@@ -18,6 +18,7 @@
 #include <asm/apic.h>
 #include <asm/iommu.h>
 #include <asm/gart.h>
+#include <asm/irq_remapping.h>
 
 static void __init fix_hypertransport_config(int num, int slot, int func)
 {
@@ -159,7 +160,12 @@ static void __init ati_bugs_contd(int num, int slot, int func)
 	if (rev >= 0x40)
 		acpi_fix_pin2_polarity = 1;
 
-	if (rev > 0x13)
+	/*
+	 * SB600: revisions 0x11, 0x12, 0x13, 0x14, ...
+	 * SB700: revisions 0x39, 0x3a, ...
+	 * SB800: revisions 0x40, 0x41, ...
+	 */
+	if (rev >= 0x39)
 		return;
 
 	if (acpi_use_timer_override)
@@ -186,6 +192,21 @@ static void __init ati_bugs_contd(int num, int slot, int func)
 {
 }
 #endif
+
+static void __init intel_remapping_check(int num, int slot, int func)
+{
+	u8 revision;
+
+	revision = read_pci_config_byte(num, slot, func, PCI_REVISION_ID);
+
+	/*
+	 * Revision 0x13 of this chipset supports irq remapping
+	 * but has an erratum that breaks its behavior, flag it as such
+	 */
+	if (revision == 0x13)
+		set_irq_remapping_broken();
+
+}
 
 #define QFLAG_APPLY_ONCE 	0x1
 #define QFLAG_APPLIED		0x2
@@ -216,6 +237,10 @@ static struct chipset early_qrk[] __initdata = {
 	  PCI_CLASS_SERIAL_SMBUS, PCI_ANY_ID, 0, ati_bugs },
 	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_SBX00_SMBUS,
 	  PCI_CLASS_SERIAL_SMBUS, PCI_ANY_ID, 0, ati_bugs_contd },
+	{ PCI_VENDOR_ID_INTEL, 0x3403, PCI_CLASS_BRIDGE_HOST,
+	  PCI_BASE_CLASS_BRIDGE, 0, intel_remapping_check },
+	{ PCI_VENDOR_ID_INTEL, 0x3406, PCI_CLASS_BRIDGE_HOST,
+	  PCI_BASE_CLASS_BRIDGE, 0, intel_remapping_check },
 	{}
 };
 

@@ -1,7 +1,7 @@
 /*******************************************************************
  * This file is part of the Emulex Linux Device Driver for         *
  * Fibre Channel Host Bus Adapters.                                *
- * Copyright (C) 2004-2010 Emulex.  All rights reserved.           *
+ * Copyright (C) 2004-2011 Emulex.  All rights reserved.           *
  * EMULEX and SLI are trademarks of Emulex.                        *
  * www.emulex.com                                                  *
  *                                                                 *
@@ -64,10 +64,13 @@
 #define SLI3_IOCB_CMD_SIZE	128
 #define SLI3_IOCB_RSP_SIZE	64
 
+#define LPFC_UNREG_ALL_RPIS_VPORT	0xffff
+#define LPFC_UNREG_ALL_DFLT_RPIS	0xffffffff
 
 /* vendor ID used in SCSI netlink calls */
 #define LPFC_NL_VENDOR_ID (SCSI_NL_VID_TYPE_PCI | PCI_VENDOR_ID_EMULEX)
 
+#define FW_REV_STR_SIZE	32
 /* Common Transport structures and definitions */
 
 union CtRevisionId {
@@ -341,6 +344,18 @@ struct csp {
 	uint8_t bbCreditMsb;
 	uint8_t bbCreditlsb;	/* FC Word 0, byte 3 */
 
+/*
+ * Word 1 Bit 31 in common service parameter is overloaded.
+ * Word 1 Bit 31 in FLOGI request is multiple NPort request
+ * Word 1 Bit 31 in FLOGI response is clean address bit
+ */
+#define clean_address_bit request_multiple_Nport /* Word 1, bit 31 */
+/*
+ * Word 1 Bit 30 in common service parameter is overloaded.
+ * Word 1 Bit 30 in FLOGI request is Virtual Fabrics
+ * Word 1 Bit 30 in PLOGI request is random offset
+ */
+#define virtual_fabric_support randomOffset /* Word 1, bit 30 */
 #ifdef __BIG_ENDIAN_BITFIELD
 	uint16_t request_multiple_Nport:1;	/* FC Word 1, bit 31 */
 	uint16_t randomOffset:1;	/* FC Word 1, bit 30 */
@@ -523,6 +538,7 @@ struct fc_vft_header {
 #define ELS_CMD_ECHO      0x10000000
 #define ELS_CMD_TEST      0x11000000
 #define ELS_CMD_RRQ       0x12000000
+#define ELS_CMD_REC       0x13000000
 #define ELS_CMD_PRLI      0x20100014
 #define ELS_CMD_PRLO      0x21100014
 #define ELS_CMD_PRLO_ACC  0x02100014
@@ -559,6 +575,7 @@ struct fc_vft_header {
 #define ELS_CMD_ECHO      0x10
 #define ELS_CMD_TEST      0x11
 #define ELS_CMD_RRQ       0x12
+#define ELS_CMD_REC       0x13
 #define ELS_CMD_PRLI      0x14001020
 #define ELS_CMD_PRLO      0x14001021
 #define ELS_CMD_PRLO_ACC  0x14001002
@@ -897,6 +914,8 @@ struct RRQ {			/* Structure is in Big Endian format */
 #define rrq_rxid_WORD		rrq_exchg
 };
 
+#define LPFC_MAX_VFN_PER_PFN	255 /* Maximum VFs allowed per ARI */
+#define LPFC_DEF_VFN_PER_PFN	0   /* Default VFs due to platform limitation*/
 
 struct RTV_RSP {		/* Structure is in Big Endian format */
 	uint32_t ratov;
@@ -996,7 +1015,7 @@ typedef struct _ELS_PKT {	/* Structure is in Big Endian format */
 #define  SLI_MGMT_GRPL     0x102	/* Get registered Port list */
 #define  SLI_MGMT_GPAT     0x110	/* Get Port attributes */
 #define  SLI_MGMT_RHBA     0x200	/* Register HBA */
-#define  SLI_MGMT_RHAT     0x201	/* Register HBA atttributes */
+#define  SLI_MGMT_RHAT     0x201	/* Register HBA attributes */
 #define  SLI_MGMT_RPRT     0x210	/* Register Port */
 #define  SLI_MGMT_RPA      0x211	/* Register Port attributes */
 #define  SLI_MGMT_DHBA     0x300	/* De-register HBA */
@@ -1171,8 +1190,8 @@ typedef struct {
  */
 
 /* Number of rings currently used and available. */
-#define MAX_CONFIGURED_RINGS     3
-#define MAX_RINGS                4
+#define MAX_SLI3_CONFIGURED_RINGS     3
+#define MAX_SLI3_RINGS                4
 
 /* IOCB / Mailbox is owned by FireFly */
 #define OWN_CHIP        1
@@ -1193,7 +1212,9 @@ typedef struct {
 #define PCI_DEVICE_ID_BALIUS        0xe131
 #define PCI_DEVICE_ID_PROTEUS_PF    0xe180
 #define PCI_DEVICE_ID_LANCER_FC     0xe200
+#define PCI_DEVICE_ID_LANCER_FC_VF  0xe208
 #define PCI_DEVICE_ID_LANCER_FCOE   0xe260
+#define PCI_DEVICE_ID_LANCER_FCOE_VF 0xe268
 #define PCI_DEVICE_ID_SAT_SMB       0xf011
 #define PCI_DEVICE_ID_SAT_MID       0xf015
 #define PCI_DEVICE_ID_RFLY          0xf095
@@ -1232,6 +1253,8 @@ typedef struct {
 #define PCI_VENDOR_ID_SERVERENGINE  0x19a2
 #define PCI_DEVICE_ID_TIGERSHARK    0x0704
 #define PCI_DEVICE_ID_TOMCAT        0x0714
+#define PCI_DEVICE_ID_SKYHAWK       0x0724
+#define PCI_DEVICE_ID_SKYHAWK_VF    0x072c
 
 #define JEDEC_ID_ADDRESS            0x0080001c
 #define FIREFLY_JEDEC_ID            0x1ACC
@@ -1338,7 +1361,7 @@ typedef struct {		/* FireFly BIU registers */
 #define HS_FFER1       0x80000000	/* Bit 31 */
 #define HS_CRIT_TEMP   0x00000100	/* Bit 8  */
 #define HS_FFERM       0xFF000100	/* Mask for error bits 31:24 and 8 */
-
+#define UNPLUG_ERR     0x00000001	/* Indicate pci hot unplug */
 /* Host Control Register */
 
 #define HC_REG_OFFSET  12	/* Byte offset from register base address */
@@ -1439,6 +1462,7 @@ typedef struct {		/* FireFly BIU registers */
 #define MBX_UNREG_FCFI	    0xA2
 #define MBX_INIT_VFI        0xA3
 #define MBX_INIT_VPI        0xA4
+#define MBX_ACCESS_VDATA    0xA5
 
 #define MBX_AUTH_PORT       0xF8
 #define MBX_SECURITY_MGMT   0xF9
@@ -1643,6 +1667,7 @@ enum lpfc_protgrp_type {
 #define	BG_OP_IN_CSUM_OUT_CSUM		0x5
 #define	BG_OP_IN_CRC_OUT_CSUM		0x6
 #define	BG_OP_IN_CSUM_OUT_CRC		0x7
+#define	BG_OP_RAW_MODE			0x8
 
 struct lpfc_pde5 {
 	uint32_t word0;
@@ -1707,6 +1732,17 @@ struct lpfc_pde6 {
 #define pde6_apptagval_WORD	word2
 };
 
+struct lpfc_pde7 {
+	uint32_t word0;
+#define pde7_type_SHIFT		24
+#define pde7_type_MASK		0x000000ff
+#define pde7_type_WORD		word0
+#define pde7_rsvd0_SHIFT	0
+#define pde7_rsvd0_MASK		0x00ffffff
+#define pde7_rsvd0_WORD		word0
+	uint32_t addrHigh;
+	uint32_t addrLow;
+};
 
 /* Structure for MB Command LOAD_SM and DOWN_LOAD */
 
@@ -1829,8 +1865,8 @@ typedef struct {
 	uint8_t fabric_AL_PA;	/* If using a Fabric Assigned AL_PA */
 #endif
 
-#define FLAGS_LOCAL_LB               0x01 /* link_flags (=1) ENDEC loopback */
 #define FLAGS_TOPOLOGY_MODE_LOOP_PT  0x00 /* Attempt loop then pt-pt */
+#define FLAGS_LOCAL_LB               0x01 /* link_flags (=1) ENDEC loopback */
 #define FLAGS_TOPOLOGY_MODE_PT_PT    0x02 /* Attempt pt-pt only */
 #define FLAGS_TOPOLOGY_MODE_LOOP     0x04 /* Attempt loop only */
 #define FLAGS_TOPOLOGY_MODE_PT_LOOP  0x06 /* Attempt pt-pt then loop */
@@ -2538,6 +2574,8 @@ typedef struct {
 
 #define  DMP_MEM_REG             0x1
 #define  DMP_NV_PARAMS           0x2
+#define  DMP_LMSD                0x3 /* Link Module Serial Data */
+#define  DMP_WELL_KNOWN          0x4
 
 #define  DMP_REGION_VPD          0xe
 #define  DMP_VPD_SIZE            0x400  /* maximum amount of VPD */
@@ -2796,7 +2834,8 @@ typedef struct {
 #ifdef __BIG_ENDIAN_BITFIELD
 	uint32_t rsvd1     : 19;  /* Reserved                             */
 	uint32_t cdss      :  1;  /* Configure Data Security SLI          */
-	uint32_t rsvd2     :  3;  /* Reserved                             */
+	uint32_t casabt    :  1;  /* Configure async abts status notice   */
+	uint32_t rsvd2     :  2;  /* Reserved                             */
 	uint32_t cbg       :  1;  /* Configure BlockGuard                 */
 	uint32_t cmv       :  1;  /* Configure Max VPIs                   */
 	uint32_t ccrp      :  1;  /* Config Command Ring Polling          */
@@ -2816,14 +2855,16 @@ typedef struct {
 	uint32_t ccrp      :  1;  /* Config Command Ring Polling          */
 	uint32_t cmv	   :  1;  /* Configure Max VPIs                   */
 	uint32_t cbg       :  1;  /* Configure BlockGuard                 */
-	uint32_t rsvd2     :  3;  /* Reserved                             */
+	uint32_t rsvd2     :  2;  /* Reserved                             */
+	uint32_t casabt    :  1;  /* Configure async abts status notice   */
 	uint32_t cdss      :  1;  /* Configure Data Security SLI          */
 	uint32_t rsvd1     : 19;  /* Reserved                             */
 #endif
 #ifdef __BIG_ENDIAN_BITFIELD
 	uint32_t rsvd3     : 19;  /* Reserved                             */
 	uint32_t gdss      :  1;  /* Configure Data Security SLI          */
-	uint32_t rsvd4     :  3;  /* Reserved                             */
+	uint32_t gasabt    :  1;  /* Grant async abts status notice       */
+	uint32_t rsvd4     :  2;  /* Reserved                             */
 	uint32_t gbg       :  1;  /* Grant BlockGuard                     */
 	uint32_t gmv	   :  1;  /* Grant Max VPIs                       */
 	uint32_t gcrp	   :  1;  /* Grant Command Ring Polling           */
@@ -2843,7 +2884,8 @@ typedef struct {
 	uint32_t gcrp	   :  1;  /* Grant Command Ring Polling           */
 	uint32_t gmv	   :  1;  /* Grant Max VPIs                       */
 	uint32_t gbg       :  1;  /* Grant BlockGuard                     */
-	uint32_t rsvd4     :  3;  /* Reserved                             */
+	uint32_t rsvd4     :  2;  /* Reserved                             */
+	uint32_t gasabt    :  1;  /* Grant async abts status notice       */
 	uint32_t gdss      :  1;  /* Configure Data Security SLI          */
 	uint32_t rsvd3     : 19;  /* Reserved                             */
 #endif
@@ -2932,18 +2974,18 @@ typedef struct _SLI2_RDSC {
 typedef struct _PCB {
 #ifdef __BIG_ENDIAN_BITFIELD
 	uint32_t type:8;
-#define TYPE_NATIVE_SLI2       0x01;
+#define TYPE_NATIVE_SLI2       0x01
 	uint32_t feature:8;
-#define FEATURE_INITIAL_SLI2   0x01;
+#define FEATURE_INITIAL_SLI2   0x01
 	uint32_t rsvd:12;
 	uint32_t maxRing:4;
 #else	/*  __LITTLE_ENDIAN_BITFIELD */
 	uint32_t maxRing:4;
 	uint32_t rsvd:12;
 	uint32_t feature:8;
-#define FEATURE_INITIAL_SLI2   0x01;
+#define FEATURE_INITIAL_SLI2   0x01
 	uint32_t type:8;
-#define TYPE_NATIVE_SLI2       0x01;
+#define TYPE_NATIVE_SLI2       0x01
 #endif
 
 	uint32_t mailBoxSize;
@@ -2955,7 +2997,7 @@ typedef struct _PCB {
 
 	uint32_t pgpAddrLow;
 	uint32_t pgpAddrHigh;
-	SLI2_RDSC rdsc[MAX_RINGS];
+	SLI2_RDSC rdsc[MAX_SLI3_RINGS];
 } PCB_t;
 
 /* NEW_FEATURE */
@@ -3004,7 +3046,7 @@ typedef struct {
 #define MAILBOX_EXT_SIZE	(MAILBOX_EXT_WSIZE * sizeof(uint32_t))
 #define MAILBOX_HBA_EXT_OFFSET  0x100
 /* max mbox xmit size is a page size for sysfs IO operations */
-#define MAILBOX_MAX_XMIT_SIZE   PAGE_SIZE
+#define MAILBOX_SYSFS_MAX	4096
 
 typedef union {
 	uint32_t varWords[MAILBOX_CMD_WSIZE - 1]; /* first word is type/
@@ -3065,18 +3107,18 @@ struct lpfc_pgp {
 
 struct sli2_desc {
 	uint32_t unused1[16];
-	struct lpfc_hgp host[MAX_RINGS];
-	struct lpfc_pgp port[MAX_RINGS];
+	struct lpfc_hgp host[MAX_SLI3_RINGS];
+	struct lpfc_pgp port[MAX_SLI3_RINGS];
 };
 
 struct sli3_desc {
-	struct lpfc_hgp host[MAX_RINGS];
+	struct lpfc_hgp host[MAX_SLI3_RINGS];
 	uint32_t reserved[8];
 	uint32_t hbq_put[16];
 };
 
 struct sli3_pgp {
-	struct lpfc_pgp port[MAX_RINGS];
+	struct lpfc_pgp port[MAX_SLI3_RINGS];
 	uint32_t hbq_get[16];
 };
 
@@ -3198,11 +3240,15 @@ typedef struct {
 #define IOERR_SLER_RRQ_RJT_ERR        0x4C
 #define IOERR_SLER_RRQ_RETRY_ERR      0x4D
 #define IOERR_SLER_ABTS_ERR           0x4E
-
+#define IOERR_ELXSEC_KEY_UNWRAP_ERROR		0xF0
+#define IOERR_ELXSEC_KEY_UNWRAP_COMPARE_ERROR	0xF1
+#define IOERR_ELXSEC_CRYPTO_ERROR		0xF2
+#define IOERR_ELXSEC_CRYPTO_COMPARE_ERROR	0xF3
 #define IOERR_DRVR_MASK               0x100
 #define IOERR_SLI_DOWN                0x101  /* ulpStatus  - Driver defined */
 #define IOERR_SLI_BRESET              0x102
 #define IOERR_SLI_ABORTED             0x103
+#define IOERR_PARAM_MASK              0x1ff
 } PARM_ERR;
 
 typedef union {
@@ -3335,6 +3381,9 @@ typedef struct {
 	WORD5 w5;		/* Header control/status word */
 } XMT_SEQ_FIELDS64;
 
+/* This word is remote ports D_ID for XMIT_ELS_RSP64 */
+#define xmit_els_remoteID xrsqRo
+
 /* IOCB Command template for 64 bit RCV_SEQUENCE64 */
 typedef struct {
 	struct ulp_bde64 rcvBde;
@@ -3439,16 +3488,22 @@ typedef struct {
 } ASYNCSTAT_FIELDS;
 #define ASYNC_TEMP_WARN		0x100
 #define ASYNC_TEMP_SAFE		0x101
+#define ASYNC_STATUS_CN		0x102
 
 /* IOCB Command template for CMD_IOCB_RCV_ELS64_CX (0xB7)
    or CMD_IOCB_RCV_SEQ64_CX (0xB5) */
 
 struct rcv_sli3 {
-	uint32_t word8Rsvd;
 #ifdef __BIG_ENDIAN_BITFIELD
+	uint16_t ox_id;
+	uint16_t seq_cnt;
+
 	uint16_t vpi;
 	uint16_t word9Rsvd;
 #else  /*  __LITTLE_ENDIAN */
+	uint16_t seq_cnt;
+	uint16_t ox_id;
+
 	uint16_t word9Rsvd;
 	uint16_t vpi;
 #endif
@@ -3612,7 +3667,7 @@ typedef struct _IOCB {	/* IOCB structure */
 		ASYNCSTAT_FIELDS asyncstat; /* async_status iocb */
 		QUE_XRI64_CX_FIELDS quexri64cx; /* que_xri64_cx fields */
 		struct rcv_seq64 rcvseq64;	/* RCV_SEQ64 and RCV_CONT64 */
-		struct sli4_bls_acc bls_acc; /* UNSOL ABTS BLS_ACC params */
+		struct sli4_bls_rsp bls_rsp; /* UNSOL ABTS BLS_RSP params */
 		uint32_t ulpWord[IOCB_WORD_SZ - 2];	/* generic 6 'words' */
 	} un;
 	union {

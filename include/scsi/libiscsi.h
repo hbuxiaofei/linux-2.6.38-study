@@ -115,7 +115,7 @@ struct iscsi_task {
 	/* copied values in case we need to send tmfs */
 	itt_t			hdr_itt;
 	__be32			cmdsn;
-	uint8_t			lun[8];
+	struct scsi_lun		lun;
 
 	int			itt;		/* this ITT */
 
@@ -212,9 +212,6 @@ struct iscsi_conn {
 	/* values userspace uses to id a conn */
 	int			persistent_port;
 	char			*persistent_address;
-	/* remote portal currently connected to */
-	int			portal_port;
-	char			portal_address[ISCSI_ADDRESS_BUF_LEN];
 
 	/* MIB-statistics */
 	uint64_t		txdata_octets;
@@ -271,7 +268,7 @@ struct iscsi_session {
 	int			lu_reset_timeout;
 	int			tgt_reset_timeout;
 	int			initial_r2t_en;
-	unsigned		max_r2t;
+	unsigned short		max_r2t;
 	int			imm_data_en;
 	unsigned		first_burst;
 	unsigned		max_burst;
@@ -287,6 +284,7 @@ struct iscsi_session {
 	char			*password;
 	char			*password_in;
 	char			*targetname;
+	char			*targetalias;
 	char			*ifacename;
 	char			*initiatorname;
 	/* control data */
@@ -319,9 +317,6 @@ struct iscsi_host {
 	/* hw address or netdev iscsi connection is bound to */
 	char			*hwaddress;
 	char			*netdev;
-	/* local address */
-	int			local_port;
-	char			local_address[ISCSI_ADDRESS_BUF_LEN];
 
 	wait_queue_head_t	session_removal_wq;
 	/* protects sessions and state */
@@ -394,6 +389,8 @@ extern void iscsi_session_failure(struct iscsi_session *session,
 				  enum iscsi_err err);
 extern int iscsi_conn_get_param(struct iscsi_cls_conn *cls_conn,
 				enum iscsi_param param, char *buf);
+extern int iscsi_conn_get_addr_param(struct sockaddr_storage *addr,
+				     enum iscsi_param param, char *buf);
 extern void iscsi_suspend_tx(struct iscsi_conn *conn);
 extern void iscsi_suspend_queue(struct iscsi_conn *conn);
 extern void iscsi_conn_queue_work(struct iscsi_conn *conn);
@@ -430,6 +427,7 @@ extern void iscsi_complete_scsi_task(struct iscsi_task *task,
  */
 extern void iscsi_pool_free(struct iscsi_pool *);
 extern int iscsi_pool_init(struct iscsi_pool *, int, void ***, int);
+extern int iscsi_switch_str_param(char **, char *);
 
 /*
  * inline functions to deal with padding.

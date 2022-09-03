@@ -23,96 +23,45 @@
 
 #include <linux/platform_device.h>
 #include <linux/module.h>
+#include <linux/clk.h>
 #include <linux/rtc.h>
 #include <linux/init.h>
 #include <linux/fs.h>
 #include <linux/interrupt.h>
+#include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/of.h>
 #include <linux/pm.h>
 #include <linux/bitops.h>
+#include <linux/io.h>
 
 #include <mach/hardware.h>
-#include <asm/irq.h>
+#include <mach/irqs.h>
 
-#ifdef CONFIG_ARCH_PXA
+#if defined(CONFIG_ARCH_PXA) || defined(CONFIG_ARCH_MMP)
 #include <mach/regs-rtc.h>
-#include <mach/regs-ost.h>
 #endif
 
 #define RTC_DEF_DIVIDER		(32768 - 1)
 #define RTC_DEF_TRIM		0
+#define RTC_FREQ		1024
 
-static const unsigned long RTC_FREQ = 1024;
-static unsigned long timer_freq;
-static struct rtc_time rtc_alarm;
-static DEFINE_SPINLOCK(sa1100_rtc_lock);
-
-static inline int rtc_periodic_alarm(struct rtc_time *tm)
-{
-	return  (tm->tm_year == -1) ||
-		((unsigned)tm->tm_mon >= 12) ||
-		((unsigned)(tm->tm_mday - 1) >= 31) ||
-		((unsigned)tm->tm_hour > 23) ||
-		((unsigned)tm->tm_min > 59) ||
-		((unsigned)tm->tm_sec > 59);
-}
-
-/*
- * Calculate the next alarm time given the requested alarm time mask
- * and the current time.
- */
-static void rtc_next_alarm_time(struct rtc_time *next, struct rtc_time *now,
-	struct rtc_time *alrm)
-{
-	unsigned long next_time;
-	unsigned long now_time;
-
-	next->tm_year = now->tm_year;
-	next->tm_mon = now->tm_mon;
-	next->tm_mday = now->tm_mday;
-	next->tm_hour = alrm->tm_hour;
-	next->tm_min = alrm->tm_min;
-	next->tm_sec = alrm->tm_sec;
-
-	rtc_tm_to_time(now, &now_time);
-	rtc_tm_to_time(next, &next_time);
-
-	if (next_time < now_time) {
-		/* Advance one day */
-		next_time += 60 * 60 * 24;
-		rtc_time_to_tm(next_time, next);
-	}
-}
-
-static int rtc_update_alarm(struct rtc_time *alrm)
-{
-	struct rtc_time alarm_tm, now_tm;
-	unsigned long now, time;
-	int ret;
-
-	do {
-		now = RCNR;
-		rtc_time_to_tm(now, &now_tm);
-		rtc_next_alarm_time(&alarm_tm, &now_tm, alrm);
-		ret = rtc_tm_to_time(&alarm_tm, &time);
-		if (ret != 0)
-			break;
-
-		RTSR = RTSR & (RTSR_HZE|RTSR_ALE|RTSR_AL);
-		RTAR = time;
-	} while (now != RCNR);
-
-	return ret;
-}
+struct sa1100_rtc {
+	spinlock_t		lock;
+	int			irq_1hz;
+	int			irq_alarm;
+	struct rtc_device	*rtc;
+	struct clk		*clk;
+};
 
 static irqreturn_t sa1100_rtc_interrupt(int irq, void *dev_id)
 {
-	struct platform_device *pdev = to_platform_device(dev_id);
-	struct rtc_device *rtc = platform_get_drvdata(pdev);
+	struct sa1100_rtc *info = dev_get_drvdata(dev_id);
+	struct rtc_device *rtc = info->rtc;
 	unsigned int rtsr;
 	unsigned long events = 0;
 
-	spin_lock(&sa1100_rtc_lock);
+	spin_lock(&info->lock);
 
 	rtsr = RTSR;
 	/* clear interrupt sources */
@@ -148,194 +97,61 @@ static irqreturn_t sa1100_rtc_interrupt(int irq, void *dev_id)
 
 	rtc_update_irq(rtc, 1, events);
 
-	if (rtsr & RTSR_AL && rtc_periodic_alarm(&rtc_alarm))
-		rtc_update_alarm(&rtc_alarm);
-
-	spin_unlock(&sa1100_rtc_lock);
+	spin_unlock(&info->lock);
 
 	return IRQ_HANDLED;
-}
-
-static int sa1100_irq_set_freq(struct device *dev, int freq)
-{
-	if (freq < 1 || freq > timer_freq) {
-		return -EINVAL;
-	} else {
-		struct rtc_device *rtc = (struct rtc_device *)dev;
-
-		rtc->irq_freq = freq;
-
-		return 0;
-	}
-}
-
-static int rtc_timer1_count;
-
-static int sa1100_irq_set_state(struct device *dev, int enabled)
-{
-	spin_lock_irq(&sa1100_rtc_lock);
-	if (enabled) {
-		struct rtc_device *rtc = (struct rtc_device *)dev;
-
-		OSMR1 = timer_freq / rtc->irq_freq + OSCR;
-		OIER |= OIER_E1;
-		rtc_timer1_count = 1;
-	} else {
-		OIER &= ~OIER_E1;
-	}
-	spin_unlock_irq(&sa1100_rtc_lock);
-
-	return 0;
-}
-
-static inline int sa1100_timer1_retrigger(struct rtc_device *rtc)
-{
-	unsigned long diff;
-	unsigned long period = timer_freq / rtc->irq_freq;
-
-	spin_lock_irq(&sa1100_rtc_lock);
-
-	do {
-		OSMR1 += period;
-		diff = OSMR1 - OSCR;
-		/* If OSCR > OSMR1, diff is a very large number (unsigned
-		 * math). This means we have a lost interrupt. */
-	} while (diff > period);
-	OIER |= OIER_E1;
-
-	spin_unlock_irq(&sa1100_rtc_lock);
-
-	return 0;
-}
-
-static irqreturn_t timer1_interrupt(int irq, void *dev_id)
-{
-	struct platform_device *pdev = to_platform_device(dev_id);
-	struct rtc_device *rtc = platform_get_drvdata(pdev);
-
-	/*
-	 * If we match for the first time, rtc_timer1_count will be 1.
-	 * Otherwise, we wrapped around (very unlikely but
-	 * still possible) so compute the amount of missed periods.
-	 * The match reg is updated only when the data is actually retrieved
-	 * to avoid unnecessary interrupts.
-	 */
-	OSSR = OSSR_M1;	/* clear match on timer1 */
-
-	rtc_update_irq(rtc, rtc_timer1_count, RTC_PF | RTC_IRQF);
-
-	if (rtc_timer1_count == 1)
-		rtc_timer1_count =
-			(rtc->irq_freq * ((1 << 30) / (timer_freq >> 2)));
-
-	/* retrigger. */
-	sa1100_timer1_retrigger(rtc);
-
-	return IRQ_HANDLED;
-}
-
-static int sa1100_rtc_read_callback(struct device *dev, int data)
-{
-	if (data & RTC_PF) {
-		struct rtc_device *rtc = (struct rtc_device *)dev;
-
-		/* interpolate missed periods and set match for the next */
-		unsigned long period = timer_freq / rtc->irq_freq;
-		unsigned long oscr = OSCR;
-		unsigned long osmr1 = OSMR1;
-		unsigned long missed = (oscr - osmr1)/period;
-		data += missed << 8;
-		OSSR = OSSR_M1;	/* clear match on timer 1 */
-		OSMR1 = osmr1 + (missed + 1)*period;
-		/* Ensure we didn't miss another match in the mean time.
-		 * Here we compare (match - OSCR) 8 instead of 0 --
-		 * see comment in pxa_timer_interrupt() for explanation.
-		 */
-		while ((signed long)((osmr1 = OSMR1) - OSCR) <= 8) {
-			data += 0x100;
-			OSSR = OSSR_M1;	/* clear match on timer 1 */
-			OSMR1 = osmr1 + period;
-		}
-	}
-	return data;
 }
 
 static int sa1100_rtc_open(struct device *dev)
 {
+	struct sa1100_rtc *info = dev_get_drvdata(dev);
+	struct rtc_device *rtc = info->rtc;
 	int ret;
-	struct rtc_device *rtc = (struct rtc_device *)dev;
 
-	ret = request_irq(IRQ_RTC1Hz, sa1100_rtc_interrupt, IRQF_DISABLED,
-		"rtc 1Hz", dev);
+	ret = request_irq(info->irq_1hz, sa1100_rtc_interrupt, 0, "rtc 1Hz", dev);
 	if (ret) {
-		dev_err(dev, "IRQ %d already in use.\n", IRQ_RTC1Hz);
+		dev_err(dev, "IRQ %d already in use.\n", info->irq_1hz);
 		goto fail_ui;
 	}
-	ret = request_irq(IRQ_RTCAlrm, sa1100_rtc_interrupt, IRQF_DISABLED,
-		"rtc Alrm", dev);
+	ret = request_irq(info->irq_alarm, sa1100_rtc_interrupt, 0, "rtc Alrm", dev);
 	if (ret) {
-		dev_err(dev, "IRQ %d already in use.\n", IRQ_RTCAlrm);
+		dev_err(dev, "IRQ %d already in use.\n", info->irq_alarm);
 		goto fail_ai;
 	}
-	ret = request_irq(IRQ_OST1, timer1_interrupt, IRQF_DISABLED,
-		"rtc timer", dev);
-	if (ret) {
-		dev_err(dev, "IRQ %d already in use.\n", IRQ_OST1);
-		goto fail_pi;
-	}
 	rtc->max_user_freq = RTC_FREQ;
-	sa1100_irq_set_freq(dev, RTC_FREQ);
+	rtc_irq_set_freq(rtc, NULL, RTC_FREQ);
 
 	return 0;
 
- fail_pi:
-	free_irq(IRQ_RTCAlrm, dev);
  fail_ai:
-	free_irq(IRQ_RTC1Hz, dev);
+	free_irq(info->irq_1hz, dev);
  fail_ui:
+	clk_disable_unprepare(info->clk);
 	return ret;
 }
 
 static void sa1100_rtc_release(struct device *dev)
 {
-	spin_lock_irq(&sa1100_rtc_lock);
+	struct sa1100_rtc *info = dev_get_drvdata(dev);
+
+	spin_lock_irq(&info->lock);
 	RTSR = 0;
-	OIER &= ~OIER_E1;
-	OSSR = OSSR_M1;
-	spin_unlock_irq(&sa1100_rtc_lock);
+	spin_unlock_irq(&info->lock);
 
-	free_irq(IRQ_OST1, dev);
-	free_irq(IRQ_RTCAlrm, dev);
-	free_irq(IRQ_RTC1Hz, dev);
-}
-
-
-static int sa1100_rtc_ioctl(struct device *dev, unsigned int cmd,
-		unsigned long arg)
-{
-	switch (cmd) {
-	case RTC_UIE_OFF:
-		spin_lock_irq(&sa1100_rtc_lock);
-		RTSR &= ~RTSR_HZE;
-		spin_unlock_irq(&sa1100_rtc_lock);
-		return 0;
-	case RTC_UIE_ON:
-		spin_lock_irq(&sa1100_rtc_lock);
-		RTSR |= RTSR_HZE;
-		spin_unlock_irq(&sa1100_rtc_lock);
-		return 0;
-	}
-	return -ENOIOCTLCMD;
+	free_irq(info->irq_alarm, dev);
+	free_irq(info->irq_1hz, dev);
 }
 
 static int sa1100_rtc_alarm_irq_enable(struct device *dev, unsigned int enabled)
 {
-	spin_lock_irq(&sa1100_rtc_lock);
+	struct sa1100_rtc *info = dev_get_drvdata(dev);
+
+	spin_lock_irq(&info->lock);
 	if (enabled)
 		RTSR |= RTSR_ALE;
 	else
 		RTSR &= ~RTSR_ALE;
-	spin_unlock_irq(&sa1100_rtc_lock);
+	spin_unlock_irq(&info->lock);
 	return 0;
 }
 
@@ -360,7 +176,6 @@ static int sa1100_rtc_read_alarm(struct device *dev, struct rtc_wkalrm *alrm)
 {
 	u32	rtsr;
 
-	memcpy(&alrm->time, &rtc_alarm, sizeof(struct rtc_time));
 	rtsr = RTSR;
 	alrm->enabled = (rtsr & RTSR_ALE) ? 1 : 0;
 	alrm->pending = (rtsr & RTSR_AL) ? 1 : 0;
@@ -369,57 +184,72 @@ static int sa1100_rtc_read_alarm(struct device *dev, struct rtc_wkalrm *alrm)
 
 static int sa1100_rtc_set_alarm(struct device *dev, struct rtc_wkalrm *alrm)
 {
+	struct sa1100_rtc *info = dev_get_drvdata(dev);
+	unsigned long time;
 	int ret;
 
-	spin_lock_irq(&sa1100_rtc_lock);
-	ret = rtc_update_alarm(&alrm->time);
-	if (ret == 0) {
-		if (alrm->enabled)
-			RTSR |= RTSR_ALE;
-		else
-			RTSR &= ~RTSR_ALE;
-	}
-	spin_unlock_irq(&sa1100_rtc_lock);
+	spin_lock_irq(&info->lock);
+	ret = rtc_tm_to_time(&alrm->time, &time);
+	if (ret != 0)
+		goto out;
+	RTSR = RTSR & (RTSR_HZE|RTSR_ALE|RTSR_AL);
+	RTAR = time;
+	if (alrm->enabled)
+		RTSR |= RTSR_ALE;
+	else
+		RTSR &= ~RTSR_ALE;
+out:
+	spin_unlock_irq(&info->lock);
 
 	return ret;
 }
 
 static int sa1100_rtc_proc(struct device *dev, struct seq_file *seq)
 {
-	struct rtc_device *rtc = (struct rtc_device *)dev;
-
-	seq_printf(seq, "trim/divider\t: 0x%08x\n", (u32) RTTR);
-	seq_printf(seq, "update_IRQ\t: %s\n",
-			(RTSR & RTSR_HZE) ? "yes" : "no");
-	seq_printf(seq, "periodic_IRQ\t: %s\n",
-			(OIER & OIER_E1) ? "yes" : "no");
-	seq_printf(seq, "periodic_freq\t: %d\n", rtc->irq_freq);
-	seq_printf(seq, "RTSR\t\t: 0x%08x\n", (u32)RTSR);
+	seq_printf(seq, "trim/divider\t\t: 0x%08x\n", (u32) RTTR);
+	seq_printf(seq, "RTSR\t\t\t: 0x%08x\n", (u32)RTSR);
 
 	return 0;
 }
 
 static const struct rtc_class_ops sa1100_rtc_ops = {
 	.open = sa1100_rtc_open,
-	.read_callback = sa1100_rtc_read_callback,
 	.release = sa1100_rtc_release,
-	.ioctl = sa1100_rtc_ioctl,
 	.read_time = sa1100_rtc_read_time,
 	.set_time = sa1100_rtc_set_time,
 	.read_alarm = sa1100_rtc_read_alarm,
 	.set_alarm = sa1100_rtc_set_alarm,
 	.proc = sa1100_rtc_proc,
-	.irq_set_freq = sa1100_irq_set_freq,
-	.irq_set_state = sa1100_irq_set_state,
 	.alarm_irq_enable = sa1100_rtc_alarm_irq_enable,
 };
 
 static int sa1100_rtc_probe(struct platform_device *pdev)
 {
 	struct rtc_device *rtc;
+	struct sa1100_rtc *info;
+	int irq_1hz, irq_alarm, ret = 0;
 
-	timer_freq = get_clock_tick_rate();
+	irq_1hz = platform_get_irq_byname(pdev, "rtc 1Hz");
+	irq_alarm = platform_get_irq_byname(pdev, "rtc alarm");
+	if (irq_1hz < 0 || irq_alarm < 0)
+		return -ENODEV;
 
+	info = devm_kzalloc(&pdev->dev, sizeof(struct sa1100_rtc), GFP_KERNEL);
+	if (!info)
+		return -ENOMEM;
+	info->clk = devm_clk_get(&pdev->dev, NULL);
+	if (IS_ERR(info->clk)) {
+		dev_err(&pdev->dev, "failed to find rtc clock source\n");
+		return PTR_ERR(info->clk);
+	}
+	info->irq_1hz = irq_1hz;
+	info->irq_alarm = irq_alarm;
+	spin_lock_init(&info->lock);
+	platform_set_drvdata(pdev, info);
+
+	ret = clk_prepare_enable(info->clk);
+	if (ret)
+		goto err_enable_clk;
 	/*
 	 * According to the manual we should be able to let RTTR be zero
 	 * and then a default diviser for a 32.768KHz clock is used.
@@ -437,18 +267,14 @@ static int sa1100_rtc_probe(struct platform_device *pdev)
 
 	device_init_wakeup(&pdev->dev, 1);
 
-	rtc = rtc_device_register(pdev->name, &pdev->dev, &sa1100_rtc_ops,
-		THIS_MODULE);
+	rtc = devm_rtc_device_register(&pdev->dev, pdev->name, &sa1100_rtc_ops,
+					THIS_MODULE);
 
-	if (IS_ERR(rtc))
-		return PTR_ERR(rtc);
-
-	platform_set_drvdata(pdev, rtc);
-
-	/* Set the irq_freq */
-	/*TODO: Find out who is messing with this value after we initialize
-	 * it here.*/
-	rtc->irq_freq = RTC_FREQ;
+	if (IS_ERR(rtc)) {
+		ret = PTR_ERR(rtc);
+		goto err_dev;
+	}
+	info->rtc = rtc;
 
 	/* Fix for a nasty initialization problem the in SA11xx RTSR register.
 	 * See also the comments in sa1100_rtc_interrupt().
@@ -475,37 +301,53 @@ static int sa1100_rtc_probe(struct platform_device *pdev)
 	RTSR = RTSR_AL | RTSR_HZ;
 
 	return 0;
+err_dev:
+	clk_disable_unprepare(info->clk);
+err_enable_clk:
+	platform_set_drvdata(pdev, NULL);
+	return ret;
 }
 
 static int sa1100_rtc_remove(struct platform_device *pdev)
 {
-	struct rtc_device *rtc = platform_get_drvdata(pdev);
+	struct sa1100_rtc *info = platform_get_drvdata(pdev);
 
-	if (rtc)
-		rtc_device_unregister(rtc);
+	if (info) {
+		clk_disable_unprepare(info->clk);
+		platform_set_drvdata(pdev, NULL);
+	}
 
 	return 0;
 }
 
-#ifdef CONFIG_PM
+#ifdef CONFIG_PM_SLEEP
 static int sa1100_rtc_suspend(struct device *dev)
 {
+	struct sa1100_rtc *info = dev_get_drvdata(dev);
 	if (device_may_wakeup(dev))
-		enable_irq_wake(IRQ_RTCAlrm);
+		enable_irq_wake(info->irq_alarm);
 	return 0;
 }
 
 static int sa1100_rtc_resume(struct device *dev)
 {
+	struct sa1100_rtc *info = dev_get_drvdata(dev);
 	if (device_may_wakeup(dev))
-		disable_irq_wake(IRQ_RTCAlrm);
+		disable_irq_wake(info->irq_alarm);
 	return 0;
 }
+#endif
 
-static const struct dev_pm_ops sa1100_rtc_pm_ops = {
-	.suspend	= sa1100_rtc_suspend,
-	.resume		= sa1100_rtc_resume,
+static SIMPLE_DEV_PM_OPS(sa1100_rtc_pm_ops, sa1100_rtc_suspend,
+			sa1100_rtc_resume);
+
+#ifdef CONFIG_OF
+static struct of_device_id sa1100_rtc_dt_ids[] = {
+	{ .compatible = "mrvl,sa1100-rtc", },
+	{ .compatible = "mrvl,mmp-rtc", },
+	{}
 };
+MODULE_DEVICE_TABLE(of, sa1100_rtc_dt_ids);
 #endif
 
 static struct platform_driver sa1100_rtc_driver = {
@@ -513,24 +355,12 @@ static struct platform_driver sa1100_rtc_driver = {
 	.remove		= sa1100_rtc_remove,
 	.driver		= {
 		.name	= "sa1100-rtc",
-#ifdef CONFIG_PM
 		.pm	= &sa1100_rtc_pm_ops,
-#endif
+		.of_match_table = of_match_ptr(sa1100_rtc_dt_ids),
 	},
 };
 
-static int __init sa1100_rtc_init(void)
-{
-	return platform_driver_register(&sa1100_rtc_driver);
-}
-
-static void __exit sa1100_rtc_exit(void)
-{
-	platform_driver_unregister(&sa1100_rtc_driver);
-}
-
-module_init(sa1100_rtc_init);
-module_exit(sa1100_rtc_exit);
+module_platform_driver(sa1100_rtc_driver);
 
 MODULE_AUTHOR("Richard Purdie <rpurdie@rpsys.net>");
 MODULE_DESCRIPTION("SA11x0/PXA2xx Realtime Clock Driver (RTC)");

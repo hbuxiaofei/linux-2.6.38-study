@@ -18,6 +18,7 @@
  */
 
 #include <linux/kernel.h>
+#include <linux/export.h>
 #include <linux/init.h>
 #include <linux/sfi.h>
 #include <linux/platform_device.h>
@@ -58,7 +59,10 @@ EXPORT_SYMBOL_GPL(vrtc_cmos_write);
 unsigned long vrtc_get_time(void)
 {
 	u8 sec, min, hour, mday, mon;
+	unsigned long flags;
 	u32 year;
+
+	spin_lock_irqsave(&rtc_lock, flags);
 
 	while ((vrtc_cmos_read(RTC_FREQ_SELECT) & RTC_UIP))
 		cpu_relax();
@@ -70,8 +74,10 @@ unsigned long vrtc_get_time(void)
 	mon = vrtc_cmos_read(RTC_MONTH);
 	year = vrtc_cmos_read(RTC_YEAR);
 
-	/* vRTC YEAR reg contains the offset to 1960 */
-	year += 1960;
+	spin_unlock_irqrestore(&rtc_lock, flags);
+
+	/* vRTC YEAR reg contains the offset to 1972 */
+	year += 1972;
 
 	printk(KERN_INFO "vRTC: sec: %d min: %d hour: %d day: %d "
 		"mon: %d year: %d\n", sec, min, hour, mday, mon, year);
@@ -79,43 +85,49 @@ unsigned long vrtc_get_time(void)
 	return mktime(year, mon, mday, hour, min, sec);
 }
 
-/* Only care about the minutes and seconds */
 int vrtc_set_mmss(unsigned long nowtime)
 {
-	int real_sec, real_min;
-	int vrtc_min;
+	unsigned long flags;
+	struct rtc_time tm;
+	int year;
+	int retval = 0;
 
-	vrtc_min = vrtc_cmos_read(RTC_MINUTES);
-
-	real_sec = nowtime % 60;
-	real_min = nowtime / 60;
-	if (((abs(real_min - vrtc_min) + 15)/30) & 1)
-		real_min += 30;
-	real_min %= 60;
-
-	vrtc_cmos_write(real_sec, RTC_SECONDS);
-	vrtc_cmos_write(real_min, RTC_MINUTES);
-	return 0;
+	rtc_time_to_tm(nowtime, &tm);
+	if (!rtc_valid_tm(&tm) && tm.tm_year >= 72) {
+		/*
+		 * tm.year is the number of years since 1900, and the
+		 * vrtc need the years since 1972.
+		 */
+		year = tm.tm_year - 72;
+		spin_lock_irqsave(&rtc_lock, flags);
+		vrtc_cmos_write(year, RTC_YEAR);
+		vrtc_cmos_write(tm.tm_mon, RTC_MONTH);
+		vrtc_cmos_write(tm.tm_mday, RTC_DAY_OF_MONTH);
+		vrtc_cmos_write(tm.tm_hour, RTC_HOURS);
+		vrtc_cmos_write(tm.tm_min, RTC_MINUTES);
+		vrtc_cmos_write(tm.tm_sec, RTC_SECONDS);
+		spin_unlock_irqrestore(&rtc_lock, flags);
+	} else {
+		printk(KERN_ERR
+		       "%s: Invalid vRTC value: write of %lx to vRTC failed\n",
+			__FUNCTION__, nowtime);
+		retval = -EINVAL;
+	}
+	return retval;
 }
 
 void __init mrst_rtc_init(void)
 {
-	unsigned long rtc_paddr;
-	void __iomem *virt_base;
+	unsigned long vrtc_paddr;
 
 	sfi_table_parse(SFI_SIG_MRTC, NULL, NULL, sfi_parse_mrtc);
-	if (!sfi_mrtc_num)
+
+	vrtc_paddr = sfi_mrtc_array[0].phys_addr;
+	if (!sfi_mrtc_num || !vrtc_paddr)
 		return;
 
-	rtc_paddr = sfi_mrtc_array[0].phys_addr;
-
-	/* vRTC's register address may not be page aligned */
-	set_fixmap_nocache(FIX_LNW_VRTC, rtc_paddr);
-
-	virt_base = (void __iomem *)__fix_to_virt(FIX_LNW_VRTC);
-	virt_base += rtc_paddr & ~PAGE_MASK;
-	vrtc_virt_base = virt_base;
-
+	vrtc_virt_base = (void __iomem *)set_fixmap_offset_nocache(FIX_LNW_VRTC,
+								vrtc_paddr);
 	x86_platform.get_wallclock = vrtc_get_time;
 	x86_platform.set_wallclock = vrtc_set_mmss;
 }

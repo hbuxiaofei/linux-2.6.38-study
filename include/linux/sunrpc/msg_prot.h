@@ -138,6 +138,9 @@ typedef __be32	rpc_fraghdr;
 #define RPC_MAX_HEADER_WITH_AUTH \
 	(RPC_CALLHDRSIZE + 2*(2+RPC_MAX_AUTH_SIZE/4))
 
+#define RPC_MAX_REPHEADER_WITH_AUTH \
+	(RPC_REPHDRSIZE + (2 + RPC_MAX_AUTH_SIZE/4))
+
 /*
  * RFC1833/RFC3530 rpcbind (v3+) well-known netid's.
  */
@@ -145,6 +148,7 @@ typedef __be32	rpc_fraghdr;
 #define RPCBIND_NETID_TCP	"tcp"
 #define RPCBIND_NETID_UDP6	"udp6"
 #define RPCBIND_NETID_TCP6	"tcp6"
+#define RPCBIND_NETID_LOCAL	"local"
 
 /*
  * Note that RFC 1833 does not put any size restrictions on the

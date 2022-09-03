@@ -3,7 +3,7 @@
  *
  * Author:      Matti Aaltonen, <matti.j.aaltonen@nokia.com>
  *
- * Copyright:   (C) 2010 Nokia Corporation
+ * Copyright:   (C) 2010, 2011 Nokia Corporation
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -23,6 +23,7 @@
 
 #include <linux/mfd/wl1273-core.h>
 #include <linux/slab.h>
+#include <linux/module.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
 #include <sound/soc.h>
@@ -179,7 +180,12 @@ static int snd_wl1273_get_audio_route(struct snd_kcontrol *kcontrol,
 	return 0;
 }
 
-static const char *wl1273_audio_route[] = { "Bt", "FmRx", "FmTx" };
+/*
+ * TODO: Implement the audio routing in the driver. Now this control
+ * only indicates the setting that has been done elsewhere (in the user
+ * space).
+ */
+static const char * const wl1273_audio_route[] = { "Bt", "FmRx", "FmTx" };
 
 static int snd_wl1273_set_audio_route(struct snd_kcontrol *kcontrol,
 				      struct snd_ctl_elem_value *ucontrol)
@@ -239,7 +245,7 @@ static int snd_wl1273_fm_audio_put(struct snd_kcontrol *kcontrol,
 	return 1;
 }
 
-static const char *wl1273_audio_strings[] = { "Digital", "Analog" };
+static const char * const wl1273_audio_strings[] = { "Digital", "Analog" };
 
 static const struct soc_enum wl1273_audio_enum =
 	SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(wl1273_audio_strings),
@@ -287,8 +293,7 @@ static const struct snd_kcontrol_new wl1273_controls[] = {
 static int wl1273_startup(struct snd_pcm_substream *substream,
 			  struct snd_soc_dai *dai)
 {
-	struct snd_soc_pcm_runtime *rtd = substream->private_data;
-	struct snd_soc_codec *codec = rtd->codec;
+	struct snd_soc_codec *codec = dai->codec;
 	struct wl1273_priv *wl1273 = snd_soc_codec_get_drvdata(codec);
 
 	switch (wl1273->mode) {
@@ -323,8 +328,7 @@ static int wl1273_hw_params(struct snd_pcm_substream *substream,
 			    struct snd_pcm_hw_params *params,
 			    struct snd_soc_dai *dai)
 {
-	struct snd_soc_pcm_runtime *rtd = substream->private_data;
-	struct wl1273_priv *wl1273 = snd_soc_codec_get_drvdata(rtd->codec);
+	struct wl1273_priv *wl1273 = snd_soc_codec_get_drvdata(dai->codec);
 	struct wl1273_core *core = wl1273->core;
 	unsigned int rate, width, r;
 
@@ -380,7 +384,7 @@ static int wl1273_hw_params(struct snd_pcm_substream *substream,
 	return 0;
 }
 
-static struct snd_soc_dai_ops wl1273_dai_ops = {
+static const struct snd_soc_dai_ops wl1273_dai_ops = {
 	.startup	= wl1273_startup,
 	.hw_params	= wl1273_hw_params,
 };
@@ -457,9 +461,8 @@ static int wl1273_probe(struct snd_soc_codec *codec)
 	wl1273->core = *core;
 
 	snd_soc_codec_set_drvdata(codec, wl1273);
-	mutex_init(&codec->mutex);
 
-	r = snd_soc_add_controls(codec, wl1273_controls,
+	r = snd_soc_add_codec_controls(codec, wl1273_controls,
 				 ARRAY_SIZE(wl1273_controls));
 	if (r)
 		kfree(wl1273);
@@ -482,13 +485,13 @@ static struct snd_soc_codec_driver soc_codec_dev_wl1273 = {
 	.remove = wl1273_remove,
 };
 
-static int __devinit wl1273_platform_probe(struct platform_device *pdev)
+static int wl1273_platform_probe(struct platform_device *pdev)
 {
 	return snd_soc_register_codec(&pdev->dev, &soc_codec_dev_wl1273,
 				      &wl1273_dai, 1);
 }
 
-static int __devexit wl1273_platform_remove(struct platform_device *pdev)
+static int wl1273_platform_remove(struct platform_device *pdev)
 {
 	snd_soc_unregister_codec(&pdev->dev);
 	return 0;
@@ -502,20 +505,10 @@ static struct platform_driver wl1273_platform_driver = {
 		.owner	= THIS_MODULE,
 	},
 	.probe		= wl1273_platform_probe,
-	.remove		= __devexit_p(wl1273_platform_remove),
+	.remove		= wl1273_platform_remove,
 };
 
-static int __init wl1273_init(void)
-{
-	return platform_driver_register(&wl1273_platform_driver);
-}
-module_init(wl1273_init);
-
-static void __exit wl1273_exit(void)
-{
-	platform_driver_unregister(&wl1273_platform_driver);
-}
-module_exit(wl1273_exit);
+module_platform_driver(wl1273_platform_driver);
 
 MODULE_AUTHOR("Matti Aaltonen <matti.j.aaltonen@nokia.com>");
 MODULE_DESCRIPTION("ASoC WL1273 codec driver");

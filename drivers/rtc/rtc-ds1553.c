@@ -18,6 +18,7 @@
 #include <linux/rtc.h>
 #include <linux/platform_device.h>
 #include <linux/io.h>
+#include <linux/module.h>
 
 #define DRV_VERSION "0.3"
 
@@ -227,29 +228,12 @@ static int ds1553_rtc_alarm_irq_enable(struct device *dev, unsigned int enabled)
 	return 0;
 }
 
-static int ds1553_rtc_update_irq_enable(struct device *dev,
-	unsigned int enabled)
-{
-	struct platform_device *pdev = to_platform_device(dev);
-	struct rtc_plat_data *pdata = platform_get_drvdata(pdev);
-
-	if (pdata->irq <= 0)
-		return -EINVAL;
-	if (enabled)
-		pdata->irqen |= RTC_UF;
-	else
-		pdata->irqen &= ~RTC_UF;
-	ds1553_rtc_update_alarm(pdata);
-	return 0;
-}
-
 static const struct rtc_class_ops ds1553_rtc_ops = {
 	.read_time		= ds1553_rtc_read_time,
 	.set_time		= ds1553_rtc_set_time,
 	.read_alarm		= ds1553_rtc_read_alarm,
 	.set_alarm		= ds1553_rtc_set_alarm,
 	.alarm_irq_enable	= ds1553_rtc_alarm_irq_enable,
-	.update_irq_enable	= ds1553_rtc_update_irq_enable,
 };
 
 static ssize_t ds1553_nvram_read(struct file *filp, struct kobject *kobj,
@@ -292,7 +276,7 @@ static struct bin_attribute ds1553_nvram_attr = {
 	.write = ds1553_nvram_write,
 };
 
-static int __devinit ds1553_rtc_probe(struct platform_device *pdev)
+static int ds1553_rtc_probe(struct platform_device *pdev)
 {
 	struct rtc_device *rtc;
 	struct resource *res;
@@ -336,30 +320,28 @@ static int __devinit ds1553_rtc_probe(struct platform_device *pdev)
 		writeb(0, ioaddr + RTC_INTERRUPTS);
 		if (devm_request_irq(&pdev->dev, pdata->irq,
 				ds1553_rtc_interrupt,
-				IRQF_DISABLED, pdev->name, pdev) < 0) {
+				0, pdev->name, pdev) < 0) {
 			dev_warn(&pdev->dev, "interrupt not available.\n");
 			pdata->irq = 0;
 		}
 	}
 
-	rtc = rtc_device_register(pdev->name, &pdev->dev,
+	rtc = devm_rtc_device_register(&pdev->dev, pdev->name,
 				  &ds1553_rtc_ops, THIS_MODULE);
 	if (IS_ERR(rtc))
 		return PTR_ERR(rtc);
 	pdata->rtc = rtc;
 
 	ret = sysfs_create_bin_file(&pdev->dev.kobj, &ds1553_nvram_attr);
-	if (ret)
-		rtc_device_unregister(rtc);
+
 	return ret;
 }
 
-static int __devexit ds1553_rtc_remove(struct platform_device *pdev)
+static int ds1553_rtc_remove(struct platform_device *pdev)
 {
 	struct rtc_plat_data *pdata = platform_get_drvdata(pdev);
 
 	sysfs_remove_bin_file(&pdev->dev.kobj, &ds1553_nvram_attr);
-	rtc_device_unregister(pdata->rtc);
 	if (pdata->irq > 0)
 		writeb(0, pdata->ioaddr + RTC_INTERRUPTS);
 	return 0;
@@ -370,25 +352,14 @@ MODULE_ALIAS("platform:rtc-ds1553");
 
 static struct platform_driver ds1553_rtc_driver = {
 	.probe		= ds1553_rtc_probe,
-	.remove		= __devexit_p(ds1553_rtc_remove),
+	.remove		= ds1553_rtc_remove,
 	.driver		= {
 		.name	= "rtc-ds1553",
 		.owner	= THIS_MODULE,
 	},
 };
 
-static __init int ds1553_init(void)
-{
-	return platform_driver_register(&ds1553_rtc_driver);
-}
-
-static __exit void ds1553_exit(void)
-{
-	platform_driver_unregister(&ds1553_rtc_driver);
-}
-
-module_init(ds1553_init);
-module_exit(ds1553_exit);
+module_platform_driver(ds1553_rtc_driver);
 
 MODULE_AUTHOR("Atsushi Nemoto <anemo@mba.ocn.ne.jp>");
 MODULE_DESCRIPTION("Dallas DS1553 RTC driver");

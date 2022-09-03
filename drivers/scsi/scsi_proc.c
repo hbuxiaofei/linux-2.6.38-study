@@ -45,57 +45,50 @@ static struct proc_dir_entry *proc_scsi;
 /* Protect sht->present and sht->proc_dir */
 static DEFINE_MUTEX(global_host_template_mutex);
 
-/**
- * proc_scsi_read - handle read from /proc by calling host's proc_info() command
- * @buffer: passed to proc_info
- * @start: passed to proc_info
- * @offset: passed to proc_info
- * @length: passed to proc_info
- * @eof: returns whether length read was less than requested
- * @data: pointer to a &struct Scsi_Host
- */
-
-static int proc_scsi_read(char *buffer, char **start, off_t offset,
-			  int length, int *eof, void *data)
+static ssize_t proc_scsi_host_write(struct file *file, const char __user *buf,
+                           size_t count, loff_t *ppos)
 {
-	struct Scsi_Host *shost = data;
-	int n;
-
-	n = shost->hostt->proc_info(shost, buffer, start, offset, length, 0);
-	*eof = (n < length);
-
-	return n;
-}
-
-/**
- * proc_scsi_write_proc - Handle write to /proc by calling host's proc_info()
- * @file: not used
- * @buf: source of data to write.
- * @count: number of bytes (at most PROC_BLOCK_SIZE) to write.
- * @data: pointer to &struct Scsi_Host
- */
-static int proc_scsi_write_proc(struct file *file, const char __user *buf,
-                           unsigned long count, void *data)
-{
-	struct Scsi_Host *shost = data;
+	struct Scsi_Host *shost = PDE_DATA(file_inode(file));
 	ssize_t ret = -ENOMEM;
 	char *page;
-	char *start;
     
 	if (count > PROC_BLOCK_SIZE)
 		return -EOVERFLOW;
+
+	if (!shost->hostt->write_info)
+		return -EINVAL;
 
 	page = (char *)__get_free_page(GFP_KERNEL);
 	if (page) {
 		ret = -EFAULT;
 		if (copy_from_user(page, buf, count))
 			goto out;
-		ret = shost->hostt->proc_info(shost, page, &start, 0, count, 1);
+		ret = shost->hostt->write_info(shost, page, count);
 	}
 out:
 	free_page((unsigned long)page);
 	return ret;
 }
+
+static int proc_scsi_show(struct seq_file *m, void *v)
+{
+	struct Scsi_Host *shost = m->private;
+	return shost->hostt->show_info(m, shost);
+}
+
+static int proc_scsi_host_open(struct inode *inode, struct file *file)
+{
+	return single_open_size(file, proc_scsi_show, PDE_DATA(inode),
+				4 * PAGE_SIZE);
+}
+
+static const struct file_operations proc_scsi_fops = {
+	.open = proc_scsi_host_open,
+	.release = single_release,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.write = proc_scsi_host_write
+};
 
 /**
  * scsi_proc_hostdir_add - Create directory in /proc for a scsi host
@@ -106,7 +99,7 @@ out:
 
 void scsi_proc_hostdir_add(struct scsi_host_template *sht)
 {
-	if (!sht->proc_info)
+	if (!sht->show_info)
 		return;
 
 	mutex_lock(&global_host_template_mutex);
@@ -125,7 +118,7 @@ void scsi_proc_hostdir_add(struct scsi_host_template *sht)
  */
 void scsi_proc_hostdir_rm(struct scsi_host_template *sht)
 {
-	if (!sht->proc_info)
+	if (!sht->show_info)
 		return;
 
 	mutex_lock(&global_host_template_mutex);
@@ -151,16 +144,12 @@ void scsi_proc_host_add(struct Scsi_Host *shost)
 		return;
 
 	sprintf(name,"%d", shost->host_no);
-	p = create_proc_read_entry(name, S_IFREG | S_IRUGO | S_IWUSR,
-			sht->proc_dir, proc_scsi_read, shost);
-	if (!p) {
+	p = proc_create_data(name, S_IRUGO | S_IWUSR,
+		sht->proc_dir, &proc_scsi_fops, shost);
+	if (!p)
 		printk(KERN_ERR "%s: Failed to register host %d in"
 		       "%s\n", __func__, shost->host_no,
 		       sht->proc_name);
-		return;
-	} 
-
-	p->write_proc = proc_scsi_write_proc;
 }
 
 /**
@@ -381,17 +370,58 @@ static ssize_t proc_scsi_write(struct file *file, const char __user *buf,
 	return err;
 }
 
-/**
- * proc_scsi_show - show contents of /proc/scsi/scsi (attached devices)
- * @s: output goes here
- * @p: not used
- */
-static int proc_scsi_show(struct seq_file *s, void *p)
+static int always_match(struct device *dev, void *data)
 {
-	seq_printf(s, "Attached devices:\n");
-	bus_for_each_dev(&scsi_bus_type, NULL, s, proc_print_scsidevice);
-	return 0;
+	return 1;
 }
+
+static inline struct device *next_scsi_device(struct device *start)
+{
+	struct device *next = bus_find_device(&scsi_bus_type, start, NULL,
+					      always_match);
+	put_device(start);
+	return next;
+}
+
+static void *scsi_seq_start(struct seq_file *sfile, loff_t *pos)
+{
+	struct device *dev = NULL;
+	loff_t n = *pos;
+
+	while ((dev = next_scsi_device(dev))) {
+		if (!n--)
+			break;
+		sfile->private++;
+	}
+	return dev;
+}
+
+static void *scsi_seq_next(struct seq_file *sfile, void *v, loff_t *pos)
+{
+	(*pos)++;
+	sfile->private++;
+	return next_scsi_device(v);
+}
+
+static void scsi_seq_stop(struct seq_file *sfile, void *v)
+{
+	put_device(v);
+}
+
+static int scsi_seq_show(struct seq_file *sfile, void *dev)
+{
+	if (!sfile->private)
+		seq_puts(sfile, "Attached devices:\n");
+
+	return proc_print_scsidevice(dev, sfile);
+}
+
+static const struct seq_operations scsi_seq_ops = {
+	.start	= scsi_seq_start,
+	.next	= scsi_seq_next,
+	.stop	= scsi_seq_stop,
+	.show	= scsi_seq_show
+};
 
 /**
  * proc_scsi_open - glue function
@@ -406,7 +436,7 @@ static int proc_scsi_open(struct inode *inode, struct file *file)
 	 * We don't really need this for the write case but it doesn't
 	 * harm either.
 	 */
-	return single_open(file, proc_scsi_show, NULL);
+	return seq_open(file, &scsi_seq_ops);
 }
 
 static const struct file_operations proc_scsi_operations = {
@@ -415,7 +445,7 @@ static const struct file_operations proc_scsi_operations = {
 	.read		= seq_read,
 	.write		= proc_scsi_write,
 	.llseek		= seq_lseek,
-	.release	= single_release,
+	.release	= seq_release,
 };
 
 /**

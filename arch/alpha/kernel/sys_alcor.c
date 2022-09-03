@@ -18,7 +18,6 @@
 #include <linux/bitops.h>
 
 #include <asm/ptrace.h>
-#include <asm/system.h>
 #include <asm/io.h>
 #include <asm/dma.h>
 #include <asm/mmu_context.h>
@@ -125,7 +124,7 @@ alcor_init_irq(void)
 		   on while IRQ probing.  */
 		if (i >= 16+20 && i <= 16+30)
 			continue;
-		set_irq_chip_and_handler(i, &alcor_irq_type, handle_level_irq);
+		irq_set_chip_and_handler(i, &alcor_irq_type, handle_level_irq);
 		irq_set_status_flags(i, IRQ_LEVEL);
 	}
 	i8259a_irq_type.irq_ack = alcor_isa_mask_and_ack_irq;
@@ -183,7 +182,7 @@ alcor_init_irq(void)
  */
 
 static int __init
-alcor_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+alcor_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
 	static char irq_tab[7][5] __initdata = {
 		/*INT    INTA   INTB   INTC   INTD */

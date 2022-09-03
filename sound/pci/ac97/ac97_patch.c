@@ -27,6 +27,15 @@
 #include "ac97_patch.h"
 
 /*
+ *  Forward declarations
+ */
+
+static struct snd_kcontrol *snd_ac97_find_mixer_ctl(struct snd_ac97 *ac97,
+						    const char *name);
+static int snd_ac97_add_vmaster(struct snd_ac97 *ac97, char *name,
+				const unsigned int *tlv, const char **slaves);
+
+/*
  *  Chip specific initialization
  */
 
@@ -1900,6 +1909,7 @@ static unsigned int ad1981_jacks_whitelist[] = {
 	0x103c0944, /* HP nc6220 */
 	0x103c0934, /* HP nc8220 */
 	0x103c006d, /* HP nx9105 */
+	0x103c300d, /* HP Compaq dc5100 SFF(PT003AW) */
 	0x17340088, /* FSC Scenic-W */
 	0 /* end */
 };
@@ -2585,6 +2595,21 @@ static void alc650_update_jacks(struct snd_ac97 *ac97)
 			     shared ? 0 : 0x100);
 }
 
+static int alc650_swap_surround_put(struct snd_kcontrol *kcontrol,
+				    struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_ac97 *ac97 = snd_kcontrol_chip(kcontrol);
+	struct snd_pcm_chmap *map = ac97->chmaps[SNDRV_PCM_STREAM_PLAYBACK];
+
+	if (map) {
+		if (ucontrol->value.integer.value[0])
+			map->chmap = snd_pcm_std_chmaps;
+		else
+			map->chmap = snd_pcm_alt_chmaps;
+	}
+	return snd_ac97_put_volsw(kcontrol, ucontrol);
+}
+
 static const struct snd_kcontrol_new snd_ac97_controls_alc650[] = {
 	AC97_SINGLE("Duplicate Front", AC97_ALC650_MULTICH, 0, 1, 0),
 	AC97_SINGLE("Surround Down Mix", AC97_ALC650_MULTICH, 1, 1, 0),
@@ -2598,7 +2623,14 @@ static const struct snd_kcontrol_new snd_ac97_controls_alc650[] = {
 	/* 9: Line-In/Surround share */
 	/* 10: Mic/CLFE share */
 	/* 11-13: in IEC958 controls */
-	AC97_SINGLE("Swap Surround Slot", AC97_ALC650_MULTICH, 14, 1, 0),
+	{
+		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
+		.name = "Swap Surround Slot",
+		.info = snd_ac97_info_volsw,
+		.get = snd_ac97_get_volsw,
+		.put = alc650_swap_surround_put,
+		.private_value =  AC97_SINGLE_VALUE(AC97_ALC650_MULTICH, 14, 1, 0),
+	},
 #if 0 /* always set in patch_alc650 */
 	AC97_SINGLE("IEC958 Input Clock Enable", AC97_ALC650_CLOCK, 0, 1, 0),
 	AC97_SINGLE("IEC958 Input Pin Enable", AC97_ALC650_CLOCK, 1, 1, 0),
@@ -2940,6 +2972,49 @@ static int patch_alc850(struct snd_ac97 *ac97)
 	return 0;
 }
 
+static int patch_aztech_azf3328_specific(struct snd_ac97 *ac97)
+{
+	struct snd_kcontrol *kctl_3d_center =
+		snd_ac97_find_mixer_ctl(ac97, "3D Control - Center");
+	struct snd_kcontrol *kctl_3d_depth =
+		snd_ac97_find_mixer_ctl(ac97, "3D Control - Depth");
+
+	/*
+	 * 3D register is different from AC97 standard layout
+	 * (also do some renaming, to resemble Windows driver naming)
+	 */
+	if (kctl_3d_center) {
+		kctl_3d_center->private_value =
+			AC97_SINGLE_VALUE(AC97_3D_CONTROL, 1, 0x07, 0);
+		snd_ac97_rename_vol_ctl(ac97,
+			"3D Control - Center", "3D Control - Width"
+		);
+	}
+	if (kctl_3d_depth)
+		kctl_3d_depth->private_value =
+			AC97_SINGLE_VALUE(AC97_3D_CONTROL, 8, 0x03, 0);
+
+	/* Aztech Windows driver calls the
+	   equivalent control "Modem Playback", thus rename it: */
+	snd_ac97_rename_vol_ctl(ac97,
+		"Master Mono Playback", "Modem Playback"
+	);
+	snd_ac97_rename_vol_ctl(ac97,
+		"Headphone Playback", "FM Synth Playback"
+	);
+
+	return 0;
+}
+
+static const struct snd_ac97_build_ops patch_aztech_azf3328_ops = {
+	.build_specific	= patch_aztech_azf3328_specific
+};
+
+static int patch_aztech_azf3328(struct snd_ac97 *ac97)
+{
+	ac97->build_ops = &patch_aztech_azf3328_ops;
+	return 0;
+}
 
 /*
  * C-Media CM97xx codecs

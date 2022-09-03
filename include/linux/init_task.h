@@ -10,7 +10,9 @@
 #include <linux/pid_namespace.h>
 #include <linux/user_namespace.h>
 #include <linux/securebits.h>
+#include <linux/seqlock.h>
 #include <net/net_namespace.h>
+#include <linux/sched/rt.h>
 
 #ifdef CONFIG_SMP
 # define INIT_PUSHABLE_TASKS(tsk)					\
@@ -21,6 +23,20 @@
 
 extern struct files_struct init_files;
 extern struct fs_struct init_fs;
+
+#ifdef CONFIG_CGROUPS
+#define INIT_GROUP_RWSEM(sig)						\
+	.group_rwsem = __RWSEM_INITIALIZER(sig.group_rwsem),
+#else
+#define INIT_GROUP_RWSEM(sig)
+#endif
+
+#ifdef CONFIG_CPUSETS
+#define INIT_CPUSET_SEQ							\
+	.mems_allowed_seq = SEQCNT_ZERO,
+#else
+#define INIT_CPUSET_SEQ
+#endif
 
 #define INIT_SIGNALS(sig) {						\
 	.nr_threads	= 1,						\
@@ -34,10 +50,11 @@ extern struct fs_struct init_fs;
 	.cputimer	= { 						\
 		.cputime = INIT_CPUTIME,				\
 		.running = 0,						\
-		.lock = __SPIN_LOCK_UNLOCKED(sig.cputimer.lock),	\
+		.lock = __RAW_SPIN_LOCK_UNLOCKED(sig.cputimer.lock),	\
 	},								\
 	.cred_guard_mutex =						\
 		 __MUTEX_INITIALIZER(sig.cred_guard_mutex),		\
+	INIT_GROUP_RWSEM(sig)						\
 }
 
 extern struct nsproxy init_nsproxy;
@@ -77,18 +94,11 @@ extern struct group_info init_groups;
 
 #ifdef CONFIG_AUDITSYSCALL
 #define INIT_IDS \
-	.loginuid = -1, \
+	.loginuid = INVALID_UID, \
 	.sessionid = -1,
 #else
 #define INIT_IDS
 #endif
-
-/*
- * Because of the reduced scope of CAP_SETPCAP when filesystem
- * capabilities are in effect, it is safe to allow CAP_SETPCAP to
- * be available in the default configuration.
- */
-# define CAP_INIT_BSET  CAP_FULL_SET
 
 #ifdef CONFIG_RCU_BOOST
 #define INIT_TASK_RCU_BOOST()						\
@@ -115,14 +125,34 @@ extern struct group_info init_groups;
 
 extern struct cred init_cred;
 
+extern struct task_group root_task_group;
+
+#ifdef CONFIG_CGROUP_SCHED
+# define INIT_CGROUP_SCHED(tsk)						\
+	.sched_task_group = &root_task_group,
+#else
+# define INIT_CGROUP_SCHED(tsk)
+#endif
+
 #ifdef CONFIG_PERF_EVENTS
-# define INIT_PERF_EVENTS(tsk)					\
+# define INIT_PERF_EVENTS(tsk)						\
 	.perf_event_mutex = 						\
 		 __MUTEX_INITIALIZER(tsk.perf_event_mutex),		\
 	.perf_event_list = LIST_HEAD_INIT(tsk.perf_event_list),
 #else
 # define INIT_PERF_EVENTS(tsk)
 #endif
+
+#ifdef CONFIG_VIRT_CPU_ACCOUNTING_GEN
+# define INIT_VTIME(tsk)						\
+	.vtime_seqlock = __SEQLOCK_UNLOCKED(tsk.vtime_seqlock),	\
+	.vtime_snap = 0,				\
+	.vtime_snap_whence = VTIME_SYS,
+#else
+# define INIT_VTIME(tsk)
+#endif
+
+#define INIT_TASK_COMM "swapper"
 
 /*
  *  INIT_TASK is used to set up the first task table, touch at
@@ -134,12 +164,12 @@ extern struct cred init_cred;
 	.stack		= &init_thread_info,				\
 	.usage		= ATOMIC_INIT(2),				\
 	.flags		= PF_KTHREAD,					\
-	.lock_depth	= -1,						\
 	.prio		= MAX_PRIO-20,					\
 	.static_prio	= MAX_PRIO-20,					\
 	.normal_prio	= MAX_PRIO-20,					\
 	.policy		= SCHED_NORMAL,					\
 	.cpus_allowed	= CPU_MASK_ALL,					\
+	.nr_cpus_allowed= NR_CPUS,					\
 	.mm		= NULL,						\
 	.active_mm	= &init_mm,					\
 	.se		= {						\
@@ -147,11 +177,11 @@ extern struct cred init_cred;
 	},								\
 	.rt		= {						\
 		.run_list	= LIST_HEAD_INIT(tsk.rt.run_list),	\
-		.time_slice	= HZ, 					\
-		.nr_cpus_allowed = NR_CPUS,				\
+		.time_slice	= RR_TIMESLICE,				\
 	},								\
 	.tasks		= LIST_HEAD_INIT(tsk.tasks),			\
 	INIT_PUSHABLE_TASKS(tsk)					\
+	INIT_CGROUP_SCHED(tsk)						\
 	.ptraced	= LIST_HEAD_INIT(tsk.ptraced),			\
 	.ptrace_entry	= LIST_HEAD_INIT(tsk.ptrace_entry),		\
 	.real_parent	= &tsk,						\
@@ -159,9 +189,9 @@ extern struct cred init_cred;
 	.children	= LIST_HEAD_INIT(tsk.children),			\
 	.sibling	= LIST_HEAD_INIT(tsk.sibling),			\
 	.group_leader	= &tsk,						\
-	RCU_INIT_POINTER(.real_cred, &init_cred),			\
-	RCU_INIT_POINTER(.cred, &init_cred),				\
-	.comm		= "swapper",					\
+	RCU_POINTER_INITIALIZER(real_cred, &init_cred),			\
+	RCU_POINTER_INITIALIZER(cred, &init_cred),			\
+	.comm		= INIT_TASK_COMM,				\
 	.thread		= INIT_THREAD,					\
 	.fs		= &init_fs,					\
 	.files		= &init_files,					\
@@ -175,7 +205,6 @@ extern struct cred init_cred;
 	.alloc_lock	= __SPIN_LOCK_UNLOCKED(tsk.alloc_lock),		\
 	.journal_info	= NULL,						\
 	.cpu_timers	= INIT_CPU_TIMERS(tsk.cpu_timers),		\
-	.fs_excl	= ATOMIC_INIT(0),				\
 	.pi_lock	= __RAW_SPIN_LOCK_UNLOCKED(tsk.pi_lock),	\
 	.timer_slack_ns = 50000, /* 50 usec default slack */		\
 	.pids = {							\
@@ -184,7 +213,6 @@ extern struct cred init_cred;
 		[PIDTYPE_SID]  = INIT_PID_LINK(PIDTYPE_SID),		\
 	},								\
 	.thread_group	= LIST_HEAD_INIT(tsk.thread_group),		\
-	.dirties = INIT_PROP_LOCAL_SINGLE(dirties),			\
 	INIT_IDS							\
 	INIT_PERF_EVENTS(tsk)						\
 	INIT_TRACE_IRQFLAGS						\
@@ -192,6 +220,8 @@ extern struct cred init_cred;
 	INIT_FTRACE_GRAPH						\
 	INIT_TRACE_RECURSION						\
 	INIT_TASK_RCU_PREEMPT(tsk)					\
+	INIT_CPUSET_SEQ							\
+	INIT_VTIME(tsk)							\
 }
 
 

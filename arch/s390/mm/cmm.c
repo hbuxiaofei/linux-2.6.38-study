@@ -1,7 +1,7 @@
 /*
  *  Collaborative memory management interface.
  *
- *    Copyright IBM Corp 2003,2010
+ *    Copyright IBM Corp 2003, 2010
  *    Author(s): Martin Schwidefsky <schwidefsky@de.ibm.com>,
  *
  */
@@ -91,7 +91,7 @@ static long cmm_alloc_pages(long nr, long *counter,
 			} else
 				free_page((unsigned long) npa);
 		}
-		diag10(addr);
+		diag10_range(addr >> PAGE_SHIFT, 1);
 		pa->pages[pa->index++] = addr;
 		(*counter)++;
 		spin_unlock(&cmm_lock);
@@ -458,12 +458,10 @@ static int __init cmm_init(void)
 	if (rc)
 		goto out_pm;
 	cmm_thread_ptr = kthread_run(cmm_thread, NULL, "cmmthread");
-	rc = IS_ERR(cmm_thread_ptr) ? PTR_ERR(cmm_thread_ptr) : 0;
-	if (rc)
-		goto out_kthread;
-	return 0;
+	if (!IS_ERR(cmm_thread_ptr))
+		return 0;
 
-out_kthread:
+	rc = PTR_ERR(cmm_thread_ptr);
 	unregister_pm_notifier(&cmm_power_notifier);
 out_pm:
 	unregister_oom_notifier(&cmm_oom_nb);

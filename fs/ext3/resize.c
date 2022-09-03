@@ -11,10 +11,7 @@
 
 #define EXT3FS_DEBUG
 
-#include <linux/ext3_jbd.h>
-
-#include <linux/errno.h>
-#include <linux/slab.h>
+#include "ext3.h"
 
 
 #define outside(b, first, last)	((b) < (first) || (b) >= (last))
@@ -119,8 +116,8 @@ static struct buffer_head *bclean(handle_t *handle, struct super_block *sb,
 	int err;
 
 	bh = sb_getblk(sb, blk);
-	if (!bh)
-		return ERR_PTR(-EIO);
+	if (unlikely(!bh))
+		return ERR_PTR(-ENOMEM);
 	if ((err = ext3_journal_get_write_access(handle, bh))) {
 		brelse(bh);
 		bh = ERR_PTR(err);
@@ -237,8 +234,8 @@ static int setup_new_group_blocks(struct super_block *sb,
 			goto exit_bh;
 
 		gdb = sb_getblk(sb, block);
-		if (!gdb) {
-			err = -EIO;
+		if (unlikely(!gdb)) {
+			err = -ENOMEM;
 			goto exit_bh;
 		}
 		if ((err = ext3_journal_get_write_access(handle, gdb))) {
@@ -725,8 +722,8 @@ static void update_backups(struct super_block *sb,
 			break;
 
 		bh = sb_getblk(sb, group * bpg + blk_off);
-		if (!bh) {
-			err = -EIO;
+		if (unlikely(!bh)) {
+			err = -ENOMEM;
 			break;
 		}
 		ext3_debug("update metadata backup %#04lx\n",
@@ -1009,7 +1006,7 @@ int ext3_group_extend(struct super_block *sb, struct ext3_super_block *es,
 
 	if (test_opt(sb, DEBUG))
 		printk(KERN_DEBUG "EXT3-fs: extending last group from "E3FSBLK
-		       " upto "E3FSBLK" blocks\n",
+		       " up to "E3FSBLK" blocks\n",
 		       o_blocks_count, n_blocks_count);
 
 	if (n_blocks_count == 0 || n_blocks_count == o_blocks_count)

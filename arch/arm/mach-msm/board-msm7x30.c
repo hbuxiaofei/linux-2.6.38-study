@@ -14,31 +14,46 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
  * 02110-1301, USA.
  */
-
+#include <linux/gpio.h>
 #include <linux/kernel.h>
 #include <linux/irq.h>
-#include <linux/gpio.h>
 #include <linux/platform_device.h>
 #include <linux/delay.h>
 #include <linux/io.h>
 #include <linux/smsc911x.h>
 #include <linux/usb/msm_hsusb.h>
+#include <linux/clkdev.h>
+#include <linux/memblock.h>
 
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
+#include <asm/memory.h>
 #include <asm/setup.h>
 
-#include <mach/gpio.h>
 #include <mach/board.h>
-#include <mach/memory.h>
 #include <mach/msm_iomap.h>
 #include <mach/dma.h>
 
 #include <mach/vreg.h>
 #include "devices.h"
+#include "gpiomux.h"
 #include "proc_comm.h"
+#include "common.h"
 
-extern struct sys_timer msm_timer;
+static void __init msm7x30_fixup(struct tag *tag, char **cmdline,
+		struct meminfo *mi)
+{
+	for (; tag->hdr.size; tag = tag_next(tag))
+		if (tag->hdr.tag == ATAG_MEM && tag->u.mem.start == 0x200000) {
+			tag->u.mem.start = 0;
+			tag->u.mem.size += SZ_2M;
+		}
+}
+
+static void __init msm7x30_reserve(void)
+{
+	memblock_remove(0x0, SZ_2M);
+}
 
 static int hsusb_phy_init_seq[] = {
 	0x30, 0x32,	/* Enable and set Pre-Emphasis Depth to 20% */
@@ -52,7 +67,29 @@ static struct msm_otg_platform_data msm_otg_pdata = {
 	.otg_control		= OTG_PHY_CONTROL,
 };
 
+struct msm_gpiomux_config msm_gpiomux_configs[GPIOMUX_NGPIOS] = {
+#ifdef CONFIG_SERIAL_MSM_CONSOLE
+	[49] = { /* UART2 RFR */
+		.suspended = GPIOMUX_DRV_2MA | GPIOMUX_PULL_DOWN |
+			     GPIOMUX_FUNC_2 | GPIOMUX_VALID,
+	},
+	[50] = { /* UART2 CTS */
+		.suspended = GPIOMUX_DRV_2MA | GPIOMUX_PULL_DOWN |
+			     GPIOMUX_FUNC_2 | GPIOMUX_VALID,
+	},
+	[51] = { /* UART2 RX */
+		.suspended = GPIOMUX_DRV_2MA | GPIOMUX_PULL_DOWN |
+			     GPIOMUX_FUNC_2 | GPIOMUX_VALID,
+	},
+	[52] = { /* UART2 TX */
+		.suspended = GPIOMUX_DRV_2MA | GPIOMUX_PULL_DOWN |
+			     GPIOMUX_FUNC_2 | GPIOMUX_VALID,
+	},
+#endif
+};
+
 static struct platform_device *devices[] __initdata = {
+	&msm_device_gpio_7x30,
 #if defined(CONFIG_SERIAL_MSM) || defined(CONFIG_MSM_SERIAL_DEBUGGER)
         &msm_device_uart2,
 #endif
@@ -82,32 +119,40 @@ static void __init msm7x30_map_io(void)
 	msm_clock_init(msm_clocks_7x30, msm_num_clocks_7x30);
 }
 
+static void __init msm7x30_init_late(void)
+{
+	smd_debugfs_init();
+}
+
 MACHINE_START(MSM7X30_SURF, "QCT MSM7X30 SURF")
-#ifdef CONFIG_MSM_DEBUG_UART
-#endif
-	.boot_params = PHYS_OFFSET + 0x100,
+	.atag_offset = 0x100,
+	.fixup = msm7x30_fixup,
+	.reserve = msm7x30_reserve,
 	.map_io = msm7x30_map_io,
 	.init_irq = msm7x30_init_irq,
 	.init_machine = msm7x30_init,
-	.timer = &msm_timer,
+	.init_late = msm7x30_init_late,
+	.init_time	= msm7x30_timer_init,
 MACHINE_END
 
 MACHINE_START(MSM7X30_FFA, "QCT MSM7X30 FFA")
-#ifdef CONFIG_MSM_DEBUG_UART
-#endif
-	.boot_params = PHYS_OFFSET + 0x100,
+	.atag_offset = 0x100,
+	.fixup = msm7x30_fixup,
+	.reserve = msm7x30_reserve,
 	.map_io = msm7x30_map_io,
 	.init_irq = msm7x30_init_irq,
 	.init_machine = msm7x30_init,
-	.timer = &msm_timer,
+	.init_late = msm7x30_init_late,
+	.init_time	= msm7x30_timer_init,
 MACHINE_END
 
 MACHINE_START(MSM7X30_FLUID, "QCT MSM7X30 FLUID")
-#ifdef CONFIG_MSM_DEBUG_UART
-#endif
-	.boot_params = PHYS_OFFSET + 0x100,
+	.atag_offset = 0x100,
+	.fixup = msm7x30_fixup,
+	.reserve = msm7x30_reserve,
 	.map_io = msm7x30_map_io,
 	.init_irq = msm7x30_init_irq,
 	.init_machine = msm7x30_init,
-	.timer = &msm_timer,
+	.init_late = msm7x30_init_late,
+	.init_time	= msm7x30_timer_init,
 MACHINE_END

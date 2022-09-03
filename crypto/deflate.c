@@ -32,7 +32,6 @@
 #include <linux/interrupt.h>
 #include <linux/mm.h>
 #include <linux/net.h>
-#include <linux/slab.h>
 
 #define DEFLATE_DEF_LEVEL		Z_DEFAULT_COMPRESSION
 #define DEFLATE_DEF_WINBITS		11
@@ -48,7 +47,8 @@ static int deflate_comp_init(struct deflate_ctx *ctx)
 	int ret = 0;
 	struct z_stream_s *stream = &ctx->comp_stream;
 
-	stream->workspace = vzalloc(zlib_deflate_workspacesize());
+	stream->workspace = vzalloc(zlib_deflate_workspacesize(
+				-DEFLATE_DEF_WINBITS, DEFLATE_DEF_MEMLEVEL));
 	if (!stream->workspace) {
 		ret = -ENOMEM;
 		goto out;
@@ -72,7 +72,7 @@ static int deflate_decomp_init(struct deflate_ctx *ctx)
 	int ret = 0;
 	struct z_stream_s *stream = &ctx->decomp_stream;
 
-	stream->workspace = kzalloc(zlib_inflate_workspacesize(), GFP_KERNEL);
+	stream->workspace = vzalloc(zlib_inflate_workspacesize());
 	if (!stream->workspace) {
 		ret = -ENOMEM;
 		goto out;
@@ -85,7 +85,7 @@ static int deflate_decomp_init(struct deflate_ctx *ctx)
 out:
 	return ret;
 out_free:
-	kfree(stream->workspace);
+	vfree(stream->workspace);
 	goto out;
 }
 
@@ -98,7 +98,7 @@ static void deflate_comp_exit(struct deflate_ctx *ctx)
 static void deflate_decomp_exit(struct deflate_ctx *ctx)
 {
 	zlib_inflateEnd(&ctx->decomp_stream);
-	kfree(ctx->decomp_stream.workspace);
+	vfree(ctx->decomp_stream.workspace);
 }
 
 static int deflate_init(struct crypto_tfm *tfm)
@@ -199,7 +199,6 @@ static struct crypto_alg alg = {
 	.cra_flags		= CRYPTO_ALG_TYPE_COMPRESS,
 	.cra_ctxsize		= sizeof(struct deflate_ctx),
 	.cra_module		= THIS_MODULE,
-	.cra_list		= LIST_HEAD_INIT(alg.cra_list),
 	.cra_init		= deflate_init,
 	.cra_exit		= deflate_exit,
 	.cra_u			= { .compress = {

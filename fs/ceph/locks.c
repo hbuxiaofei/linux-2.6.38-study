@@ -13,7 +13,7 @@
 static int ceph_lock_message(u8 lock_type, u16 operation, struct file *file,
 			     int cmd, u8 wait, struct file_lock *fl)
 {
-	struct inode *inode = file->f_dentry->d_inode;
+	struct inode *inode = file_inode(file);
 	struct ceph_mds_client *mdsc =
 		ceph_sb_to_client(inode->i_sb)->mdsc;
 	struct ceph_mds_request *req;
@@ -23,7 +23,8 @@ static int ceph_lock_message(u8 lock_type, u16 operation, struct file *file,
 	req = ceph_mdsc_create_request(mdsc, operation, USE_AUTH_MDS);
 	if (IS_ERR(req))
 		return PTR_ERR(req);
-	req->r_inode = igrab(inode);
+	req->r_inode = inode;
+	ihold(inode);
 
 	/* mds requires start and length rather than start and end */
 	if (LLONG_MAX == fl->fl_end)
@@ -32,10 +33,9 @@ static int ceph_lock_message(u8 lock_type, u16 operation, struct file *file,
 		length = fl->fl_end - fl->fl_start + 1;
 
 	dout("ceph_lock_message: rule: %d, op: %d, pid: %llu, start: %llu, "
-	     "length: %llu, wait: %d, type`: %d", (int)lock_type,
+	     "length: %llu, wait: %d, type: %d", (int)lock_type,
 	     (int)operation, (u64)fl->fl_pid, fl->fl_start,
 	     length, wait, fl->fl_type);
-
 
 	req->r_args.filelock_change.rule = lock_type;
 	req->r_args.filelock_change.type = cmd;
@@ -70,7 +70,7 @@ static int ceph_lock_message(u8 lock_type, u16 operation, struct file *file,
 	}
 	ceph_mdsc_put_request(req);
 	dout("ceph_lock_message: rule: %d, op: %d, pid: %llu, start: %llu, "
-	     "length: %llu, wait: %d, type`: %d, err code %d", (int)lock_type,
+	     "length: %llu, wait: %d, type: %d, err code %d", (int)lock_type,
 	     (int)operation, (u64)fl->fl_pid, fl->fl_start,
 	     length, wait, fl->fl_type, err);
 	return err;
@@ -109,16 +109,20 @@ int ceph_lock(struct file *file, int cmd, struct file_lock *fl)
 			dout("mds locked, locking locally");
 			err = posix_lock_file(file, fl, NULL);
 			if (err && (CEPH_MDS_OP_SETFILELOCK == op)) {
-				/* undo! This should only happen if the kernel detects
-				 * local deadlock. */
+				/* undo! This should only happen if
+				 * the kernel detects local
+				 * deadlock. */
 				ceph_lock_message(CEPH_LOCK_FCNTL, op, file,
 						  CEPH_LOCK_UNLOCK, 0, fl);
-				dout("got %d on posix_lock_file, undid lock", err);
+				dout("got %d on posix_lock_file, undid lock",
+				     err);
 			}
 		}
 
-	} else {
-		dout("mds returned error code %d", err);
+	} else if (err == -ERESTARTSYS) {
+		dout("undoing lock\n");
+		ceph_lock_message(CEPH_LOCK_FCNTL, op, file,
+				  CEPH_LOCK_UNLOCK, 0, fl);
 	}
 	return err;
 }
@@ -155,8 +159,11 @@ int ceph_flock(struct file *file, int cmd, struct file_lock *fl)
 					  file, CEPH_LOCK_UNLOCK, 0, fl);
 			dout("got %d on flock_lock_file_wait, undid lock", err);
 		}
-	} else {
-		dout("mds error code %d", err);
+	} else if (err == -ERESTARTSYS) {
+		dout("undoing lock\n");
+		ceph_lock_message(CEPH_LOCK_FLOCK,
+				  CEPH_MDS_OP_SETFILELOCK,
+				  file, CEPH_LOCK_UNLOCK, 0, fl);
 	}
 	return err;
 }
@@ -184,27 +191,23 @@ void ceph_count_locks(struct inode *inode, int *fcntl_count, int *flock_count)
 }
 
 /**
- * Encode the flock and fcntl locks for the given inode into the pagelist.
- * Format is: #fcntl locks, sequential fcntl locks, #flock locks,
- * sequential flock locks.
- * Must be called with lock_flocks() already held.
- * If we encounter more of a specific lock type than expected,
- * we return the value 1.
+ * Encode the flock and fcntl locks for the given inode into the ceph_filelock
+ * array. Must be called with lock_flocks() already held.
+ * If we encounter more of a specific lock type than expected, return -ENOSPC.
  */
-int ceph_encode_locks(struct inode *inode, struct ceph_pagelist *pagelist,
-		      int num_fcntl_locks, int num_flock_locks)
+int ceph_encode_locks_to_buffer(struct inode *inode,
+				struct ceph_filelock *flocks,
+				int num_fcntl_locks, int num_flock_locks)
 {
 	struct file_lock *lock;
-	struct ceph_filelock cephlock;
 	int err = 0;
 	int seen_fcntl = 0;
 	int seen_flock = 0;
+	int l = 0;
 
 	dout("encoding %d flock and %d fcntl locks", num_flock_locks,
 	     num_fcntl_locks);
-	err = ceph_pagelist_append(pagelist, &num_fcntl_locks, sizeof(u32));
-	if (err)
-		goto fail;
+
 	for (lock = inode->i_flock; lock != NULL; lock = lock->fl_next) {
 		if (lock->fl_flags & FL_POSIX) {
 			++seen_fcntl;
@@ -212,19 +215,12 @@ int ceph_encode_locks(struct inode *inode, struct ceph_pagelist *pagelist,
 				err = -ENOSPC;
 				goto fail;
 			}
-			err = lock_to_ceph_filelock(lock, &cephlock);
+			err = lock_to_ceph_filelock(lock, &flocks[l]);
 			if (err)
 				goto fail;
-			err = ceph_pagelist_append(pagelist, &cephlock,
-					   sizeof(struct ceph_filelock));
+			++l;
 		}
-		if (err)
-			goto fail;
 	}
-
-	err = ceph_pagelist_append(pagelist, &num_flock_locks, sizeof(u32));
-	if (err)
-		goto fail;
 	for (lock = inode->i_flock; lock != NULL; lock = lock->fl_next) {
 		if (lock->fl_flags & FL_FLOCK) {
 			++seen_flock;
@@ -232,16 +228,48 @@ int ceph_encode_locks(struct inode *inode, struct ceph_pagelist *pagelist,
 				err = -ENOSPC;
 				goto fail;
 			}
-			err = lock_to_ceph_filelock(lock, &cephlock);
+			err = lock_to_ceph_filelock(lock, &flocks[l]);
 			if (err)
 				goto fail;
-			err = ceph_pagelist_append(pagelist, &cephlock,
-					   sizeof(struct ceph_filelock));
+			++l;
 		}
-		if (err)
-			goto fail;
 	}
 fail:
+	return err;
+}
+
+/**
+ * Copy the encoded flock and fcntl locks into the pagelist.
+ * Format is: #fcntl locks, sequential fcntl locks, #flock locks,
+ * sequential flock locks.
+ * Returns zero on success.
+ */
+int ceph_locks_to_pagelist(struct ceph_filelock *flocks,
+			   struct ceph_pagelist *pagelist,
+			   int num_fcntl_locks, int num_flock_locks)
+{
+	int err = 0;
+	__le32 nlocks;
+
+	nlocks = cpu_to_le32(num_fcntl_locks);
+	err = ceph_pagelist_append(pagelist, &nlocks, sizeof(nlocks));
+	if (err)
+		goto out_fail;
+
+	err = ceph_pagelist_append(pagelist, flocks,
+				   num_fcntl_locks * sizeof(*flocks));
+	if (err)
+		goto out_fail;
+
+	nlocks = cpu_to_le32(num_flock_locks);
+	err = ceph_pagelist_append(pagelist, &nlocks, sizeof(nlocks));
+	if (err)
+		goto out_fail;
+
+	err = ceph_pagelist_append(pagelist,
+				   &flocks[num_fcntl_locks],
+				   num_flock_locks * sizeof(*flocks));
+out_fail:
 	return err;
 }
 

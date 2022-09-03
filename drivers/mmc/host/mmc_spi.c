@@ -27,6 +27,7 @@
 #include <linux/sched.h>
 #include <linux/delay.h>
 #include <linux/slab.h>
+#include <linux/module.h>
 #include <linux/bio.h>
 #include <linux/dma-mapping.h>
 #include <linux/crc7.h>
@@ -99,7 +100,7 @@
 #define r1b_timeout		(HZ * 3)
 
 /* One of the critical speed parameters is the amount of data which may
- * be transfered in one command. If this value is too low, the SD card
+ * be transferred in one command. If this value is too low, the SD card
  * controller has to do multiple partial block writes (argggh!). With
  * today (2008) SD cards there is little speed gain if we transfer more
  * than 64 KBytes at a time. So use this value until there is any indication
@@ -1484,7 +1485,7 @@ nomem:
 }
 
 
-static int __devexit mmc_spi_remove(struct spi_device *spi)
+static int mmc_spi_remove(struct spi_device *spi)
 {
 	struct mmc_host		*mmc = dev_get_drvdata(&spi->dev);
 	struct mmc_spi_host	*host;
@@ -1516,40 +1517,22 @@ static int __devexit mmc_spi_remove(struct spi_device *spi)
 	return 0;
 }
 
-#if defined(CONFIG_OF)
-static struct of_device_id mmc_spi_of_match_table[] __devinitdata = {
+static struct of_device_id mmc_spi_of_match_table[] = {
 	{ .compatible = "mmc-spi-slot", },
 	{},
 };
-#endif
 
 static struct spi_driver mmc_spi_driver = {
 	.driver = {
 		.name =		"mmc_spi",
-		.bus =		&spi_bus_type,
 		.owner =	THIS_MODULE,
-#if defined(CONFIG_OF)
 		.of_match_table = mmc_spi_of_match_table,
-#endif
 	},
 	.probe =	mmc_spi_probe,
-	.remove =	__devexit_p(mmc_spi_remove),
+	.remove =	mmc_spi_remove,
 };
 
-
-static int __init mmc_spi_init(void)
-{
-	return spi_register_driver(&mmc_spi_driver);
-}
-module_init(mmc_spi_init);
-
-
-static void __exit mmc_spi_exit(void)
-{
-	spi_unregister_driver(&mmc_spi_driver);
-}
-module_exit(mmc_spi_exit);
-
+module_spi_driver(mmc_spi_driver);
 
 MODULE_AUTHOR("Mike Lavender, David Brownell, "
 		"Hans-Peter Nilsson, Jan Nikitenko");

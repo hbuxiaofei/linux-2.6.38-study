@@ -1,5 +1,5 @@
 /*
- * Copyright  IBM Corp. 2002, 2009
+ * Copyright IBM Corp. 2002, 2009
  *
  * Author(s): Arnd Bergmann <arndb@de.ibm.com>
  *
@@ -11,6 +11,8 @@
 #include <linux/device.h>
 #include <linux/mod_devicetable.h>
 #include <asm/fcx.h>
+#include <asm/irq.h>
+#include <asm/schid.h>
 
 /* structs from asm/cio.h */
 struct irb;
@@ -112,7 +114,6 @@ enum uc_todo {
 
 /**
  * struct ccw driver - device driver for channel attached devices
- * @owner: owning module
  * @ids: ids supported by this driver
  * @probe: function called on probe
  * @remove: function called on remove
@@ -128,10 +129,9 @@ enum uc_todo {
  * @restore: callback for restoring after hibernation
  * @uc_handler: callback for unit check handler
  * @driver: embedded device driver structure
- * @name: device driver name
+ * @int_class: interruption class to use for accounting interrupts
  */
 struct ccw_driver {
-	struct module *owner;
 	struct ccw_device_id *ids;
 	int (*probe) (struct ccw_device *);
 	void (*remove) (struct ccw_device *);
@@ -147,7 +147,7 @@ struct ccw_driver {
 	int (*restore)(struct ccw_device *);
 	enum uc_todo (*uc_handler) (struct ccw_device *, struct irb *);
 	struct device_driver driver;
-	char *name;
+	enum interruption_class int_class;
 };
 
 extern struct ccw_device *get_ccwdev_by_busid(struct ccw_driver *cdrv,
@@ -220,12 +220,12 @@ extern void ccw_device_get_id(struct ccw_device *, struct ccw_dev_id *);
 #define to_ccwdrv(n) container_of(n, struct ccw_driver, driver)
 
 extern struct ccw_device *ccw_device_probe_console(void);
-extern int ccw_device_force_console(void);
+extern void ccw_device_wait_idle(struct ccw_device *);
+extern int ccw_device_force_console(struct ccw_device *);
 
 int ccw_device_siosl(struct ccw_device *);
 
-// FIXME: these have to go
-extern int _ccw_device_get_subchannel_number(struct ccw_device *);
+extern void ccw_device_get_schid(struct ccw_device *, struct subchannel_id *);
 
 extern void *ccw_device_get_chp_desc(struct ccw_device *, int);
 #endif /* _S390_CCWDEV_H_ */

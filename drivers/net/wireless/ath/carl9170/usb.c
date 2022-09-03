@@ -112,6 +112,8 @@ static struct usb_device_id carl9170_usb_ids[] = {
 	{ USB_DEVICE(0x04bb, 0x093f) },
 	/* NEC WL300NU-G */
 	{ USB_DEVICE(0x0409, 0x0249) },
+	/* NEC WL300NU-AG */
+	{ USB_DEVICE(0x0409, 0x02b4) },
 	/* AVM FRITZ!WLAN USB Stick N */
 	{ USB_DEVICE(0x057c, 0x8401) },
 	/* AVM FRITZ!WLAN USB Stick N 2.4 */
@@ -293,6 +295,13 @@ static void carl9170_usb_rx_irq_complete(struct urb *urb)
 		goto resubmit;
 	}
 
+	/*
+	 * While the carl9170 firmware does not use this EP, the
+	 * firmware loader in the EEPROM unfortunately does.
+	 * Therefore we need to be ready to handle out-of-band
+	 * responses and traps in case the firmware crashed and
+	 * the loader took over again.
+	 */
 	carl9170_handle_command_response(ar, urb->transfer_buffer,
 					 urb->actual_length);
 
@@ -430,7 +439,7 @@ static void carl9170_usb_rx_complete(struct urb *urb)
 			 * The system is too slow to cope with
 			 * the enormous workload. We have simply
 			 * run out of active rx urbs and this
-			 * unfortunatly leads to an unpredictable
+			 * unfortunately leads to an unpredictable
 			 * device.
 			 */
 
@@ -1157,17 +1166,7 @@ static struct usb_driver carl9170_driver = {
 	.resume = carl9170_usb_resume,
 	.reset_resume = carl9170_usb_resume,
 #endif /* CONFIG_PM */
+	.disable_hub_initiated_lpm = 1,
 };
 
-static int __init carl9170_usb_init(void)
-{
-	return usb_register(&carl9170_driver);
-}
-
-static void __exit carl9170_usb_exit(void)
-{
-	usb_deregister(&carl9170_driver);
-}
-
-module_init(carl9170_usb_init);
-module_exit(carl9170_usb_exit);
+module_usb_driver(carl9170_driver);

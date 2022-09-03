@@ -379,7 +379,7 @@ int skb_p80211_to_ether(wlandevice_t *wlandev, u32 ethconv,
 
 	} else if ((payload_length >= sizeof(struct wlan_llc) +
 		sizeof(struct wlan_snap))
-		&&(e_llc->dsap == 0xaa)
+		&& (e_llc->dsap == 0xaa)
 		&& (e_llc->ssap == 0xaa)
 		&& (e_llc->ctl == 0x03)
 		   &&
@@ -415,7 +415,7 @@ int skb_p80211_to_ether(wlandevice_t *wlandev, u32 ethconv,
 
 	} else if ((payload_length >= sizeof(struct wlan_llc) +
 		sizeof(struct wlan_snap))
-		&&(e_llc->dsap == 0xaa)
+		&& (e_llc->dsap == 0xaa)
 		&& (e_llc->ssap == 0xaa)
 		&& (e_llc->ctl == 0x03)) {
 		pr_debug("802.1h/RFC1042 len: %d\n", payload_length);
@@ -559,17 +559,17 @@ void p80211skb_rxmeta_detach(struct sk_buff *skb)
 	/* Sanity checks */
 	if (skb == NULL) {	/* bad skb */
 		pr_debug("Called w/ null skb.\n");
-		goto exit;
+		return;
 	}
 	frmmeta = P80211SKB_FRMMETA(skb);
 	if (frmmeta == NULL) {	/* no magic */
 		pr_debug("Called w/ bad frmmeta magic.\n");
-		goto exit;
+		return;
 	}
 	rxmeta = frmmeta->rx;
 	if (rxmeta == NULL) {	/* bad meta ptr */
 		pr_debug("Called w/ bad rxmeta ptr.\n");
-		goto exit;
+		return;
 	}
 
 	/* Free rxmeta */
@@ -577,8 +577,6 @@ void p80211skb_rxmeta_detach(struct sk_buff *skb)
 
 	/* Clear skb->cb */
 	memset(skb->cb, 0, sizeof(skb->cb));
-exit:
-	return;
 }
 
 /*----------------------------------------------------------------
@@ -660,5 +658,4 @@ void p80211skb_free(struct wlandevice *wlandev, struct sk_buff *skb)
 	else
 		printk(KERN_ERR "Freeing an skb (%p) w/ no frmmeta.\n", skb);
 	dev_kfree_skb(skb);
-	return;
 }

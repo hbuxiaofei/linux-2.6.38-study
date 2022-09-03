@@ -18,6 +18,8 @@
 #include <asm/uaccess.h>
 #include "internal.h"
 
+static int logon_vet_description(const char *desc);
+
 /*
  * user defined keys take an arbitrary string as the description and an
  * arbitrary blob of data as the payload
@@ -36,15 +38,34 @@ struct key_type key_type_user = {
 EXPORT_SYMBOL_GPL(key_type_user);
 
 /*
+ * This key type is essentially the same as key_type_user, but it does
+ * not define a .read op. This is suitable for storing username and
+ * password pairs in the keyring that you do not want to be readable
+ * from userspace.
+ */
+struct key_type key_type_logon = {
+	.name			= "logon",
+	.instantiate		= user_instantiate,
+	.update			= user_update,
+	.match			= user_match,
+	.revoke			= user_revoke,
+	.destroy		= user_destroy,
+	.describe		= user_describe,
+	.vet_description	= logon_vet_description,
+};
+EXPORT_SYMBOL_GPL(key_type_logon);
+
+/*
  * instantiate a user defined key
  */
-int user_instantiate(struct key *key, const void *data, size_t datalen)
+int user_instantiate(struct key *key, struct key_preparsed_payload *prep)
 {
 	struct user_key_payload *upayload;
+	size_t datalen = prep->datalen;
 	int ret;
 
 	ret = -EINVAL;
-	if (datalen <= 0 || datalen > 32767 || !data)
+	if (datalen <= 0 || datalen > 32767 || !prep->data)
 		goto error;
 
 	ret = key_payload_reserve(key, datalen);
@@ -58,8 +79,8 @@ int user_instantiate(struct key *key, const void *data, size_t datalen)
 
 	/* attach the data */
 	upayload->datalen = datalen;
-	memcpy(upayload->data, data, datalen);
-	rcu_assign_pointer(key->payload.data, upayload);
+	memcpy(upayload->data, prep->data, datalen);
+	rcu_assign_keypointer(key, upayload);
 	ret = 0;
 
 error:
@@ -69,28 +90,17 @@ error:
 EXPORT_SYMBOL_GPL(user_instantiate);
 
 /*
- * dispose of the old data from an updated user defined key
- */
-static void user_update_rcu_disposal(struct rcu_head *rcu)
-{
-	struct user_key_payload *upayload;
-
-	upayload = container_of(rcu, struct user_key_payload, rcu);
-
-	kfree(upayload);
-}
-
-/*
  * update a user defined key
  * - the key's semaphore is write-locked
  */
-int user_update(struct key *key, const void *data, size_t datalen)
+int user_update(struct key *key, struct key_preparsed_payload *prep)
 {
 	struct user_key_payload *upayload, *zap;
+	size_t datalen = prep->datalen;
 	int ret;
 
 	ret = -EINVAL;
-	if (datalen <= 0 || datalen > 32767 || !data)
+	if (datalen <= 0 || datalen > 32767 || !prep->data)
 		goto error;
 
 	/* construct a replacement payload */
@@ -100,7 +110,7 @@ int user_update(struct key *key, const void *data, size_t datalen)
 		goto error;
 
 	upayload->datalen = datalen;
-	memcpy(upayload->data, data, datalen);
+	memcpy(upayload->data, prep->data, datalen);
 
 	/* check the quota and attach the new data */
 	zap = upayload;
@@ -110,11 +120,12 @@ int user_update(struct key *key, const void *data, size_t datalen)
 	if (ret == 0) {
 		/* attach the new data, displacing the old */
 		zap = key->payload.data;
-		rcu_assign_pointer(key->payload.data, upayload);
+		rcu_assign_keypointer(key, upayload);
 		key->expiry = 0;
 	}
 
-	call_rcu(&zap->rcu, user_update_rcu_disposal);
+	if (zap)
+		kfree_rcu(zap, rcu);
 
 error:
 	return ret;
@@ -144,8 +155,8 @@ void user_revoke(struct key *key)
 	key_payload_reserve(key, 0);
 
 	if (upayload) {
-		rcu_assign_pointer(key->payload.data, NULL);
-		call_rcu(&upayload->rcu, user_update_rcu_disposal);
+		rcu_assign_keypointer(key, NULL);
+		kfree_rcu(upayload, rcu);
 	}
 }
 
@@ -169,8 +180,8 @@ EXPORT_SYMBOL_GPL(user_destroy);
 void user_describe(const struct key *key, struct seq_file *m)
 {
 	seq_puts(m, key->description);
-
-	seq_printf(m, ": %u", key->datalen);
+	if (key_is_instantiated(key))
+		seq_printf(m, ": %u", key->datalen);
 }
 
 EXPORT_SYMBOL_GPL(user_describe);
@@ -184,8 +195,7 @@ long user_read(const struct key *key, char __user *buffer, size_t buflen)
 	struct user_key_payload *upayload;
 	long ret;
 
-	upayload = rcu_dereference_protected(
-		key->payload.data, rwsem_is_locked(&((struct key *)key)->sem));
+	upayload = rcu_dereference_key(key);
 	ret = upayload->datalen;
 
 	/* we can return the data as is */
@@ -201,3 +211,20 @@ long user_read(const struct key *key, char __user *buffer, size_t buflen)
 }
 
 EXPORT_SYMBOL_GPL(user_read);
+
+/* Vet the description for a "logon" key */
+static int logon_vet_description(const char *desc)
+{
+	char *p;
+
+	/* require a "qualified" description string */
+	p = strchr(desc, ':');
+	if (!p)
+		return -EINVAL;
+
+	/* also reject description with ':' as first char */
+	if (p == desc)
+		return -EINVAL;
+
+	return 0;
+}

@@ -57,7 +57,8 @@ static struct list_head *zlib_alloc_workspace(void)
 	if (!workspace)
 		return ERR_PTR(-ENOMEM);
 
-	workspace->def_strm.workspace = vmalloc(zlib_deflate_workspacesize());
+	workspace->def_strm.workspace = vmalloc(zlib_deflate_workspacesize(
+						MAX_WBITS, MAX_MEM_LEVEL));
 	workspace->inf_strm.workspace = vmalloc(zlib_inflate_workspacesize());
 	workspace->buf = kmalloc(PAGE_CACHE_SIZE, GFP_NOFS);
 	if (!workspace->def_strm.workspace ||
@@ -96,7 +97,7 @@ static int zlib_compress_pages(struct list_head *ws,
 	*total_in = 0;
 
 	if (Z_OK != zlib_deflateInit(&workspace->def_strm, 3)) {
-		printk(KERN_WARNING "deflateInit failed\n");
+		printk(KERN_WARNING "btrfs: deflateInit failed\n");
 		ret = -1;
 		goto out;
 	}
@@ -124,7 +125,7 @@ static int zlib_compress_pages(struct list_head *ws,
 	while (workspace->def_strm.total_in < len) {
 		ret = zlib_deflate(&workspace->def_strm, Z_SYNC_FLUSH);
 		if (ret != Z_OK) {
-			printk(KERN_DEBUG "btrfs deflate in loop returned %d\n",
+			printk(KERN_DEBUG "btrfs: deflate in loop returned %d\n",
 			       ret);
 			zlib_deflateEnd(&workspace->def_strm);
 			ret = -1;
@@ -251,7 +252,7 @@ static int zlib_decompress_biovec(struct list_head *ws, struct page **pages_in,
 	}
 
 	if (Z_OK != zlib_inflateInit2(&workspace->inf_strm, wbits)) {
-		printk(KERN_WARNING "inflateInit failed\n");
+		printk(KERN_WARNING "btrfs: inflateInit failed\n");
 		return -1;
 	}
 	while (workspace->inf_strm.total_in < srclen) {
@@ -335,7 +336,7 @@ static int zlib_decompress(struct list_head *ws, unsigned char *data_in,
 	}
 
 	if (Z_OK != zlib_inflateInit2(&workspace->inf_strm, wbits)) {
-		printk(KERN_WARNING "inflateInit failed\n");
+		printk(KERN_WARNING "btrfs: inflateInit failed\n");
 		return -1;
 	}
 
@@ -369,9 +370,9 @@ static int zlib_decompress(struct list_head *ws, unsigned char *data_in,
 			    PAGE_CACHE_SIZE - buf_offset);
 		bytes = min(bytes, bytes_left);
 
-		kaddr = kmap_atomic(dest_page, KM_USER0);
+		kaddr = kmap_atomic(dest_page);
 		memcpy(kaddr + pg_offset, workspace->buf + buf_offset, bytes);
-		kunmap_atomic(kaddr, KM_USER0);
+		kunmap_atomic(kaddr);
 
 		pg_offset += bytes;
 		bytes_left -= bytes;

@@ -20,29 +20,45 @@
  * In case the file system is remounted read-only, it can be made writable
  * again by remounting it.
  */
-void __fat_fs_error(struct super_block *s, int report, const char *fmt, ...)
+void __fat_fs_error(struct super_block *sb, int report, const char *fmt, ...)
 {
-	struct fat_mount_options *opts = &MSDOS_SB(s)->options;
+	struct fat_mount_options *opts = &MSDOS_SB(sb)->options;
 	va_list args;
+	struct va_format vaf;
 
 	if (report) {
-		printk(KERN_ERR "FAT: Filesystem error (dev %s)\n", s->s_id);
-
-		printk(KERN_ERR "    ");
 		va_start(args, fmt);
-		vprintk(fmt, args);
+		vaf.fmt = fmt;
+		vaf.va = &args;
+		printk(KERN_ERR "FAT-fs (%s): error, %pV\n", sb->s_id, &vaf);
 		va_end(args);
-		printk("\n");
 	}
 
 	if (opts->errors == FAT_ERRORS_PANIC)
-		panic("FAT: fs panic from previous error\n");
-	else if (opts->errors == FAT_ERRORS_RO && !(s->s_flags & MS_RDONLY)) {
-		s->s_flags |= MS_RDONLY;
-		printk(KERN_ERR "FAT: Filesystem has been set read-only\n");
+		panic("FAT-fs (%s): fs panic from previous error\n", sb->s_id);
+	else if (opts->errors == FAT_ERRORS_RO && !(sb->s_flags & MS_RDONLY)) {
+		sb->s_flags |= MS_RDONLY;
+		printk(KERN_ERR "FAT-fs (%s): Filesystem has been "
+				"set read-only\n", sb->s_id);
 	}
 }
 EXPORT_SYMBOL_GPL(__fat_fs_error);
+
+/**
+ * fat_msg() - print preformated FAT specific messages. Every thing what is
+ * not fat_fs_error() should be fat_msg().
+ */
+void fat_msg(struct super_block *sb, const char *level, const char *fmt, ...)
+{
+	struct va_format vaf;
+	va_list args;
+
+	va_start(args, fmt);
+	vaf.fmt = fmt;
+	vaf.va = &args;
+	printk("%sFAT-fs (%s): %pV\n", level, sb->s_id, &vaf);
+	va_end(args);
+}
 
 /* Flushes the number of free clusters on FAT32 */
 /* XXX: Need to write one per FSINFO block.  Currently only writes 1 */
@@ -57,15 +73,15 @@ int fat_clusters_flush(struct super_block *sb)
 
 	bh = sb_bread(sb, sbi->fsinfo_sector);
 	if (bh == NULL) {
-		printk(KERN_ERR "FAT: bread failed in fat_clusters_flush\n");
+		fat_msg(sb, KERN_ERR, "bread failed in fat_clusters_flush");
 		return -EIO;
 	}
 
 	fsinfo = (struct fat_boot_fsinfo *)bh->b_data;
 	/* Sanity check */
 	if (!IS_FSINFO(fsinfo)) {
-		printk(KERN_ERR "FAT: Invalid FSINFO signature: "
-		       "0x%08x, 0x%08x (sector = %lu)\n",
+		fat_msg(sb, KERN_ERR, "Invalid FSINFO signature: "
+		       "0x%08x, 0x%08x (sector = %lu)",
 		       le32_to_cpu(fsinfo->signature1),
 		       le32_to_cpu(fsinfo->signature2),
 		       sbi->fsinfo_sector);
@@ -119,6 +135,10 @@ int fat_chain_add(struct inode *inode, int new_dclus, int nr_cluster)
 		}
 		if (ret < 0)
 			return ret;
+		/*
+		 * FIXME:Although we can add this cache, fat_cache_add() is
+		 * assuming to be called after linear search with fat_cache_id.
+		 */
 //		fat_cache_add(inode, new_fclus, new_dclus);
 	} else {
 		MSDOS_I(inode)->i_start = new_dclus;
@@ -196,8 +216,10 @@ void fat_time_fat2unix(struct msdos_sb_info *sbi, struct timespec *ts,
 		   + days_in_year[month] + day
 		   + DAYS_DELTA) * SECS_PER_DAY;
 
-	if (!sbi->options.tz_utc)
+	if (!sbi->options.tz_set)
 		second += sys_tz.tz_minuteswest * SECS_PER_MIN;
+	else
+		second -= sbi->options.time_offset * SECS_PER_MIN;
 
 	if (time_cs) {
 		ts->tv_sec = second + (time_cs / 100);
@@ -213,8 +235,9 @@ void fat_time_unix2fat(struct msdos_sb_info *sbi, struct timespec *ts,
 		       __le16 *time, __le16 *date, u8 *time_cs)
 {
 	struct tm tm;
-	time_to_tm(ts->tv_sec, sbi->options.tz_utc ? 0 :
-		   -sys_tz.tz_minuteswest * 60, &tm);
+	time_to_tm(ts->tv_sec,
+		   (sbi->options.tz_set ? sbi->options.time_offset :
+		   -sys_tz.tz_minuteswest) * SECS_PER_MIN, &tm);
 
 	/*  FAT can only support year between 1980 to 2107 */
 	if (tm.tm_year < 1980 - 1900) {

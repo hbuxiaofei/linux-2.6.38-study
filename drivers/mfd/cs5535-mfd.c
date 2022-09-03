@@ -27,6 +27,7 @@
 #include <linux/mfd/core.h>
 #include <linux/module.h>
 #include <linux/pci.h>
+#include <asm/olpc.h>
 
 #define DRV_NAME "cs5535-mfd"
 
@@ -39,9 +40,40 @@ enum cs5535_mfd_bars {
 	NR_BARS,
 };
 
-static __devinitdata struct resource cs5535_mfd_resources[NR_BARS];
+static int cs5535_mfd_res_enable(struct platform_device *pdev)
+{
+	struct resource *res;
 
-static __devinitdata struct mfd_cell cs5535_mfd_cells[] = {
+	res = platform_get_resource(pdev, IORESOURCE_IO, 0);
+	if (!res) {
+		dev_err(&pdev->dev, "can't fetch device resource info\n");
+		return -EIO;
+	}
+
+	if (!request_region(res->start, resource_size(res), DRV_NAME)) {
+		dev_err(&pdev->dev, "can't request region\n");
+		return -EIO;
+	}
+
+	return 0;
+}
+
+static int cs5535_mfd_res_disable(struct platform_device *pdev)
+{
+	struct resource *res;
+	res = platform_get_resource(pdev, IORESOURCE_IO, 0);
+	if (!res) {
+		dev_err(&pdev->dev, "can't fetch device resource info\n");
+		return -EIO;
+	}
+
+	release_region(res->start, resource_size(res));
+	return 0;
+}
+
+static struct resource cs5535_mfd_resources[NR_BARS];
+
+static struct mfd_cell cs5535_mfd_cells[] = {
 	{
 		.id = SMB_BAR,
 		.name = "cs5535-smb",
@@ -65,16 +97,36 @@ static __devinitdata struct mfd_cell cs5535_mfd_cells[] = {
 		.name = "cs5535-pms",
 		.num_resources = 1,
 		.resources = &cs5535_mfd_resources[PMS_BAR],
+
+		.enable = cs5535_mfd_res_enable,
+		.disable = cs5535_mfd_res_disable,
 	},
 	{
 		.id = ACPI_BAR,
 		.name = "cs5535-acpi",
 		.num_resources = 1,
 		.resources = &cs5535_mfd_resources[ACPI_BAR],
+
+		.enable = cs5535_mfd_res_enable,
+		.disable = cs5535_mfd_res_disable,
 	},
 };
 
-static int __devinit cs5535_mfd_probe(struct pci_dev *pdev,
+#ifdef CONFIG_OLPC
+static void cs5535_clone_olpc_cells(void)
+{
+	const char *acpi_clones[] = { "olpc-xo1-pm-acpi", "olpc-xo1-sci-acpi" };
+
+	if (!machine_is_olpc())
+		return;
+
+	mfd_clone_cell("cs5535-acpi", acpi_clones, ARRAY_SIZE(acpi_clones));
+}
+#else
+static void cs5535_clone_olpc_cells(void) { }
+#endif
+
+static int cs5535_mfd_probe(struct pci_dev *pdev,
 		const struct pci_device_id *id)
 {
 	int err, i;
@@ -97,11 +149,12 @@ static int __devinit cs5535_mfd_probe(struct pci_dev *pdev,
 	}
 
 	err = mfd_add_devices(&pdev->dev, -1, cs5535_mfd_cells,
-			ARRAY_SIZE(cs5535_mfd_cells), NULL, 0);
+			      ARRAY_SIZE(cs5535_mfd_cells), NULL, 0, NULL);
 	if (err) {
 		dev_err(&pdev->dev, "MFD add devices failed: %d\n", err);
 		goto err_disable;
 	}
+	cs5535_clone_olpc_cells();
 
 	dev_info(&pdev->dev, "%zu devices registered.\n",
 			ARRAY_SIZE(cs5535_mfd_cells));
@@ -113,38 +166,27 @@ err_disable:
 	return err;
 }
 
-static void __devexit cs5535_mfd_remove(struct pci_dev *pdev)
+static void cs5535_mfd_remove(struct pci_dev *pdev)
 {
 	mfd_remove_devices(&pdev->dev);
 	pci_disable_device(pdev);
 }
 
-static struct pci_device_id cs5535_mfd_pci_tbl[] = {
+static DEFINE_PCI_DEVICE_TABLE(cs5535_mfd_pci_tbl) = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_NS, PCI_DEVICE_ID_NS_CS5535_ISA) },
 	{ PCI_DEVICE(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_CS5536_ISA) },
 	{ 0, }
 };
 MODULE_DEVICE_TABLE(pci, cs5535_mfd_pci_tbl);
 
-static struct pci_driver cs5535_mfd_drv = {
+static struct pci_driver cs5535_mfd_driver = {
 	.name = DRV_NAME,
 	.id_table = cs5535_mfd_pci_tbl,
 	.probe = cs5535_mfd_probe,
-	.remove = __devexit_p(cs5535_mfd_remove),
+	.remove = cs5535_mfd_remove,
 };
 
-static int __init cs5535_mfd_init(void)
-{
-	return pci_register_driver(&cs5535_mfd_drv);
-}
-
-static void __exit cs5535_mfd_exit(void)
-{
-	pci_unregister_driver(&cs5535_mfd_drv);
-}
-
-module_init(cs5535_mfd_init);
-module_exit(cs5535_mfd_exit);
+module_pci_driver(cs5535_mfd_driver);
 
 MODULE_AUTHOR("Andres Salomon <dilinger@queued.net>");
 MODULE_DESCRIPTION("MFD driver for CS5535/CS5536 southbridge's ISA PCI device");

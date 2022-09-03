@@ -17,14 +17,12 @@
 #ifndef _HOST_OS_H_
 #define _HOST_OS_H_
 
-#include <asm/system.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 #include <linux/semaphore.h>
 #include <linux/uaccess.h>
 #include <linux/irq.h>
 #include <linux/io.h>
 #include <linux/syscalls.h>
-#include <linux/version.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/stddef.h>
@@ -42,28 +40,18 @@
 #include <linux/vmalloc.h>
 #include <linux/ioport.h>
 #include <linux/platform_device.h>
-#include <plat/clock.h>
 #include <linux/clk.h>
 #include <plat/mailbox.h>
 #include <linux/pagemap.h>
 #include <asm/cacheflush.h>
 #include <linux/dma-mapping.h>
 
-/* TODO -- Remove, once BP defines them */
-#define INT_DSP_MMU_IRQ        28
+/* TODO -- Remove, once omap-iommu is used */
+#define INT_DSP_MMU_IRQ        (28 + NR_IRQS)
 
 #define PRCM_VDD1 1
 
 extern struct platform_device *omap_dspbridge_dev;
 extern struct device *bridge;
 
-#if defined(CONFIG_TIDSPBRIDGE) || defined(CONFIG_TIDSPBRIDGE_MODULE)
-extern void dspbridge_reserve_sdram(void);
-#else
-static inline void dspbridge_reserve_sdram(void)
-{
-}
-#endif
-
-extern unsigned long dspbridge_get_mempool_base(void);
 #endif

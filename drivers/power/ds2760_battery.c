@@ -64,7 +64,7 @@ static unsigned int cache_time = 1000;
 module_param(cache_time, uint, 0644);
 MODULE_PARM_DESC(cache_time, "cache time in milliseconds");
 
-static unsigned int pmod_enabled;
+static bool pmod_enabled;
 module_param(pmod_enabled, bool, 0644);
 MODULE_PARM_DESC(pmod_enabled, "PMOD enable bit");
 
@@ -86,12 +86,20 @@ static int rated_capacities[] = {
 	920,	/* NEC */
 	1440,	/* Samsung */
 	1440,	/* BYD */
+#ifdef CONFIG_MACH_H4700
+	1800,	/* HP iPAQ hx4700 3.7V 1800mAh (359113-001) */
+#else
 	1440,	/* Lishen */
+#endif
 	1440,	/* NEC */
 	2880,	/* Samsung */
 	2880,	/* BYD */
 	2880,	/* Lishen */
-	2880	/* NEC */
+	2880,	/* NEC */
+#ifdef CONFIG_MACH_H4700
+	0,
+	3600,	/* HP iPAQ hx4700 3.7V 3600mAh (359114-001) */
+#endif
 };
 
 /* array is level at temps 0°C, 10°C, 20°C, 30°C, 40°C
@@ -186,7 +194,7 @@ static int ds2760_battery_read_status(struct ds2760_device_info *di)
 
 	scale[0] = di->full_active_uAh;
 	for (i = 1; i < 5; i++)
-		scale[i] = scale[i - 1] + di->raw[DS2760_ACTIVE_FULL + 2 + i];
+		scale[i] = scale[i - 1] + di->raw[DS2760_ACTIVE_FULL + 1 + i];
 
 	di->full_active_uAh = battery_interpolate(scale, di->temp_C / 10);
 	di->full_active_uAh *= 1000; /* convert to µAh */
@@ -347,8 +355,7 @@ static void ds2760_battery_external_power_changed(struct power_supply *psy)
 
 	dev_dbg(di->dev, "%s\n", __func__);
 
-	cancel_delayed_work(&di->monitor_work);
-	queue_delayed_work(di->monitor_wqueue, &di->monitor_work, HZ/10);
+	mod_delayed_work(di->monitor_wqueue, &di->monitor_work, HZ/10);
 }
 
 
@@ -393,8 +400,7 @@ static void ds2760_battery_set_charged(struct power_supply *psy)
 
 	/* postpone the actual work by 20 secs. This is for debouncing GPIO
 	 * signals and to let the current value settle. See AN4188. */
-	cancel_delayed_work(&di->set_charged_work);
-	queue_delayed_work(di->monitor_wqueue, &di->set_charged_work, HZ * 20);
+	mod_delayed_work(di->monitor_wqueue, &di->set_charged_work, HZ * 20);
 }
 
 static int ds2760_battery_get_property(struct power_supply *psy,
@@ -506,7 +512,7 @@ static int ds2760_battery_probe(struct platform_device *pdev)
 	int retval = 0;
 	struct ds2760_device_info *di;
 
-	di = kzalloc(sizeof(*di), GFP_KERNEL);
+	di = devm_kzalloc(&pdev->dev, sizeof(*di), GFP_KERNEL);
 	if (!di) {
 		retval = -ENOMEM;
 		goto di_alloc_failed;
@@ -570,7 +576,6 @@ static int ds2760_battery_probe(struct platform_device *pdev)
 workqueue_failed:
 	power_supply_unregister(&di->bat);
 batt_failed:
-	kfree(di);
 di_alloc_failed:
 success:
 	return retval;
@@ -584,7 +589,6 @@ static int ds2760_battery_remove(struct platform_device *pdev)
 	cancel_delayed_work_sync(&di->set_charged_work);
 	destroy_workqueue(di->monitor_wqueue);
 	power_supply_unregister(&di->bat);
-	kfree(di);
 
 	return 0;
 }
@@ -608,8 +612,7 @@ static int ds2760_battery_resume(struct platform_device *pdev)
 	di->charge_status = POWER_SUPPLY_STATUS_UNKNOWN;
 	power_supply_changed(&di->bat);
 
-	cancel_delayed_work(&di->monitor_work);
-	queue_delayed_work(di->monitor_wqueue, &di->monitor_work, HZ);
+	mod_delayed_work(di->monitor_wqueue, &di->monitor_work, HZ);
 
 	return 0;
 }
@@ -633,18 +636,7 @@ static struct platform_driver ds2760_battery_driver = {
 	.resume	  = ds2760_battery_resume,
 };
 
-static int __init ds2760_battery_init(void)
-{
-	return platform_driver_register(&ds2760_battery_driver);
-}
-
-static void __exit ds2760_battery_exit(void)
-{
-	platform_driver_unregister(&ds2760_battery_driver);
-}
-
-module_init(ds2760_battery_init);
-module_exit(ds2760_battery_exit);
+module_platform_driver(ds2760_battery_driver);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Szabolcs Gyurko <szabolcs.gyurko@tlt.hu>, "

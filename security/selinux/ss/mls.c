@@ -11,7 +11,7 @@
  * Copyright (C) 2004-2006 Trusted Computer Solutions, Inc.
  */
 /*
- * Updated: Hewlett-Packard <paul.moore@hp.com>
+ * Updated: Hewlett-Packard <paul@paul-moore.com>
  *
  *      Added support to import/export the MLS label from NetLabel
  *
@@ -512,10 +512,13 @@ int mls_compute_sid(struct context *scontext,
 		    struct context *tcontext,
 		    u16 tclass,
 		    u32 specified,
-		    struct context *newcontext)
+		    struct context *newcontext,
+		    bool sock)
 {
 	struct range_trans rtr;
 	struct mls_range *r;
+	struct class_datum *cladatum;
+	int default_range = 0;
 
 	if (!policydb.mls_enabled)
 		return 0;
@@ -529,9 +532,31 @@ int mls_compute_sid(struct context *scontext,
 		r = hashtab_search(policydb.range_tr, &rtr);
 		if (r)
 			return mls_range_set(newcontext, r);
+
+		if (tclass && tclass <= policydb.p_classes.nprim) {
+			cladatum = policydb.class_val_to_struct[tclass - 1];
+			if (cladatum)
+				default_range = cladatum->default_range;
+		}
+
+		switch (default_range) {
+		case DEFAULT_SOURCE_LOW:
+			return mls_context_cpy_low(newcontext, scontext);
+		case DEFAULT_SOURCE_HIGH:
+			return mls_context_cpy_high(newcontext, scontext);
+		case DEFAULT_SOURCE_LOW_HIGH:
+			return mls_context_cpy(newcontext, scontext);
+		case DEFAULT_TARGET_LOW:
+			return mls_context_cpy_low(newcontext, tcontext);
+		case DEFAULT_TARGET_HIGH:
+			return mls_context_cpy_high(newcontext, tcontext);
+		case DEFAULT_TARGET_LOW_HIGH:
+			return mls_context_cpy(newcontext, tcontext);
+		}
+
 		/* Fallthrough */
 	case AVTAB_CHANGE:
-		if (tclass == policydb.process_class)
+		if ((tclass == policydb.process_class) || (sock == true))
 			/* Use the process MLS attributes. */
 			return mls_context_cpy(newcontext, scontext);
 		else

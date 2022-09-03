@@ -1,191 +1,9 @@
 #ifndef _X_TABLES_H
 #define _X_TABLES_H
-#include <linux/kernel.h>
-#include <linux/types.h>
 
-#define XT_FUNCTION_MAXNAMELEN 30
-#define XT_EXTENSION_MAXNAMELEN 29
-#define XT_TABLE_MAXNAMELEN 32
-
-struct xt_entry_match {
-	union {
-		struct {
-			__u16 match_size;
-
-			/* Used by userspace */
-			char name[XT_EXTENSION_MAXNAMELEN];
-			__u8 revision;
-		} user;
-		struct {
-			__u16 match_size;
-
-			/* Used inside the kernel */
-			struct xt_match *match;
-		} kernel;
-
-		/* Total length */
-		__u16 match_size;
-	} u;
-
-	unsigned char data[0];
-};
-
-struct xt_entry_target {
-	union {
-		struct {
-			__u16 target_size;
-
-			/* Used by userspace */
-			char name[XT_EXTENSION_MAXNAMELEN];
-			__u8 revision;
-		} user;
-		struct {
-			__u16 target_size;
-
-			/* Used inside the kernel */
-			struct xt_target *target;
-		} kernel;
-
-		/* Total length */
-		__u16 target_size;
-	} u;
-
-	unsigned char data[0];
-};
-
-#define XT_TARGET_INIT(__name, __size)					       \
-{									       \
-	.target.u.user = {						       \
-		.target_size	= XT_ALIGN(__size),			       \
-		.name		= __name,				       \
-	},								       \
-}
-
-struct xt_standard_target {
-	struct xt_entry_target target;
-	int verdict;
-};
-
-struct xt_error_target {
-	struct xt_entry_target target;
-	char errorname[XT_FUNCTION_MAXNAMELEN];
-};
-
-/* The argument to IPT_SO_GET_REVISION_*.  Returns highest revision
- * kernel supports, if >= revision. */
-struct xt_get_revision {
-	char name[XT_EXTENSION_MAXNAMELEN];
-	__u8 revision;
-};
-
-/* CONTINUE verdict for targets */
-#define XT_CONTINUE 0xFFFFFFFF
-
-/* For standard target */
-#define XT_RETURN (-NF_REPEAT - 1)
-
-/* this is a dummy structure to find out the alignment requirement for a struct
- * containing all the fundamental data types that are used in ipt_entry,
- * ip6t_entry and arpt_entry.  This sucks, and it is a hack.  It will be my
- * personal pleasure to remove it -HW
- */
-struct _xt_align {
-	__u8 u8;
-	__u16 u16;
-	__u32 u32;
-	__u64 u64;
-};
-
-#define XT_ALIGN(s) __ALIGN_KERNEL((s), __alignof__(struct _xt_align))
-
-/* Standard return verdict, or do jump. */
-#define XT_STANDARD_TARGET ""
-/* Error verdict. */
-#define XT_ERROR_TARGET "ERROR"
-
-#define SET_COUNTER(c,b,p) do { (c).bcnt = (b); (c).pcnt = (p); } while(0)
-#define ADD_COUNTER(c,b,p) do { (c).bcnt += (b); (c).pcnt += (p); } while(0)
-
-struct xt_counters {
-	__u64 pcnt, bcnt;			/* Packet and byte counters */
-};
-
-/* The argument to IPT_SO_ADD_COUNTERS. */
-struct xt_counters_info {
-	/* Which table. */
-	char name[XT_TABLE_MAXNAMELEN];
-
-	unsigned int num_counters;
-
-	/* The counters (actually `number' of these). */
-	struct xt_counters counters[0];
-};
-
-#define XT_INV_PROTO		0x40	/* Invert the sense of PROTO. */
-
-#ifndef __KERNEL__
-/* fn returns 0 to continue iteration */
-#define XT_MATCH_ITERATE(type, e, fn, args...)			\
-({								\
-	unsigned int __i;					\
-	int __ret = 0;						\
-	struct xt_entry_match *__m;				\
-								\
-	for (__i = sizeof(type);				\
-	     __i < (e)->target_offset;				\
-	     __i += __m->u.match_size) {			\
-		__m = (void *)e + __i;				\
-								\
-		__ret = fn(__m , ## args);			\
-		if (__ret != 0)					\
-			break;					\
-	}							\
-	__ret;							\
-})
-
-/* fn returns 0 to continue iteration */
-#define XT_ENTRY_ITERATE_CONTINUE(type, entries, size, n, fn, args...) \
-({								\
-	unsigned int __i, __n;					\
-	int __ret = 0;						\
-	type *__entry;						\
-								\
-	for (__i = 0, __n = 0; __i < (size);			\
-	     __i += __entry->next_offset, __n++) { 		\
-		__entry = (void *)(entries) + __i;		\
-		if (__n < n)					\
-			continue;				\
-								\
-		__ret = fn(__entry , ## args);			\
-		if (__ret != 0)					\
-			break;					\
-	}							\
-	__ret;							\
-})
-
-/* fn returns 0 to continue iteration */
-#define XT_ENTRY_ITERATE(type, entries, size, fn, args...) \
-	XT_ENTRY_ITERATE_CONTINUE(type, entries, size, 0, fn, args)
-
-#endif /* !__KERNEL__ */
-
-/* pos is normally a struct ipt_entry/ip6t_entry/etc. */
-#define xt_entry_foreach(pos, ehead, esize) \
-	for ((pos) = (typeof(pos))(ehead); \
-	     (pos) < (typeof(pos))((char *)(ehead) + (esize)); \
-	     (pos) = (typeof(pos))((char *)(pos) + (pos)->next_offset))
-
-/* can only be xt_entry_match, so no use of typeof here */
-#define xt_ematch_foreach(pos, entry) \
-	for ((pos) = (struct xt_entry_match *)entry->elems; \
-	     (pos) < (struct xt_entry_match *)((char *)(entry) + \
-	             (entry)->target_offset); \
-	     (pos) = (struct xt_entry_match *)((char *)(pos) + \
-	             (pos)->u.match_size))
-
-#ifdef __KERNEL__
 
 #include <linux/netdevice.h>
+#include <uapi/linux/netfilter/x_tables.h>
 
 /**
  * struct xt_action_param - parameters for matches/targets
@@ -456,72 +274,60 @@ extern void xt_proto_fini(struct net *net, u_int8_t af);
 extern struct xt_table_info *xt_alloc_table_info(unsigned int size);
 extern void xt_free_table_info(struct xt_table_info *info);
 
-/*
- * Per-CPU spinlock associated with per-cpu table entries, and
- * with a counter for the "reading" side that allows a recursive
- * reader to avoid taking the lock and deadlocking.
- *
- * "reading" is used by ip/arp/ip6 tables rule processing which runs per-cpu.
- * It needs to ensure that the rules are not being changed while the packet
- * is being processed. In some cases, the read lock will be acquired
- * twice on the same CPU; this is okay because of the count.
- *
- * "writing" is used when reading counters.
- *  During replace any readers that are using the old tables have to complete
- *  before freeing the old table. This is handled by the write locking
- *  necessary for reading the counters.
+/**
+ * xt_recseq - recursive seqcount for netfilter use
+ * 
+ * Packet processing changes the seqcount only if no recursion happened
+ * get_counters() can use read_seqcount_begin()/read_seqcount_retry(),
+ * because we use the normal seqcount convention :
+ * Low order bit set to 1 if a writer is active.
  */
-struct xt_info_lock {
-	seqlock_t lock;
-	unsigned char readers;
-};
-DECLARE_PER_CPU(struct xt_info_lock, xt_info_locks);
+DECLARE_PER_CPU(seqcount_t, xt_recseq);
 
-/*
- * Note: we need to ensure that preemption is disabled before acquiring
- * the per-cpu-variable, so we do it as a two step process rather than
- * using "spin_lock_bh()".
+/**
+ * xt_write_recseq_begin - start of a write section
  *
- * We _also_ need to disable bottom half processing before updating our
- * nesting count, to make sure that the only kind of re-entrancy is this
- * code being called by itself: since the count+lock is not an atomic
- * operation, we can allow no races.
- *
- * _Only_ that special combination of being per-cpu and never getting
- * re-entered asynchronously means that the count is safe.
+ * Begin packet processing : all readers must wait the end
+ * 1) Must be called with preemption disabled
+ * 2) softirqs must be disabled too (or we should use this_cpu_add())
+ * Returns :
+ *  1 if no recursion on this cpu
+ *  0 if recursion detected
  */
-static inline void xt_info_rdlock_bh(void)
+static inline unsigned int xt_write_recseq_begin(void)
 {
-	struct xt_info_lock *lock;
+	unsigned int addend;
 
-	local_bh_disable();
-	lock = &__get_cpu_var(xt_info_locks);
-	if (likely(!lock->readers++))
-		write_seqlock(&lock->lock);
+	/*
+	 * Low order bit of sequence is set if we already
+	 * called xt_write_recseq_begin().
+	 */
+	addend = (__this_cpu_read(xt_recseq.sequence) + 1) & 1;
+
+	/*
+	 * This is kind of a write_seqcount_begin(), but addend is 0 or 1
+	 * We dont check addend value to avoid a test and conditional jump,
+	 * since addend is most likely 1
+	 */
+	__this_cpu_add(xt_recseq.sequence, addend);
+	smp_wmb();
+
+	return addend;
 }
 
-static inline void xt_info_rdunlock_bh(void)
-{
-	struct xt_info_lock *lock = &__get_cpu_var(xt_info_locks);
-
-	if (likely(!--lock->readers))
-		write_sequnlock(&lock->lock);
-	local_bh_enable();
-}
-
-/*
- * The "writer" side needs to get exclusive access to the lock,
- * regardless of readers.  This must be called with bottom half
- * processing (and thus also preemption) disabled.
+/**
+ * xt_write_recseq_end - end of a write section
+ * @addend: return value from previous xt_write_recseq_begin()
+ *
+ * End packet processing : all readers can proceed
+ * 1) Must be called with preemption disabled
+ * 2) softirqs must be disabled too (or we should use this_cpu_add())
  */
-static inline void xt_info_wrlock(unsigned int cpu)
+static inline void xt_write_recseq_end(unsigned int addend)
 {
-	write_seqlock(&per_cpu(xt_info_locks, cpu).lock);
-}
-
-static inline void xt_info_wrunlock(unsigned int cpu)
-{
-	write_sequnlock(&per_cpu(xt_info_locks, cpu).lock);
+	/* this is kind of a write_seqcount_end(), but addend is 0 or 1 */
+	smp_wmb();
+	__this_cpu_add(xt_recseq.sequence, addend);
 }
 
 /*
@@ -611,8 +417,9 @@ struct _compat_xt_align {
 extern void xt_compat_lock(u_int8_t af);
 extern void xt_compat_unlock(u_int8_t af);
 
-extern int xt_compat_add_offset(u_int8_t af, unsigned int offset, short delta);
+extern int xt_compat_add_offset(u_int8_t af, unsigned int offset, int delta);
 extern void xt_compat_flush_offsets(u_int8_t af);
+extern void xt_compat_init_offsets(u_int8_t af, unsigned int number);
 extern int xt_compat_calc_jump(u_int8_t af, unsigned int offset);
 
 extern int xt_compat_match_offset(const struct xt_match *match);
@@ -628,6 +435,4 @@ extern int xt_compat_target_to_user(const struct xt_entry_target *t,
 				    void __user **dstptr, unsigned int *size);
 
 #endif /* CONFIG_COMPAT */
-#endif /* __KERNEL__ */
-
 #endif /* _X_TABLES_H */

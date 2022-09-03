@@ -1,5 +1,5 @@
 /*
- * Copyright 2010 Tilera Corporation. All Rights Reserved.
+ * Copyright 2011 Tilera Corporation. All Rights Reserved.
  *
  *   This program is free software; you can redistribute it and/or
  *   modify it under the terms of the GNU General Public License
@@ -24,6 +24,7 @@
 #include <linux/irq.h>
 #include <linux/io.h>
 #include <linux/uaccess.h>
+#include <linux/export.h>
 
 #include <asm/processor.h>
 #include <asm/sections.h>
@@ -36,7 +37,7 @@
  * Initialization flow and process
  * -------------------------------
  *
- * This files containes the routines to search for PCI buses,
+ * This files contains the routines to search for PCI buses,
  * enumerate the buses, and configure any attached devices.
  *
  * There are two entry points here:
@@ -59,6 +60,7 @@ int __write_once tile_plx_gen1;
 
 static struct pci_controller controllers[TILE_NUM_PCIE];
 static int num_controllers;
+static int pci_scan_flags[TILE_NUM_PCIE];
 
 static struct pci_ops tile_cfg_ops;
 
@@ -79,7 +81,7 @@ EXPORT_SYMBOL(pcibios_align_resource);
  * controller_id is the controller number, config type is 0 or 1 for
  * config0 or config1 operations.
  */
-static int __init tile_pcie_open(int controller_id, int config_type)
+static int tile_pcie_open(int controller_id, int config_type)
 {
 	char filename[32];
 	int fd;
@@ -95,8 +97,7 @@ static int __init tile_pcie_open(int controller_id, int config_type)
 /*
  * Get the IRQ numbers from the HV and set up the handlers for them.
  */
-static int __init tile_init_irqs(int controller_id,
-				 struct pci_controller *controller)
+static int tile_init_irqs(int controller_id, struct pci_controller *controller)
 {
 	char filename[32];
 	int fd;
@@ -145,65 +146,68 @@ int __init tile_pci_init(void)
 
 	pr_info("PCI: Searching for controllers...\n");
 
+	/* Re-init number of PCIe controllers to support hot-plug feature. */
+	num_controllers = 0;
+
 	/* Do any configuration we need before using the PCIe */
 
 	for (i = 0; i < TILE_NUM_PCIE; i++) {
-		int hv_cfg_fd0 = -1;
-		int hv_cfg_fd1 = -1;
-		int hv_mem_fd = -1;
-		char name[32];
-		struct pci_controller *controller;
-
 		/*
-		 * Open the fd to the HV.  If it fails then this
-		 * device doesn't exist.
+		 * To see whether we need a real config op based on
+		 * the results of pcibios_init(), to support PCIe hot-plug.
 		 */
-		hv_cfg_fd0 = tile_pcie_open(i, 0);
-		if (hv_cfg_fd0 < 0)
+		if (pci_scan_flags[i] == 0) {
+			int hv_cfg_fd0 = -1;
+			int hv_cfg_fd1 = -1;
+			int hv_mem_fd = -1;
+			char name[32];
+			struct pci_controller *controller;
+
+			/*
+			 * Open the fd to the HV.  If it fails then this
+			 * device doesn't exist.
+			 */
+			hv_cfg_fd0 = tile_pcie_open(i, 0);
+			if (hv_cfg_fd0 < 0)
+				continue;
+			hv_cfg_fd1 = tile_pcie_open(i, 1);
+			if (hv_cfg_fd1 < 0) {
+				pr_err("PCI: Couldn't open config fd to HV "
+				    "for controller %d\n", i);
+				goto err_cont;
+			}
+
+			sprintf(name, "pcie/%d/mem", i);
+			hv_mem_fd = hv_dev_open((HV_VirtAddr)name, 0);
+			if (hv_mem_fd < 0) {
+				pr_err("PCI: Could not open mem fd to HV!\n");
+				goto err_cont;
+			}
+
+			pr_info("PCI: Found PCI controller #%d\n", i);
+
+			controller = &controllers[i];
+
+			controller->index = i;
+			controller->hv_cfg_fd[0] = hv_cfg_fd0;
+			controller->hv_cfg_fd[1] = hv_cfg_fd1;
+			controller->hv_mem_fd = hv_mem_fd;
+			controller->first_busno = 0;
+			controller->last_busno = 0xff;
+			controller->ops = &tile_cfg_ops;
+
+			num_controllers++;
 			continue;
-		hv_cfg_fd1 = tile_pcie_open(i, 1);
-		if (hv_cfg_fd1 < 0) {
-			pr_err("PCI: Couldn't open config fd to HV "
-			    "for controller %d\n", i);
-			goto err_cont;
-		}
-
-		sprintf(name, "pcie/%d/mem", i);
-		hv_mem_fd = hv_dev_open((HV_VirtAddr)name, 0);
-		if (hv_mem_fd < 0) {
-			pr_err("PCI: Could not open mem fd to HV!\n");
-			goto err_cont;
-		}
-
-		pr_info("PCI: Found PCI controller #%d\n", i);
-
-		controller = &controllers[num_controllers];
-
-		if (tile_init_irqs(i, controller)) {
-			pr_err("PCI: Could not initialize "
-			       "IRQs, aborting.\n");
-			goto err_cont;
-		}
-
-		controller->index = num_controllers;
-		controller->hv_cfg_fd[0] = hv_cfg_fd0;
-		controller->hv_cfg_fd[1] = hv_cfg_fd1;
-		controller->hv_mem_fd = hv_mem_fd;
-		controller->first_busno = 0;
-		controller->last_busno = 0xff;
-		controller->ops = &tile_cfg_ops;
-
-		num_controllers++;
-		continue;
 
 err_cont:
-		if (hv_cfg_fd0 >= 0)
-			hv_dev_close(hv_cfg_fd0);
-		if (hv_cfg_fd1 >= 0)
-			hv_dev_close(hv_cfg_fd1);
-		if (hv_mem_fd >= 0)
-			hv_dev_close(hv_mem_fd);
-		continue;
+			if (hv_cfg_fd0 >= 0)
+				hv_dev_close(hv_cfg_fd0);
+			if (hv_cfg_fd1 >= 0)
+				hv_dev_close(hv_cfg_fd1);
+			if (hv_mem_fd >= 0)
+				hv_dev_close(hv_mem_fd);
+			continue;
+		}
 	}
 
 	/*
@@ -224,7 +228,7 @@ err_cont:
  * (pin - 1) converts from the PCI standard's [1:4] convention to
  * a normal [0:3] range.
  */
-static int tile_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+static int tile_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
 	struct pci_controller *controller =
 		(struct pci_controller *)dev->sysdata;
@@ -232,7 +236,7 @@ static int tile_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 }
 
 
-static void __init fixup_read_and_payload_sizes(void)
+static void fixup_read_and_payload_sizes(void)
 {
 	struct pci_dev *dev = NULL;
 	int smallest_max_payload = 0x1; /* Tile maxes out at 256 bytes. */
@@ -240,17 +244,14 @@ static void __init fixup_read_and_payload_sizes(void)
 	u16 new_values;
 
 	/* Scan for the smallest maximum payload size. */
-	while ((dev = pci_get_device(PCI_ANY_ID, PCI_ANY_ID, dev)) != NULL) {
-		int pcie_caps_offset;
+	for_each_pci_dev(dev) {
 		u32 devcap;
 		int max_payload;
 
-		pcie_caps_offset = pci_find_capability(dev, PCI_CAP_ID_EXP);
-		if (pcie_caps_offset == 0)
+		if (!pci_is_pcie(dev))
 			continue;
 
-		pci_read_config_dword(dev, pcie_caps_offset + PCI_EXP_DEVCAP,
-				      &devcap);
+		pcie_capability_read_dword(dev, PCI_EXP_DEVCAP, &devcap);
 		max_payload = devcap & PCI_EXP_DEVCAP_PAYLOAD;
 		if (max_payload < smallest_max_payload)
 			smallest_max_payload = max_payload;
@@ -258,21 +259,10 @@ static void __init fixup_read_and_payload_sizes(void)
 
 	/* Now, set the max_payload_size for all devices to that value. */
 	new_values = (max_read_size << 12) | (smallest_max_payload << 5);
-	while ((dev = pci_get_device(PCI_ANY_ID, PCI_ANY_ID, dev)) != NULL) {
-		int pcie_caps_offset;
-		u16 devctl;
-
-		pcie_caps_offset = pci_find_capability(dev, PCI_CAP_ID_EXP);
-		if (pcie_caps_offset == 0)
-			continue;
-
-		pci_read_config_word(dev, pcie_caps_offset + PCI_EXP_DEVCTL,
-				     &devctl);
-		devctl &= ~(PCI_EXP_DEVCTL_PAYLOAD | PCI_EXP_DEVCTL_READRQ);
-		devctl |= new_values;
-		pci_write_config_word(dev, pcie_caps_offset + PCI_EXP_DEVCTL,
-				      devctl);
-	}
+	for_each_pci_dev(dev)
+		pcie_capability_clear_and_set_word(dev, PCI_EXP_DEVCTL,
+				PCI_EXP_DEVCTL_PAYLOAD | PCI_EXP_DEVCTL_READRQ,
+				new_values);
 }
 
 
@@ -282,7 +272,7 @@ static void __init fixup_read_and_payload_sizes(void)
  * The controllers have been set up by the time we get here, by a call to
  * tile_pci_init.
  */
-static int __init pcibios_init(void)
+int __init pcibios_init(void)
 {
 	int i;
 
@@ -296,25 +286,39 @@ static int __init pcibios_init(void)
 	mdelay(250);
 
 	/* Scan all of the recorded PCI controllers.  */
-	for (i = 0; i < num_controllers; i++) {
-		struct pci_controller *controller = &controllers[i];
-		struct pci_bus *bus;
-
-		pr_info("PCI: initializing controller #%d\n", i);
-
+	for (i = 0; i < TILE_NUM_PCIE; i++) {
 		/*
-		 * This comes from the generic Linux PCI driver.
-		 *
-		 * It reads the PCI tree for this bus into the Linux
-		 * data structures.
-		 *
-		 * This is inlined in linux/pci.h and calls into
-		 * pci_scan_bus_parented() in probe.c.
+		 * Do real pcibios init ops if the controller is initialized
+		 * by tile_pci_init() successfully and not initialized by
+		 * pcibios_init() yet to support PCIe hot-plug.
 		 */
-		bus = pci_scan_bus(0, controller->ops, controller);
-		controller->root_bus = bus;
-		controller->last_busno = bus->subordinate;
+		if (pci_scan_flags[i] == 0 && controllers[i].ops != NULL) {
+			struct pci_controller *controller = &controllers[i];
+			struct pci_bus *bus;
+			LIST_HEAD(resources);
 
+			if (tile_init_irqs(i, controller)) {
+				pr_err("PCI: Could not initialize IRQs\n");
+				continue;
+			}
+
+			pr_info("PCI: initializing controller #%d\n", i);
+
+			/*
+			 * This comes from the generic Linux PCI driver.
+			 *
+			 * It reads the PCI tree for this bus into the Linux
+			 * data structures.
+			 *
+			 * This is inlined in linux/pci.h and calls into
+			 * pci_scan_bus_parented() in probe.c.
+			 */
+			pci_add_resource(&resources, &ioport_resource);
+			pci_add_resource(&resources, &iomem_resource);
+			bus = pci_scan_root_bus(NULL, 0, controller->ops, controller, &resources);
+			controller->root_bus = bus;
+			controller->last_busno = bus->busn_res.end;
+		}
 	}
 
 	/* Do machine dependent PCI interrupt routing */
@@ -326,34 +330,45 @@ static int __init pcibios_init(void)
 	 * It allocates all of the resources (I/O memory, etc)
 	 * associated with the devices read in above.
 	 */
-
 	pci_assign_unassigned_resources();
 
 	/* Configure the max_read_size and max_payload_size values. */
 	fixup_read_and_payload_sizes();
 
 	/* Record the I/O resources in the PCI controller structure. */
-	for (i = 0; i < num_controllers; i++) {
-		struct pci_bus *root_bus = controllers[i].root_bus;
-		struct pci_bus *next_bus;
-		struct pci_dev *dev;
+	for (i = 0; i < TILE_NUM_PCIE; i++) {
+		/*
+		 * Do real pcibios init ops if the controller is initialized
+		 * by tile_pci_init() successfully and not initialized by
+		 * pcibios_init() yet to support PCIe hot-plug.
+		 */
+		if (pci_scan_flags[i] == 0 && controllers[i].ops != NULL) {
+			struct pci_bus *root_bus = controllers[i].root_bus;
+			struct pci_bus *next_bus;
+			struct pci_dev *dev;
 
-		list_for_each_entry(dev, &root_bus->devices, bus_list) {
-			/* Find the PCI host controller, ie. the 1st bridge. */
-			if ((dev->class >> 8) == PCI_CLASS_BRIDGE_PCI &&
-				(PCI_SLOT(dev->devfn) == 0)) {
-				next_bus = dev->subordinate;
-				controllers[i].mem_resources[0] =
-					*next_bus->resource[0];
-				controllers[i].mem_resources[1] =
-					 *next_bus->resource[1];
-				controllers[i].mem_resources[2] =
-					 *next_bus->resource[2];
+			list_for_each_entry(dev, &root_bus->devices, bus_list) {
+				/*
+				 * Find the PCI host controller, ie. the 1st
+				 * bridge.
+				 */
+				if ((dev->class >> 8) == PCI_CLASS_BRIDGE_PCI &&
+					(PCI_SLOT(dev->devfn) == 0)) {
+					next_bus = dev->subordinate;
+					controllers[i].mem_resources[0] =
+						*next_bus->resource[0];
+					controllers[i].mem_resources[1] =
+						 *next_bus->resource[1];
+					controllers[i].mem_resources[2] =
+						 *next_bus->resource[2];
 
-				break;
+					/* Setup flags. */
+					pci_scan_flags[i] = 1;
+
+					break;
+				}
 			}
 		}
-
 	}
 
 	return 0;
@@ -363,27 +378,14 @@ subsys_initcall(pcibios_init);
 /*
  * No bus fixups needed.
  */
-void __devinit pcibios_fixup_bus(struct pci_bus *bus)
+void pcibios_fixup_bus(struct pci_bus *bus)
 {
 	/* Nothing needs to be done. */
 }
 
-/*
- * This can be called from the generic PCI layer, but doesn't need to
- * do anything.
- */
-char __devinit *pcibios_setup(char *str)
+void pcibios_set_master(struct pci_dev *dev)
 {
-	/* Nothing needs to be done. */
-	return str;
-}
-
-/*
- * This is called from the generic Linux layer.
- */
-void __init pcibios_update_irq(struct pci_dev *dev, int irq)
-{
-	pci_write_config_byte(dev, PCI_INTERRUPT_LINE, irq);
+	/* No special bus mastering setup handling. */
 }
 
 /*
@@ -439,27 +441,6 @@ int pcibios_enable_device(struct pci_dev *dev, int mask)
 	return 0;
 }
 
-void __iomem *pci_iomap(struct pci_dev *dev, int bar, unsigned long max)
-{
-	unsigned long start = pci_resource_start(dev, bar);
-	unsigned long len = pci_resource_len(dev, bar);
-	unsigned long flags = pci_resource_flags(dev, bar);
-
-	if (!len)
-		return NULL;
-	if (max && len > max)
-		len = max;
-
-	if (!(flags & IORESOURCE_MEM)) {
-		pr_info("PCI: Trying to map invalid resource %#lx\n", flags);
-		start = 0;
-	}
-
-	return (void __iomem *)start;
-}
-EXPORT_SYMBOL(pci_iomap);
-
-
 /****************************************************************
  *
  * Tile PCI config space read/write routines
@@ -476,11 +457,8 @@ EXPORT_SYMBOL(pci_iomap);
  * specified bus & slot.
  */
 
-static int __devinit tile_cfg_read(struct pci_bus *bus,
-				   unsigned int devfn,
-				   int offset,
-				   int size,
-				   u32 *val)
+static int tile_cfg_read(struct pci_bus *bus, unsigned int devfn, int offset,
+			 int size, u32 *val)
 {
 	struct pci_controller *controller = bus->sysdata;
 	int busnum = bus->number & 0xff;
@@ -519,14 +497,11 @@ static int __devinit tile_cfg_read(struct pci_bus *bus,
 
 
 /*
- * See tile_cfg_read() for relevent comments.
+ * See tile_cfg_read() for relevant comments.
  * Note that "val" is the value to write, not a pointer to that value.
  */
-static int __devinit tile_cfg_write(struct pci_bus *bus,
-				    unsigned int devfn,
-				    int offset,
-				    int size,
-				    u32 val)
+static int tile_cfg_write(struct pci_bus *bus, unsigned int devfn, int offset,
+			  int size, u32 val)
 {
 	struct pci_controller *controller = bus->sysdata;
 	int busnum = bus->number & 0xff;

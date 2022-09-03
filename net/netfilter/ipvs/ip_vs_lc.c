@@ -22,22 +22,6 @@
 
 #include <net/ip_vs.h>
 
-
-static inline unsigned int
-ip_vs_lc_dest_overhead(struct ip_vs_dest *dest)
-{
-	/*
-	 * We think the overhead of processing active connections is 256
-	 * times higher than that of inactive connections in average. (This
-	 * 256 times might not be accurate, we will change it later) We
-	 * use the following formula to estimate the overhead now:
-	 *		  dest->activeconns*256 + dest->inactconns
-	 */
-	return (atomic_read(&dest->activeconns) << 8) +
-		atomic_read(&dest->inactconns);
-}
-
-
 /*
  *	Least Connection scheduling
  */
@@ -58,11 +42,11 @@ ip_vs_lc_schedule(struct ip_vs_service *svc, const struct sk_buff *skb)
 	 * served, but no new connection is assigned to the server.
 	 */
 
-	list_for_each_entry(dest, &svc->destinations, n_list) {
+	list_for_each_entry_rcu(dest, &svc->destinations, n_list) {
 		if ((dest->flags & IP_VS_DEST_F_OVERLOAD) ||
 		    atomic_read(&dest->weight) == 0)
 			continue;
-		doh = ip_vs_lc_dest_overhead(dest);
+		doh = ip_vs_dest_conn_overhead(dest);
 		if (!least || doh < loh) {
 			least = dest;
 			loh = doh;
@@ -70,7 +54,7 @@ ip_vs_lc_schedule(struct ip_vs_service *svc, const struct sk_buff *skb)
 	}
 
 	if (!least)
-		IP_VS_ERR_RL("LC: no destination available\n");
+		ip_vs_scheduler_err(svc, "no destination available");
 	else
 		IP_VS_DBG_BUF(6, "LC: server %s:%u activeconns %d "
 			      "inactconns %d\n",
@@ -100,6 +84,7 @@ static int __init ip_vs_lc_init(void)
 static void __exit ip_vs_lc_cleanup(void)
 {
 	unregister_ip_vs_scheduler(&ip_vs_lc_scheduler);
+	synchronize_rcu();
 }
 
 module_init(ip_vs_lc_init);

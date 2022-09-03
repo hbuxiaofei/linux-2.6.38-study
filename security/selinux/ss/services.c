@@ -13,7 +13,7 @@
  *
  *	Added conditional policy language extensions
  *
- * Updated: Hewlett-Packard <paul.moore@hp.com>
+ * Updated: Hewlett-Packard <paul@paul-moore.com>
  *
  *      Added support for NetLabel
  *      Added support for the policy capability bitmap
@@ -69,8 +69,6 @@
 #include "xfrm.h"
 #include "ebitmap.h"
 #include "audit.h"
-
-extern void selnl_notify_policyload(u32 seqno);
 
 int selinux_policycap_netpeer;
 int selinux_policycap_openperm;
@@ -199,6 +197,21 @@ static u16 unmap_class(u16 tclass)
 		return current_mapping[tclass].value;
 
 	return tclass;
+}
+
+/*
+ * Get kernel value for class from its policy value
+ */
+static u16 map_class(u16 pol_value)
+{
+	u16 i;
+
+	for (i = 1; i < current_mapping_size; i++) {
+		if (current_mapping[i].value == pol_value)
+			return i;
+	}
+
+	return SECCLASS_NULL;
 }
 
 static void map_decision(u16 tclass, struct av_decision *avd,
@@ -1005,9 +1018,11 @@ static int context_struct_to_string(struct context *context, char **scontext, u3
 
 	if (context->len) {
 		*scontext_len = context->len;
-		*scontext = kstrdup(context->str, GFP_ATOMIC);
-		if (!(*scontext))
-			return -ENOMEM;
+		if (scontext) {
+			*scontext = kstrdup(context->str, GFP_ATOMIC);
+			if (!(*scontext))
+				return -ENOMEM;
+		}
 		return 0;
 	}
 
@@ -1343,13 +1358,40 @@ out:
 	return -EACCES;
 }
 
+static void filename_compute_type(struct policydb *p, struct context *newcontext,
+				  u32 stype, u32 ttype, u16 tclass,
+				  const char *objname)
+{
+	struct filename_trans ft;
+	struct filename_trans_datum *otype;
+
+	/*
+	 * Most filename trans rules are going to live in specific directories
+	 * like /dev or /var/run.  This bitmap will quickly skip rule searches
+	 * if the ttype does not contain any rules.
+	 */
+	if (!ebitmap_get_bit(&p->filename_trans_ttypes, ttype))
+		return;
+
+	ft.stype = stype;
+	ft.ttype = ttype;
+	ft.tclass = tclass;
+	ft.name = objname;
+
+	otype = hashtab_search(p->filename_trans, &ft);
+	if (otype)
+		newcontext->type = otype->otype;
+}
+
 static int security_compute_sid(u32 ssid,
 				u32 tsid,
 				u16 orig_tclass,
 				u32 specified,
+				const char *objname,
 				u32 *out_sid,
 				bool kern)
 {
+	struct class_datum *cladatum = NULL;
 	struct context *scontext = NULL, *tcontext = NULL, newcontext;
 	struct role_trans *roletr = NULL;
 	struct avtab_key avkey;
@@ -1357,6 +1399,7 @@ static int security_compute_sid(u32 ssid,
 	struct avtab_node *node;
 	u16 tclass;
 	int rc = 0;
+	bool sock;
 
 	if (!ss_initialized) {
 		switch (orig_tclass) {
@@ -1374,10 +1417,13 @@ static int security_compute_sid(u32 ssid,
 
 	read_lock(&policy_rwlock);
 
-	if (kern)
+	if (kern) {
 		tclass = unmap_class(orig_tclass);
-	else
+		sock = security_is_socket_class(orig_tclass);
+	} else {
 		tclass = orig_tclass;
+		sock = security_is_socket_class(map_class(tclass));
+	}
 
 	scontext = sidtab_search(&sidtab, ssid);
 	if (!scontext) {
@@ -1394,12 +1440,20 @@ static int security_compute_sid(u32 ssid,
 		goto out_unlock;
 	}
 
+	if (tclass && tclass <= policydb.p_classes.nprim)
+		cladatum = policydb.class_val_to_struct[tclass - 1];
+
 	/* Set the user identity. */
 	switch (specified) {
 	case AVTAB_TRANSITION:
 	case AVTAB_CHANGE:
-		/* Use the process user identity. */
-		newcontext.user = scontext->user;
+		if (cladatum && cladatum->default_user == DEFAULT_TARGET) {
+			newcontext.user = tcontext->user;
+		} else {
+			/* notice this gets both DEFAULT_SOURCE and unset */
+			/* Use the process user identity. */
+			newcontext.user = scontext->user;
+		}
 		break;
 	case AVTAB_MEMBER:
 		/* Use the related object owner. */
@@ -1407,16 +1461,31 @@ static int security_compute_sid(u32 ssid,
 		break;
 	}
 
-	/* Set the role and type to default values. */
-	if (tclass == policydb.process_class) {
-		/* Use the current role and type of process. */
+	/* Set the role to default values. */
+	if (cladatum && cladatum->default_role == DEFAULT_SOURCE) {
 		newcontext.role = scontext->role;
-		newcontext.type = scontext->type;
+	} else if (cladatum && cladatum->default_role == DEFAULT_TARGET) {
+		newcontext.role = tcontext->role;
 	} else {
-		/* Use the well-defined object role. */
-		newcontext.role = OBJECT_R_VAL;
-		/* Use the type of the related object. */
+		if ((tclass == policydb.process_class) || (sock == true))
+			newcontext.role = scontext->role;
+		else
+			newcontext.role = OBJECT_R_VAL;
+	}
+
+	/* Set the type to default values. */
+	if (cladatum && cladatum->default_type == DEFAULT_SOURCE) {
+		newcontext.type = scontext->type;
+	} else if (cladatum && cladatum->default_type == DEFAULT_TARGET) {
 		newcontext.type = tcontext->type;
+	} else {
+		if ((tclass == policydb.process_class) || (sock == true)) {
+			/* Use the type of process. */
+			newcontext.type = scontext->type;
+		} else {
+			/* Use the type of the related object. */
+			newcontext.type = tcontext->type;
+		}
 	}
 
 	/* Look for a type transition/member/change rule. */
@@ -1442,25 +1511,29 @@ static int security_compute_sid(u32 ssid,
 		newcontext.type = avdatum->data;
 	}
 
+	/* if we have a objname this is a file trans check so check those rules */
+	if (objname)
+		filename_compute_type(&policydb, &newcontext, scontext->type,
+				      tcontext->type, tclass, objname);
+
 	/* Check for class-specific changes. */
-	if  (tclass == policydb.process_class) {
-		if (specified & AVTAB_TRANSITION) {
-			/* Look for a role transition rule. */
-			for (roletr = policydb.role_tr; roletr;
-			     roletr = roletr->next) {
-				if (roletr->role == scontext->role &&
-				    roletr->type == tcontext->type) {
-					/* Use the role transition rule. */
-					newcontext.role = roletr->new_role;
-					break;
-				}
+	if (specified & AVTAB_TRANSITION) {
+		/* Look for a role transition rule. */
+		for (roletr = policydb.role_tr; roletr; roletr = roletr->next) {
+			if ((roletr->role == scontext->role) &&
+			    (roletr->type == tcontext->type) &&
+			    (roletr->tclass == tclass)) {
+				/* Use the role transition rule. */
+				newcontext.role = roletr->new_role;
+				break;
 			}
 		}
 	}
 
 	/* Set the MLS attributes.
 	   This is done last because it may allocate memory. */
-	rc = mls_compute_sid(scontext, tcontext, tclass, specified, &newcontext);
+	rc = mls_compute_sid(scontext, tcontext, tclass, specified,
+			     &newcontext, sock);
 	if (rc)
 		goto out_unlock;
 
@@ -1495,22 +1568,18 @@ out:
  * if insufficient memory is available, or %0 if the new SID was
  * computed successfully.
  */
-int security_transition_sid(u32 ssid,
-			    u32 tsid,
-			    u16 tclass,
-			    u32 *out_sid)
+int security_transition_sid(u32 ssid, u32 tsid, u16 tclass,
+			    const struct qstr *qstr, u32 *out_sid)
 {
 	return security_compute_sid(ssid, tsid, tclass, AVTAB_TRANSITION,
-				    out_sid, true);
+				    qstr ? qstr->name : NULL, out_sid, true);
 }
 
-int security_transition_sid_user(u32 ssid,
-				 u32 tsid,
-				 u16 tclass,
-				 u32 *out_sid)
+int security_transition_sid_user(u32 ssid, u32 tsid, u16 tclass,
+				 const char *objname, u32 *out_sid)
 {
 	return security_compute_sid(ssid, tsid, tclass, AVTAB_TRANSITION,
-				    out_sid, false);
+				    objname, out_sid, false);
 }
 
 /**
@@ -1531,8 +1600,8 @@ int security_member_sid(u32 ssid,
 			u16 tclass,
 			u32 *out_sid)
 {
-	return security_compute_sid(ssid, tsid, tclass, AVTAB_MEMBER, out_sid,
-				    false);
+	return security_compute_sid(ssid, tsid, tclass, AVTAB_MEMBER, NULL,
+				    out_sid, false);
 }
 
 /**
@@ -1553,8 +1622,8 @@ int security_change_sid(u32 ssid,
 			u16 tclass,
 			u32 *out_sid)
 {
-	return security_compute_sid(ssid, tsid, tclass, AVTAB_CHANGE, out_sid,
-				    false);
+	return security_compute_sid(ssid, tsid, tclass, AVTAB_CHANGE, NULL,
+				    out_sid, false);
 }
 
 /* Clone the SID into the new SID table. */
@@ -1745,7 +1814,6 @@ static void security_load_policycaps(void)
 						  POLICYDB_CAPABILITY_OPENPERM);
 }
 
-extern void selinux_complete_init(void);
 static int security_preserve_bools(struct policydb *p);
 
 /**
@@ -2172,10 +2240,11 @@ out_unlock:
 		goto out;
 	}
 	for (i = 0, j = 0; i < mynel; i++) {
+		struct av_decision dummy_avd;
 		rc = avc_has_perm_noaudit(fromsid, mysids[i],
 					  SECCLASS_PROCESS, /* kernel value */
 					  PROCESS__TRANSITION, AVC_STRICT,
-					  NULL);
+					  &dummy_avd);
 		if (!rc)
 			mysids2[j++] = mysids[i];
 		cond_resched();
@@ -2371,7 +2440,7 @@ int security_set_bools(int len, int *values)
 				sym_name(&policydb, SYM_BOOLS, i),
 				!!values[i],
 				policydb.bool_val_to_struct[i]->state,
-				audit_get_loginuid(current),
+				from_kuid(&init_user_ns, audit_get_loginuid(current)),
 				audit_get_sessionid(current));
 		}
 		if (values[i])
@@ -2769,7 +2838,7 @@ int selinux_audit_rule_init(u32 field, u32 op, char *rulestr, void **vrule)
 	case AUDIT_SUBJ_CLR:
 	case AUDIT_OBJ_LEV_LOW:
 	case AUDIT_OBJ_LEV_HIGH:
-		/* we do not allow a range, indicated by the presense of '-' */
+		/* we do not allow a range, indicated by the presence of '-' */
 		if (strchr(rulestr, '-'))
 			return -EINVAL;
 		break;
@@ -2975,8 +3044,7 @@ out:
 
 static int (*aurule_callback)(void) = audit_update_lsm_rules;
 
-static int aurule_avc_callback(u32 event, u32 ssid, u32 tsid,
-			       u16 class, u32 perms, u32 *retained)
+static int aurule_avc_callback(u32 event)
 {
 	int err = 0;
 
@@ -2989,8 +3057,7 @@ static int __init aurule_init(void)
 {
 	int err;
 
-	err = avc_add_callback(aurule_avc_callback, AVC_CALLBACK_RESET,
-			       SECSID_NULL, SECSID_NULL, SECCLASS_NULL, 0);
+	err = avc_add_callback(aurule_avc_callback, AVC_CALLBACK_RESET);
 	if (err)
 		panic("avc_add_callback() failed, error %d\n", err);
 
@@ -3038,7 +3105,7 @@ static void security_netlbl_cache_add(struct netlbl_lsm_secattr *secattr,
  * Description:
  * Convert the given NetLabel security attributes in @secattr into a
  * SELinux SID.  If the @secattr field does not contain a full SELinux
- * SID/context then use SECINITSID_NETMSG as the foundation.  If possibile the
+ * SID/context then use SECINITSID_NETMSG as the foundation.  If possible the
  * 'cache' field of @secattr is set and the CACHE flag is set; this is to
  * allow the @secattr to be used by NetLabel to cache the secattr to SID
  * conversion for future lookups.  Returns zero on success, negative values on
@@ -3153,7 +3220,7 @@ out:
  * @len: length of data in bytes
  *
  */
-int security_read_policy(void **data, ssize_t *len)
+int security_read_policy(void **data, size_t *len)
 {
 	int rc;
 	struct policy_file fp;

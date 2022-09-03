@@ -1,6 +1,6 @@
 /*
  * Common Flash Interface support:
- *   Generic utility functions not dependant on command set
+ *   Generic utility functions not dependent on command set
  *
  * Copyright (C) 2002 Red Hat
  * Copyright (C) 2003 STMicroelectronics Limited
@@ -172,12 +172,6 @@ int cfi_varsize_frob(struct mtd_info *mtd, varsize_frob_t frob,
 	int chipnum, ret = 0;
 	int i, first;
 	struct mtd_erase_region_info *regions = mtd->eraseregions;
-
-	if (ofs > mtd->size)
-		return -EINVAL;
-
-	if ((len + ofs) > mtd->size)
-		return -EINVAL;
 
 	/* Check that both start and end of the requested erase are
 	 * aligned with the erasesize at the appropriate addresses.

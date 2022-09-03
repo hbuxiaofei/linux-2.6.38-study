@@ -3,7 +3,7 @@
  *  JZ4740 SoC DMA support
  *
  *  This program is free software; you can redistribute it and/or modify it
- *  under  the terms of the GNU General  Public License as published by the
+ *  under  the terms of the GNU General	 Public License as published by the
  *  Free Software Foundation;  either version 2 of the License, or (at your
  *  option) any later version.
  *
@@ -242,9 +242,7 @@ EXPORT_SYMBOL_GPL(jz4740_dma_get_residue);
 
 static void jz4740_dma_chan_irq(struct jz4740_dma_chan *dma)
 {
-	uint32_t status;
-
-	status = jz4740_dma_read(JZ_REG_DMA_STATUS_CTRL(dma->id));
+	(void) jz4740_dma_read(JZ_REG_DMA_STATUS_CTRL(dma->id));
 
 	jz4740_dma_write_mask(JZ_REG_DMA_STATUS_CTRL(dma->id), 0,
 		JZ_DMA_STATUS_CTRL_ENABLE | JZ_DMA_STATUS_CTRL_TRANSFER_DONE);

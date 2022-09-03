@@ -6,7 +6,7 @@
  *          Title:  MPI diagnostic tool structures and definitions
  *  Creation Date:  March 26, 2007
  *
- *    mpi2_tool.h Version:  02.00.05
+ *    mpi2_tool.h Version:  02.00.07
  *
  *  Version History
  *  ---------------
@@ -23,6 +23,10 @@
  *                      Added MPI2_DIAG_BUF_TYPE_EXTENDED.
  *                      Incremented MPI2_DIAG_BUF_TYPE_COUNT.
  *  05-12-10  02.00.05  Added Diagnostic Data Upload tool.
+ *  08-11-10  02.00.06  Added defines that were missing for Diagnostic Buffer
+ *                      Post Request.
+ *  05-25-11  02.00.07  Added Flags field and related defines to
+ *                      MPI2_TOOLBOX_ISTWI_READ_WRITE_REQUEST.
  *  --------------------------------------------------------------------------
  */
 
@@ -179,7 +183,7 @@ typedef struct _MPI2_TOOLBOX_ISTWI_READ_WRITE_REQUEST {
     U8                      DevIndex;                   /* 0x14 */
     U8                      Action;                     /* 0x15 */
     U8                      SGLFlags;                   /* 0x16 */
-    U8                      Reserved7;                  /* 0x17 */
+	 U8                      Flags;                      /* 0x17 */
     U16                     TxDataLength;               /* 0x18 */
     U16                     RxDataLength;               /* 0x1A */
     U32                     Reserved8;                  /* 0x1C */
@@ -203,6 +207,9 @@ typedef struct _MPI2_TOOLBOX_ISTWI_READ_WRITE_REQUEST {
 
 /* use MPI2_SGLFLAGS_ defines from mpi2.h for the SGLFlags field */
 
+/* values for the Flags field */
+#define MPI2_TOOL_ISTWI_FLAG_AUTO_RESERVE_RELEASE   (0x80)
+#define MPI2_TOOL_ISTWI_FLAG_PAGE_ADDR_MASK         (0x07)
 
 /* Toolbox ISTWI Read Write Tool reply message */
 typedef struct _MPI2_TOOLBOX_ISTWI_REPLY {
@@ -353,6 +360,10 @@ typedef struct _MPI2_DIAG_BUFFER_POST_REQUEST
 #define MPI2_DIAG_BUF_TYPE_EXTENDED                 (0x02)
 /* count of the number of buffer types */
 #define MPI2_DIAG_BUF_TYPE_COUNT                    (0x03)
+
+/* values for the Flags field */
+#define MPI2_DIAG_BUF_FLAG_RELEASE_ON_FULL          (0x00000002)
+#define MPI2_DIAG_BUF_FLAG_IMMEDIATE_RELEASE        (0x00000001)
 
 
 /****************************************************************************

@@ -140,6 +140,11 @@
 	MCI_DATATIMEOUTMASK|MCI_TXUNDERRUNMASK|MCI_RXOVERRUNMASK|	\
 	MCI_CMDRESPENDMASK|MCI_CMDSENTMASK|MCI_DATAENDMASK|MCI_PROGDONEMASK)
 
+#define MCI_IRQ_PIO \
+	(MCI_RXDATAAVLBLMASK | MCI_TXDATAAVLBLMASK | MCI_RXFIFOEMPTYMASK | \
+	 MCI_TXFIFOEMPTYMASK | MCI_RXFIFOFULLMASK | MCI_TXFIFOFULLMASK | \
+	 MCI_RXFIFOHALFFULLMASK | MCI_TXFIFOHALFEMPTYMASK | \
+	 MCI_RXACTIVEMASK | MCI_TXACTIVEMASK)
 /*
  * The size of the FIFO in bytes.
  */
@@ -202,7 +207,6 @@ struct msmsdcc_stats {
 
 struct msmsdcc_host {
 	struct resource		*cmd_irqres;
-	struct resource		*pio_irqres;
 	struct resource		*memres;
 	struct resource		*dmares;
 	void __iomem		*base;
@@ -243,6 +247,7 @@ struct msmsdcc_host {
 	unsigned int		cmd_datactrl;
 	struct mmc_command	*cmd_cmd;
 	u32			cmd_c;
+	bool			gpio_config_status;
 
 	bool prog_scan;
 	bool prog_enable;

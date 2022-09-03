@@ -13,7 +13,7 @@
  */
 
 #include <linux/kernel.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/mm.h>
 #include <linux/kdev_t.h>
 #include <linux/gfp.h>
@@ -27,6 +27,7 @@
 #include <linux/writeback.h>
 #include <linux/backing-dev.h>
 #include <linux/pagevec.h>
+#include <linux/cleancache.h>
 
 /*
  * I/O completion handler for multipage BIOs.
@@ -269,6 +270,12 @@ do_mpage_readpage(struct bio *bio, struct page *page, unsigned nr_pages,
 		}
 	} else if (fully_mapped) {
 		SetPageMappedToDisk(page);
+	}
+
+	if (fully_mapped && blocks_per_page == 1 && !PageUptodate(page) &&
+	    cleancache_get_page(page) == 0) {
+		SetPageUptodate(page);
+		goto confused;
 	}
 
 	/*
@@ -666,7 +673,10 @@ int
 mpage_writepages(struct address_space *mapping,
 		struct writeback_control *wbc, get_block_t get_block)
 {
+	struct blk_plug plug;
 	int ret;
+
+	blk_start_plug(&plug);
 
 	if (!get_block)
 		ret = generic_writepages(mapping, wbc);
@@ -682,6 +692,7 @@ mpage_writepages(struct address_space *mapping,
 		if (mpd.bio)
 			mpage_bio_submit(WRITE, mpd.bio);
 	}
+	blk_finish_plug(&plug);
 	return ret;
 }
 EXPORT_SYMBOL(mpage_writepages);

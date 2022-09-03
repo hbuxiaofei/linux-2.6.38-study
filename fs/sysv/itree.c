@@ -442,7 +442,7 @@ static unsigned sysv_nblocks(struct super_block *s, loff_t size)
 
 int sysv_getattr(struct vfsmount *mnt, struct dentry *dentry, struct kstat *stat)
 {
-	struct super_block *s = mnt->mnt_sb;
+	struct super_block *s = dentry->d_sb;
 	generic_fillattr(dentry->d_inode, stat);
 	stat->blocks = (s->s_blocksize / 512) * sysv_nblocks(s, stat->size);
 	stat->blksize = s->s_blocksize;
@@ -464,6 +464,16 @@ int sysv_prepare_chunk(struct page *page, loff_t pos, unsigned len)
 	return __block_write_begin(page, pos, len, get_block);
 }
 
+static void sysv_write_failed(struct address_space *mapping, loff_t to)
+{
+	struct inode *inode = mapping->host;
+
+	if (to > inode->i_size) {
+		truncate_pagecache(inode, to, inode->i_size);
+		sysv_truncate(inode);
+	}
+}
+
 static int sysv_write_begin(struct file *file, struct address_space *mapping,
 			loff_t pos, unsigned len, unsigned flags,
 			struct page **pagep, void **fsdata)
@@ -471,11 +481,8 @@ static int sysv_write_begin(struct file *file, struct address_space *mapping,
 	int ret;
 
 	ret = block_write_begin(mapping, pos, len, flags, pagep, get_block);
-	if (unlikely(ret)) {
-		loff_t isize = mapping->host->i_size;
-		if (pos + len > isize)
-			vmtruncate(mapping->host, isize);
-	}
+	if (unlikely(ret))
+		sysv_write_failed(mapping, pos + len);
 
 	return ret;
 }
@@ -488,7 +495,6 @@ static sector_t sysv_bmap(struct address_space *mapping, sector_t block)
 const struct address_space_operations sysv_aops = {
 	.readpage = sysv_readpage,
 	.writepage = sysv_writepage,
-	.sync_page = block_sync_page,
 	.write_begin = sysv_write_begin,
 	.write_end = generic_write_end,
 	.bmap = sysv_bmap

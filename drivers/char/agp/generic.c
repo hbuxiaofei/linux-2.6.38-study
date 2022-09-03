@@ -115,6 +115,9 @@ static struct agp_memory *agp_create_user_memory(unsigned long num_agp_pages)
 	struct agp_memory *new;
 	unsigned long alloc_size = num_agp_pages*sizeof(struct page *);
 
+	if (INT_MAX/sizeof(struct page *) < num_agp_pages)
+		return NULL;
+
 	new = kzalloc(sizeof(struct agp_memory), GFP_KERNEL);
 	if (new == NULL)
 		return NULL;
@@ -234,11 +237,14 @@ struct agp_memory *agp_allocate_memory(struct agp_bridge_data *bridge,
 	int scratch_pages;
 	struct agp_memory *new;
 	size_t i;
+	int cur_memory;
 
 	if (!bridge)
 		return NULL;
 
-	if ((atomic_read(&bridge->current_memory_agp) + page_count) > bridge->max_memory_agp)
+	cur_memory = atomic_read(&bridge->current_memory_agp);
+	if ((cur_memory + page_count > bridge->max_memory_agp) ||
+	    (cur_memory + page_count < page_count))
 		return NULL;
 
 	if (type >= AGP_USER_TYPES) {
@@ -508,12 +514,12 @@ static void agp_v2_parse_one(u32 *requested_mode, u32 *bridge_agpstat, u32 *vga_
 	switch (*bridge_agpstat & 7) {
 	case 4:
 		*bridge_agpstat |= (AGPSTAT2_2X | AGPSTAT2_1X);
-		printk(KERN_INFO PFX "BIOS bug. AGP bridge claims to only support x4 rate"
+		printk(KERN_INFO PFX "BIOS bug. AGP bridge claims to only support x4 rate. "
 			"Fixing up support for x2 & x1\n");
 		break;
 	case 2:
 		*bridge_agpstat |= AGPSTAT2_1X;
-		printk(KERN_INFO PFX "BIOS bug. AGP bridge claims to only support x2 rate"
+		printk(KERN_INFO PFX "BIOS bug. AGP bridge claims to only support x2 rate. "
 			"Fixing up support for x1\n");
 		break;
 	default:
@@ -687,7 +693,7 @@ static void agp_v3_parse_one(u32 *requested_mode, u32 *bridge_agpstat, u32 *vga_
 			*bridge_agpstat &= ~(AGPSTAT3_4X | AGPSTAT3_RSVD);
 			*vga_agpstat &= ~(AGPSTAT3_4X | AGPSTAT3_RSVD);
 		} else {
-			printk(KERN_INFO PFX "Fell back to AGPx4 mode because");
+			printk(KERN_INFO PFX "Fell back to AGPx4 mode because ");
 			if (!(*bridge_agpstat & AGPSTAT3_8X)) {
 				printk(KERN_INFO PFX "bridge couldn't do x8. bridge_agpstat:%x (orig=%x)\n",
 					*bridge_agpstat, origbridge);
@@ -950,9 +956,9 @@ int agp_generic_create_gatt_table(struct agp_bridge_data *bridge)
 	bridge->driver->cache_flush();
 #ifdef CONFIG_X86
 	if (set_memory_uc((unsigned long)table, 1 << page_order))
-		printk(KERN_WARNING "Could not set GATT table memory to UC!");
+		printk(KERN_WARNING "Could not set GATT table memory to UC!\n");
 
-	bridge->gatt_table = (void *)table;
+	bridge->gatt_table = (u32 __iomem *)table;
 #else
 	bridge->gatt_table = ioremap_nocache(virt_to_phys(table),
 					(PAGE_SIZE * (1 << page_order)));
@@ -1004,7 +1010,6 @@ int agp_generic_free_gatt_table(struct agp_bridge_data *bridge)
 	case LVL2_APER_SIZE:
 		/* The generic routines can't deal with 2 level gatt's */
 		return -EINVAL;
-		break;
 	default:
 		page_order = 0;
 		break;
@@ -1071,7 +1076,6 @@ int agp_generic_insert_memory(struct agp_memory * mem, off_t pg_start, int type)
 	case LVL2_APER_SIZE:
 		/* The generic routines can't deal with 2 level gatt's */
 		return -EINVAL;
-		break;
 	default:
 		num_entries = 0;
 		break;
@@ -1089,8 +1093,8 @@ int agp_generic_insert_memory(struct agp_memory * mem, off_t pg_start, int type)
 		return -EINVAL;
 	}
 
-	/* AK: could wrap */
-	if ((pg_start + mem->page_count) > num_entries)
+	if (((pg_start + mem->page_count) > num_entries) ||
+	    ((pg_start + mem->page_count) < pg_start))
 		return -EINVAL;
 
 	j = pg_start;
@@ -1124,7 +1128,7 @@ int agp_generic_remove_memory(struct agp_memory *mem, off_t pg_start, int type)
 {
 	size_t i;
 	struct agp_bridge_data *bridge;
-	int mask_type;
+	int mask_type, num_entries;
 
 	bridge = mem->bridge;
 	if (!bridge)
@@ -1134,6 +1138,11 @@ int agp_generic_remove_memory(struct agp_memory *mem, off_t pg_start, int type)
 		return 0;
 
 	if (type != mem->type)
+		return -EINVAL;
+
+	num_entries = agp_num_entries();
+	if (((pg_start + mem->page_count) > num_entries) ||
+	    ((pg_start + mem->page_count) < pg_start))
 		return -EINVAL;
 
 	mask_type = bridge->driver->agp_type_to_mask_type(bridge, type);

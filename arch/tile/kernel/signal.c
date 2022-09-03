@@ -37,16 +37,6 @@
 
 #define DEBUG_SIG 0
 
-#define _BLOCKABLE (~(sigmask(SIGKILL) | sigmask(SIGSTOP)))
-
-
-SYSCALL_DEFINE3(sigaltstack, const stack_t __user *, uss,
-		stack_t __user *, uoss, struct pt_regs *, regs)
-{
-	return do_sigaltstack(uss, uoss, regs->sp);
-}
-
-
 /*
  * Do a signal return; undo the signal stack.
  */
@@ -78,9 +68,17 @@ int restore_sigcontext(struct pt_regs *regs,
 	return err;
 }
 
-/* The assembly shim for this function arranges to ignore the return value. */
-SYSCALL_DEFINE1(rt_sigreturn, struct pt_regs *, regs)
+void signal_fault(const char *type, struct pt_regs *regs,
+		  void __user *frame, int sig)
 {
+	trace_unhandled_signal(type, regs, (unsigned long)frame, SIGSEGV);
+	force_sigsegv(sig, current);
+}
+
+/* The assembly shim for this function arranges to ignore the return value. */
+SYSCALL_DEFINE0(rt_sigreturn)
+{
+	struct pt_regs *regs = current_pt_regs();
 	struct rt_sigframe __user *frame =
 		(struct rt_sigframe __user *)(regs->sp);
 	sigset_t set;
@@ -90,22 +88,18 @@ SYSCALL_DEFINE1(rt_sigreturn, struct pt_regs *, regs)
 	if (__copy_from_user(&set, &frame->uc.uc_sigmask, sizeof(set)))
 		goto badframe;
 
-	sigdelsetmask(&set, ~_BLOCKABLE);
-	spin_lock_irq(&current->sighand->siglock);
-	current->blocked = set;
-	recalc_sigpending();
-	spin_unlock_irq(&current->sighand->siglock);
+	set_current_blocked(&set);
 
 	if (restore_sigcontext(regs, &frame->uc.uc_mcontext))
 		goto badframe;
 
-	if (do_sigaltstack(&frame->uc.uc_stack, NULL, regs->sp) == -EFAULT)
+	if (restore_altstack(&frame->uc.uc_stack))
 		goto badframe;
 
 	return 0;
 
 badframe:
-	force_sig(SIGSEGV, current);
+	signal_fault("bad sigreturn frame", regs, frame, 0);
 	return 0;
 }
 
@@ -190,11 +184,7 @@ static int setup_rt_frame(int sig, struct k_sigaction *ka, siginfo_t *info,
 	err |= __clear_user(&frame->save_area, sizeof(frame->save_area));
 	err |= __put_user(0, &frame->uc.uc_flags);
 	err |= __put_user(NULL, &frame->uc.uc_link);
-	err |= __put_user((void __user *)(current->sas_ss_sp),
-			  &frame->uc.uc_stack.ss_sp);
-	err |= __put_user(sas_ss_flags(regs->sp),
-			  &frame->uc.uc_stack.ss_flags);
-	err |= __put_user(current->sas_ss_size, &frame->uc.uc_stack.ss_size);
+	err |= __save_altstack(&frame->uc.uc_stack, regs->sp);
 	err |= setup_sigcontext(&frame->uc.uc_mcontext, regs);
 	err |= __copy_to_user(&frame->uc.uc_sigmask, set, sizeof(*set));
 	if (err)
@@ -219,19 +209,10 @@ static int setup_rt_frame(int sig, struct k_sigaction *ka, siginfo_t *info,
 	regs->regs[1] = (unsigned long) &frame->info;
 	regs->regs[2] = (unsigned long) &frame->uc;
 	regs->flags |= PT_FLAGS_CALLER_SAVES;
-
-	/*
-	 * Notify any tracer that was single-stepping it.
-	 * The tracer may want to single-step inside the
-	 * handler too.
-	 */
-	if (test_thread_flag(TIF_SINGLESTEP))
-		ptrace_notify(SIGTRAP);
-
 	return 0;
 
 give_sigsegv:
-	force_sigsegv(sig, current);
+	signal_fault("bad setup frame", regs, frame, sig);
 	return -EFAULT;
 }
 
@@ -239,12 +220,12 @@ give_sigsegv:
  * OK, we're invoking a handler
  */
 
-static int handle_signal(unsigned long sig, siginfo_t *info,
-			 struct k_sigaction *ka, sigset_t *oldset,
+static void handle_signal(unsigned long sig, siginfo_t *info,
+			 struct k_sigaction *ka,
 			 struct pt_regs *regs)
 {
+	sigset_t *oldset = sigmask_to_save();
 	int ret;
-
 
 	/* Are we from a system call? */
 	if (regs->faultnum == INT_SWINT_1) {
@@ -276,21 +257,10 @@ static int handle_signal(unsigned long sig, siginfo_t *info,
 	else
 #endif
 		ret = setup_rt_frame(sig, ka, info, oldset, regs);
-	if (ret == 0) {
-		/* This code is only called from system calls or from
-		 * the work_pending path in the return-to-user code, and
-		 * either way we can re-enable interrupts unconditionally.
-		 */
-		spin_lock_irq(&current->sighand->siglock);
-		sigorsets(&current->blocked,
-			  &current->blocked, &ka->sa.sa_mask);
-		if (!(ka->sa.sa_flags & SA_NODEFER))
-			sigaddset(&current->blocked, sig);
-		recalc_sigpending();
-		spin_unlock_irq(&current->sighand->siglock);
-	}
-
-	return ret;
+	if (ret)
+		return;
+	signal_delivered(sig, info, ka, regs,
+			test_thread_flag(TIF_SINGLESTEP));
 }
 
 /*
@@ -303,7 +273,6 @@ void do_signal(struct pt_regs *regs)
 	siginfo_t info;
 	int signr;
 	struct k_sigaction ka;
-	sigset_t *oldset;
 
 	/*
 	 * i386 will check if we're coming from kernel mode and bail out
@@ -312,24 +281,10 @@ void do_signal(struct pt_regs *regs)
 	 * helpful, we can reinstate the check on "!user_mode(regs)".
 	 */
 
-	if (current_thread_info()->status & TS_RESTORE_SIGMASK)
-		oldset = &current->saved_sigmask;
-	else
-		oldset = &current->blocked;
-
 	signr = get_signal_to_deliver(&info, &ka, regs, NULL);
 	if (signr > 0) {
 		/* Whee! Actually deliver the signal.  */
-		if (handle_signal(signr, &info, &ka, oldset, regs) == 0) {
-			/*
-			 * A signal was successfully delivered; the saved
-			 * sigmask will have been stored in the signal frame,
-			 * and will be restored by sigreturn, so we can simply
-			 * clear the TS_RESTORE_SIGMASK flag.
-			 */
-			current_thread_info()->status &= ~TS_RESTORE_SIGMASK;
-		}
-
+		handle_signal(signr, &info, &ka, regs);
 		goto done;
 	}
 
@@ -354,12 +309,124 @@ void do_signal(struct pt_regs *regs)
 	}
 
 	/* If there's no signal to deliver, just put the saved sigmask back. */
-	if (current_thread_info()->status & TS_RESTORE_SIGMASK) {
-		current_thread_info()->status &= ~TS_RESTORE_SIGMASK;
-		sigprocmask(SIG_SETMASK, &current->saved_sigmask, NULL);
-	}
+	restore_saved_sigmask();
 
 done:
 	/* Avoid double syscall restart if there are nested signals. */
 	regs->faultnum = INT_SWINT_1_SIGRETURN;
+}
+
+int show_unhandled_signals = 1;
+
+static int __init crashinfo(char *str)
+{
+	unsigned long val;
+	const char *word;
+
+	if (*str == '\0')
+		val = 2;
+	else if (*str != '=' || strict_strtoul(++str, 0, &val) != 0)
+		return 0;
+	show_unhandled_signals = val;
+	switch (show_unhandled_signals) {
+	case 0:
+		word = "No";
+		break;
+	case 1:
+		word = "One-line";
+		break;
+	default:
+		word = "Detailed";
+		break;
+	}
+	pr_info("%s crash reports will be generated on the console\n", word);
+	return 1;
+}
+__setup("crashinfo", crashinfo);
+
+static void dump_mem(void __user *address)
+{
+	void __user *addr;
+	enum { region_size = 256, bytes_per_line = 16 };
+	int i, j, k;
+	int found_readable_mem = 0;
+
+	pr_err("\n");
+	if (!access_ok(VERIFY_READ, address, 1)) {
+		pr_err("Not dumping at address 0x%lx (kernel address)\n",
+		       (unsigned long)address);
+		return;
+	}
+
+	addr = (void __user *)
+		(((unsigned long)address & -bytes_per_line) - region_size/2);
+	if (addr > address)
+		addr = NULL;
+	for (i = 0; i < region_size;
+	     addr += bytes_per_line, i += bytes_per_line) {
+		unsigned char buf[bytes_per_line];
+		char line[100];
+		if (copy_from_user(buf, addr, bytes_per_line))
+			continue;
+		if (!found_readable_mem) {
+			pr_err("Dumping memory around address 0x%lx:\n",
+			       (unsigned long)address);
+			found_readable_mem = 1;
+		}
+		j = sprintf(line, REGFMT":", (unsigned long)addr);
+		for (k = 0; k < bytes_per_line; ++k)
+			j += sprintf(&line[j], " %02x", buf[k]);
+		pr_err("%s\n", line);
+	}
+	if (!found_readable_mem)
+		pr_err("No readable memory around address 0x%lx\n",
+		       (unsigned long)address);
+}
+
+void trace_unhandled_signal(const char *type, struct pt_regs *regs,
+			    unsigned long address, int sig)
+{
+	struct task_struct *tsk = current;
+
+	if (show_unhandled_signals == 0)
+		return;
+
+	/* If the signal is handled, don't show it here. */
+	if (!is_global_init(tsk)) {
+		void __user *handler =
+			tsk->sighand->action[sig-1].sa.sa_handler;
+		if (handler != SIG_IGN && handler != SIG_DFL)
+			return;
+	}
+
+	/* Rate-limit the one-line output, not the detailed output. */
+	if (show_unhandled_signals <= 1 && !printk_ratelimit())
+		return;
+
+	printk("%s%s[%d]: %s at %lx pc "REGFMT" signal %d",
+	       task_pid_nr(tsk) > 1 ? KERN_INFO : KERN_EMERG,
+	       tsk->comm, task_pid_nr(tsk), type, address, regs->pc, sig);
+
+	print_vma_addr(KERN_CONT " in ", regs->pc);
+
+	printk(KERN_CONT "\n");
+
+	if (show_unhandled_signals > 1) {
+		switch (sig) {
+		case SIGILL:
+		case SIGFPE:
+		case SIGSEGV:
+		case SIGBUS:
+			pr_err("User crash: signal %d,"
+			       " trap %ld, address 0x%lx\n",
+			       sig, regs->faultnum, address);
+			show_regs(regs);
+			dump_mem((void __user *)address);
+			break;
+		default:
+			pr_err("User crash: signal %d, trap %ld\n",
+			       sig, regs->faultnum);
+			break;
+		}
+	}
 }

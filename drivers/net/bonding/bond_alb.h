@@ -74,9 +74,9 @@ struct tlb_client_info {
 				 * packets to a Client that the Hash function
 				 * gave this entry index.
 				 */
-	u32 tx_bytes;		/* Each Client acumulates the BytesTx that
-				 * were tranmitted to it, and after each
-				 * CallBack the LoadHistory is devided
+	u32 tx_bytes;		/* Each Client accumulates the BytesTx that
+				 * were transmitted to it, and after each
+				 * CallBack the LoadHistory is divided
 				 * by the balance interval
 				 */
 	u32 load_history;	/* This field contains the amount of Bytes
@@ -94,15 +94,35 @@ struct tlb_client_info {
 
 /* -------------------------------------------------------------------------
  * struct rlb_client_info contains all info related to a specific rx client
- * connection. This is the Clients Hash Table entry struct
+ * connection. This is the Clients Hash Table entry struct.
+ * Note that this is not a proper hash table; if a new client's IP address
+ * hash collides with an existing client entry, the old entry is replaced.
+ *
+ * There is a linked list (linked by the used_next and used_prev members)
+ * linking all the used entries of the hash table. This allows updating
+ * all the clients without walking over all the unused elements of the table.
+ *
+ * There are also linked lists of entries with identical hash(ip_src). These
+ * allow cleaning up the table from ip_src<->mac_src associations that have
+ * become outdated and would cause sending out invalid ARP updates to the
+ * network. These are linked by the (src_next and src_prev members).
  * -------------------------------------------------------------------------
  */
 struct rlb_client_info {
 	__be32 ip_src;		/* the server IP address */
 	__be32 ip_dst;		/* the client IP address */
+	u8  mac_src[ETH_ALEN];	/* the server MAC address */
 	u8  mac_dst[ETH_ALEN];	/* the client MAC address */
-	u32 next;		/* The next Hash table entry index */
-	u32 prev;		/* The previous Hash table entry index */
+
+	/* list of used hash table entries, starting at rx_hashtbl_used_head */
+	u32 used_next;
+	u32 used_prev;
+
+	/* ip_src based hashing */
+	u32 src_next;	/* next entry with same hash(ip_src) */
+	u32 src_prev;	/* prev entry with same hash(ip_src) */
+	u32 src_first;	/* first entry with hash(ip_src) == this entry's index */
+
 	u8  assigned;		/* checking whether this entry is assigned */
 	u8  ntt;		/* flag - need to transmit client info */
 	struct slave *slave;	/* the slave assigned to this client */
@@ -122,7 +142,6 @@ struct tlb_slave_info {
 };
 
 struct alb_bond_info {
-	struct timer_list	alb_timer;
 	struct tlb_client_info	*tx_hashtbl; /* Dynamically allocated */
 	spinlock_t		tx_hashtbl_lock;
 	u32			unbalanced_load;
@@ -130,17 +149,15 @@ struct alb_bond_info {
 	int			lp_counter;
 	/* -------- rlb parameters -------- */
 	int rlb_enabled;
-	struct packet_type	rlb_pkt_type;
 	struct rlb_client_info	*rx_hashtbl;	/* Receive hash table */
 	spinlock_t		rx_hashtbl_lock;
-	u32			rx_hashtbl_head;
+	u32			rx_hashtbl_used_head;
 	u8			rx_ntt;	/* flag - need to transmit
 					 * to all rx clients
 					 */
 	struct slave		*next_rx_slave;/* next slave to be assigned
 						* to a new rx client for
 						*/
-	u32			rlb_interval_counter;
 	u8			primary_is_promisc;	   /* boolean */
 	u32			rlb_promisc_timeout_counter;/* counts primary
 							     * promiscuity time

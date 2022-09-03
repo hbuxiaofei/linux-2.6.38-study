@@ -339,23 +339,6 @@ static int ds3232_alarm_irq_enable(struct device *dev, unsigned int enabled)
 	return 0;
 }
 
-static int ds3232_update_irq_enable(struct device *dev, unsigned int enabled)
-{
-	struct i2c_client *client = to_i2c_client(dev);
-	struct ds3232 *ds3232 = i2c_get_clientdata(client);
-
-	if (client->irq <= 0)
-		return -EINVAL;
-
-	if (enabled)
-		ds3232->rtc->irq_data |= RTC_UF;
-	else
-		ds3232->rtc->irq_data &= ~RTC_UF;
-
-	ds3232_update_alarm(client);
-	return 0;
-}
-
 static irqreturn_t ds3232_irq(int irq, void *dev_id)
 {
 	struct i2c_client *client = dev_id;
@@ -406,16 +389,15 @@ static const struct rtc_class_ops ds3232_rtc_ops = {
 	.read_alarm = ds3232_read_alarm,
 	.set_alarm = ds3232_set_alarm,
 	.alarm_irq_enable = ds3232_alarm_irq_enable,
-	.update_irq_enable = ds3232_update_irq_enable,
 };
 
-static int __devinit ds3232_probe(struct i2c_client *client,
-		const struct i2c_device_id *id)
+static int ds3232_probe(struct i2c_client *client,
+			const struct i2c_device_id *id)
 {
 	struct ds3232 *ds3232;
 	int ret;
 
-	ds3232 = kzalloc(sizeof(struct ds3232), GFP_KERNEL);
+	ds3232 = devm_kzalloc(&client->dev, sizeof(struct ds3232), GFP_KERNEL);
 	if (!ds3232)
 		return -ENOMEM;
 
@@ -427,37 +409,28 @@ static int __devinit ds3232_probe(struct i2c_client *client,
 
 	ret = ds3232_check_rtc_status(client);
 	if (ret)
-		goto out_free;
+		return ret;
 
-	ds3232->rtc = rtc_device_register(client->name, &client->dev,
+	ds3232->rtc = devm_rtc_device_register(&client->dev, client->name,
 					  &ds3232_rtc_ops, THIS_MODULE);
 	if (IS_ERR(ds3232->rtc)) {
-		ret = PTR_ERR(ds3232->rtc);
 		dev_err(&client->dev, "unable to register the class device\n");
-		goto out_irq;
+		return PTR_ERR(ds3232->rtc);
 	}
 
 	if (client->irq >= 0) {
-		ret = request_irq(client->irq, ds3232_irq, 0,
+		ret = devm_request_irq(&client->dev, client->irq, ds3232_irq, 0,
 				 "ds3232", client);
 		if (ret) {
 			dev_err(&client->dev, "unable to request IRQ\n");
-			goto out_free;
+			return ret;
 		}
 	}
 
 	return 0;
-
-out_irq:
-	if (client->irq >= 0)
-		free_irq(client->irq, client);
-
-out_free:
-	kfree(ds3232);
-	return ret;
 }
 
-static int __devexit ds3232_remove(struct i2c_client *client)
+static int ds3232_remove(struct i2c_client *client)
 {
 	struct ds3232 *ds3232 = i2c_get_clientdata(client);
 
@@ -466,12 +439,10 @@ static int __devexit ds3232_remove(struct i2c_client *client)
 		ds3232->exiting = 1;
 		mutex_unlock(&ds3232->mutex);
 
-		free_irq(client->irq, client);
+		devm_free_irq(&client->dev, client->irq, client);
 		cancel_work_sync(&ds3232->work);
 	}
 
-	rtc_device_unregister(ds3232->rtc);
-	kfree(ds3232);
 	return 0;
 }
 
@@ -487,22 +458,11 @@ static struct i2c_driver ds3232_driver = {
 		.owner = THIS_MODULE,
 	},
 	.probe = ds3232_probe,
-	.remove = __devexit_p(ds3232_remove),
+	.remove = ds3232_remove,
 	.id_table = ds3232_id,
 };
 
-static int __init ds3232_init(void)
-{
-	return i2c_add_driver(&ds3232_driver);
-}
-
-static void __exit ds3232_exit(void)
-{
-	i2c_del_driver(&ds3232_driver);
-}
-
-module_init(ds3232_init);
-module_exit(ds3232_exit);
+module_i2c_driver(ds3232_driver);
 
 MODULE_AUTHOR("Srikanth Srinivasan <srikanth.srinivasan@freescale.com>");
 MODULE_DESCRIPTION("Maxim/Dallas DS3232 RTC Driver");

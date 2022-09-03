@@ -28,12 +28,16 @@
 
 #define _RTL871X_RECV_C_
 
+#include <linux/ip.h>
+#include <linux/slab.h>
+#include <linux/if_ether.h>
+#include <linux/kmemleak.h>
+#include <linux/etherdevice.h>
+
 #include "osdep_service.h"
 #include "drv_types.h"
 #include "recv_osdep.h"
 #include "mlme_osdep.h"
-#include "ip.h"
-#include "if_ether.h"
 #include "ethernet.h"
 #include "usb_ops.h"
 #include "wifi.h"
@@ -73,6 +77,7 @@ sint _r8712_init_recv_priv(struct recv_priv *precvpriv,
 					   RXFRAME_ALIGN_SZ);
 	if (precvpriv->pallocated_frame_buf == NULL)
 		return _FAIL;
+	kmemleak_not_leak(precvpriv->pallocated_frame_buf);
 	memset(precvpriv->pallocated_frame_buf, 0, NR_RECVFRAME *
 		sizeof(union recv_frame) + RXFRAME_ALIGN_SZ);
 	precvpriv->precv_frame_buf = precvpriv->pallocated_frame_buf +
@@ -89,7 +94,6 @@ sint _r8712_init_recv_priv(struct recv_priv *precvpriv,
 		precvframe++;
 	}
 	precvpriv->rx_pending_cnt = 1;
-	sema_init(&precvpriv->allrxreturnevt, 0);
 	return r8712_init_recv_priv(precvpriv, padapter);
 }
 
@@ -307,9 +311,9 @@ static sint recv_decache(union recv_frame *precv_frame, u8 bretry,
 	return _SUCCESS;
 }
 
-static sint sta2sta_data_frame(struct _adapter *adapter, union recv_frame *precv_frame,
-			struct sta_info **psta
-)
+static sint sta2sta_data_frame(struct _adapter *adapter,
+			       union recv_frame *precv_frame,
+			       struct sta_info **psta)
 {
 	u8 *ptr = precv_frame->u.hdr.rx_data;
 	sint ret = _SUCCESS;
@@ -328,8 +332,8 @@ static sint sta2sta_data_frame(struct _adapter *adapter, union recv_frame *precv
 			return _FAIL;
 		if ((memcmp(myhwaddr, pattrib->dst, ETH_ALEN)) && (!bmcast))
 			return _FAIL;
-		if (!memcmp(pattrib->bssid, "\x0\x0\x0\x0\x0\x0", ETH_ALEN) ||
-		    !memcmp(mybssid, "\x0\x0\x0\x0\x0\x0", ETH_ALEN) ||
+		if (is_zero_ether_addr(pattrib->bssid) ||
+		    is_zero_ether_addr(mybssid) ||
 		    (memcmp(pattrib->bssid, mybssid, ETH_ALEN)))
 			return _FAIL;
 		sta_addr = pattrib->src;
@@ -373,8 +377,9 @@ static sint sta2sta_data_frame(struct _adapter *adapter, union recv_frame *precv
 	return ret;
 }
 
-static sint ap2sta_data_frame(struct _adapter *adapter, union recv_frame *precv_frame,
-		       struct sta_info **psta)
+static sint ap2sta_data_frame(struct _adapter *adapter,
+			      union recv_frame *precv_frame,
+			      struct sta_info **psta)
 {
 	u8 *ptr = precv_frame->u.hdr.rx_data;
 	struct rx_pkt_attrib *pattrib = &precv_frame->u.hdr.attrib;
@@ -405,8 +410,8 @@ static sint ap2sta_data_frame(struct _adapter *adapter, union recv_frame *precv_
 		if ((memcmp(myhwaddr, pattrib->dst, ETH_ALEN)) && (!bmcast))
 			return _FAIL;
 		/* check BSSID */
-		if (!memcmp(pattrib->bssid, "\x0\x0\x0\x0\x0\x0", ETH_ALEN) ||
-		     !memcmp(mybssid, "\x0\x0\x0\x0\x0\x0", ETH_ALEN) ||
+		if (is_zero_ether_addr(pattrib->bssid) ||
+		     is_zero_ether_addr(mybssid) ||
 		     (memcmp(pattrib->bssid, mybssid, ETH_ALEN)))
 			return _FAIL;
 		if (bmcast)
@@ -431,8 +436,9 @@ static sint ap2sta_data_frame(struct _adapter *adapter, union recv_frame *precv_
 	return _SUCCESS;
 }
 
-static sint sta2ap_data_frame(struct _adapter *adapter, union recv_frame *precv_frame,
-		       struct sta_info **psta)
+static sint sta2ap_data_frame(struct _adapter *adapter,
+			      union recv_frame *precv_frame,
+			      struct sta_info **psta)
 {
 	struct rx_pkt_attrib *pattrib = &precv_frame->u.hdr.attrib;
 	struct	sta_priv *pstapriv = &adapter->stapriv;

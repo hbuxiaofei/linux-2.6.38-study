@@ -25,6 +25,7 @@
 #include <linux/interrupt.h>
 #include <asm/mipsregs.h>
 #include <asm/irq_cpu.h>
+#include <asm/setup.h>
 #include <irq.h>
 #include <irq-mapping.h>
 #include <gpio.h>
@@ -34,64 +35,64 @@ static int mips_cpu_timer_irq;
 static const unsigned int irq_prio[PNX833X_PIC_NUM_IRQ] =
 {
     0, /* unused */
-    4, /* PNX833X_PIC_I2C0_INT                 1 */
-    4, /* PNX833X_PIC_I2C1_INT                 2 */
-    1, /* PNX833X_PIC_UART0_INT                3 */
-    1, /* PNX833X_PIC_UART1_INT                4 */
-    6, /* PNX833X_PIC_TS_IN0_DV_INT            5 */
-    6, /* PNX833X_PIC_TS_IN0_DMA_INT           6 */
-    7, /* PNX833X_PIC_GPIO_INT                 7 */
-    4, /* PNX833X_PIC_AUDIO_DEC_INT            8 */
-    5, /* PNX833X_PIC_VIDEO_DEC_INT            9 */
-    4, /* PNX833X_PIC_CONFIG_INT              10 */
-    4, /* PNX833X_PIC_AOI_INT                 11 */
-    9, /* PNX833X_PIC_SYNC_INT                12 */
-    9, /* PNX8335_PIC_SATA_INT                13 */
-    4, /* PNX833X_PIC_OSD_INT                 14 */
-    9, /* PNX833X_PIC_DISP1_INT               15 */
-    4, /* PNX833X_PIC_DEINTERLACER_INT        16 */
-    9, /* PNX833X_PIC_DISPLAY2_INT            17 */
-    4, /* PNX833X_PIC_VC_INT                  18 */
-    4, /* PNX833X_PIC_SC_INT                  19 */
-    9, /* PNX833X_PIC_IDE_INT                 20 */
-    9, /* PNX833X_PIC_IDE_DMA_INT             21 */
-    6, /* PNX833X_PIC_TS_IN1_DV_INT           22 */
-    6, /* PNX833X_PIC_TS_IN1_DMA_INT          23 */
-    4, /* PNX833X_PIC_SGDX_DMA_INT            24 */
-    4, /* PNX833X_PIC_TS_OUT_INT              25 */
-    4, /* PNX833X_PIC_IR_INT                  26 */
-    3, /* PNX833X_PIC_VMSP1_INT               27 */
-    3, /* PNX833X_PIC_VMSP2_INT               28 */
-    4, /* PNX833X_PIC_PIBC_INT                29 */
-    4, /* PNX833X_PIC_TS_IN0_TRD_INT          30 */
-    4, /* PNX833X_PIC_SGDX_TPD_INT            31 */
-    5, /* PNX833X_PIC_USB_INT                 32 */
-    4, /* PNX833X_PIC_TS_IN1_TRD_INT          33 */
-    4, /* PNX833X_PIC_CLOCK_INT               34 */
-    4, /* PNX833X_PIC_SGDX_PARSER_INT         35 */
-    4, /* PNX833X_PIC_VMSP_DMA_INT            36 */
+    4, /* PNX833X_PIC_I2C0_INT		       1 */
+    4, /* PNX833X_PIC_I2C1_INT		       2 */
+    1, /* PNX833X_PIC_UART0_INT		       3 */
+    1, /* PNX833X_PIC_UART1_INT		       4 */
+    6, /* PNX833X_PIC_TS_IN0_DV_INT	       5 */
+    6, /* PNX833X_PIC_TS_IN0_DMA_INT	       6 */
+    7, /* PNX833X_PIC_GPIO_INT		       7 */
+    4, /* PNX833X_PIC_AUDIO_DEC_INT	       8 */
+    5, /* PNX833X_PIC_VIDEO_DEC_INT	       9 */
+    4, /* PNX833X_PIC_CONFIG_INT	      10 */
+    4, /* PNX833X_PIC_AOI_INT		      11 */
+    9, /* PNX833X_PIC_SYNC_INT		      12 */
+    9, /* PNX8335_PIC_SATA_INT		      13 */
+    4, /* PNX833X_PIC_OSD_INT		      14 */
+    9, /* PNX833X_PIC_DISP1_INT		      15 */
+    4, /* PNX833X_PIC_DEINTERLACER_INT	      16 */
+    9, /* PNX833X_PIC_DISPLAY2_INT	      17 */
+    4, /* PNX833X_PIC_VC_INT		      18 */
+    4, /* PNX833X_PIC_SC_INT		      19 */
+    9, /* PNX833X_PIC_IDE_INT		      20 */
+    9, /* PNX833X_PIC_IDE_DMA_INT	      21 */
+    6, /* PNX833X_PIC_TS_IN1_DV_INT	      22 */
+    6, /* PNX833X_PIC_TS_IN1_DMA_INT	      23 */
+    4, /* PNX833X_PIC_SGDX_DMA_INT	      24 */
+    4, /* PNX833X_PIC_TS_OUT_INT	      25 */
+    4, /* PNX833X_PIC_IR_INT		      26 */
+    3, /* PNX833X_PIC_VMSP1_INT		      27 */
+    3, /* PNX833X_PIC_VMSP2_INT		      28 */
+    4, /* PNX833X_PIC_PIBC_INT		      29 */
+    4, /* PNX833X_PIC_TS_IN0_TRD_INT	      30 */
+    4, /* PNX833X_PIC_SGDX_TPD_INT	      31 */
+    5, /* PNX833X_PIC_USB_INT		      32 */
+    4, /* PNX833X_PIC_TS_IN1_TRD_INT	      33 */
+    4, /* PNX833X_PIC_CLOCK_INT		      34 */
+    4, /* PNX833X_PIC_SGDX_PARSER_INT	      35 */
+    4, /* PNX833X_PIC_VMSP_DMA_INT	      36 */
 #if defined(CONFIG_SOC_PNX8335)
-    4, /* PNX8335_PIC_MIU_INT                 37 */
-    4, /* PNX8335_PIC_AVCHIP_IRQ_INT          38 */
-    9, /* PNX8335_PIC_SYNC_HD_INT             39 */
-    9, /* PNX8335_PIC_DISP_HD_INT             40 */
-    9, /* PNX8335_PIC_DISP_SCALER_INT         41 */
-    4, /* PNX8335_PIC_OSD_HD1_INT             42 */
-    4, /* PNX8335_PIC_DTL_WRITER_Y_INT        43 */
-    4, /* PNX8335_PIC_DTL_WRITER_C_INT        44 */
+    4, /* PNX8335_PIC_MIU_INT		      37 */
+    4, /* PNX8335_PIC_AVCHIP_IRQ_INT	      38 */
+    9, /* PNX8335_PIC_SYNC_HD_INT	      39 */
+    9, /* PNX8335_PIC_DISP_HD_INT	      40 */
+    9, /* PNX8335_PIC_DISP_SCALER_INT	      41 */
+    4, /* PNX8335_PIC_OSD_HD1_INT	      42 */
+    4, /* PNX8335_PIC_DTL_WRITER_Y_INT	      43 */
+    4, /* PNX8335_PIC_DTL_WRITER_C_INT	      44 */
     4, /* PNX8335_PIC_DTL_EMULATOR_Y_IR_INT   45 */
     4, /* PNX8335_PIC_DTL_EMULATOR_C_IR_INT   46 */
-    4, /* PNX8335_PIC_DENC_TTX_INT            47 */
-    4, /* PNX8335_PIC_MMI_SIF0_INT            48 */
-    4, /* PNX8335_PIC_MMI_SIF1_INT            49 */
-    4, /* PNX8335_PIC_MMI_CDMMU_INT           50 */
-    4, /* PNX8335_PIC_PIBCS_INT               51 */
-   12, /* PNX8335_PIC_ETHERNET_INT            52 */
-    3, /* PNX8335_PIC_VMSP1_0_INT             53 */
-    3, /* PNX8335_PIC_VMSP1_1_INT             54 */
-    4, /* PNX8335_PIC_VMSP1_DMA_INT           55 */
-    4, /* PNX8335_PIC_TDGR_DE_INT             56 */
-    4, /* PNX8335_PIC_IR1_IRQ_INT             57 */
+    4, /* PNX8335_PIC_DENC_TTX_INT	      47 */
+    4, /* PNX8335_PIC_MMI_SIF0_INT	      48 */
+    4, /* PNX8335_PIC_MMI_SIF1_INT	      49 */
+    4, /* PNX8335_PIC_MMI_CDMMU_INT	      50 */
+    4, /* PNX8335_PIC_PIBCS_INT		      51 */
+   12, /* PNX8335_PIC_ETHERNET_INT	      52 */
+    3, /* PNX8335_PIC_VMSP1_0_INT	      53 */
+    3, /* PNX8335_PIC_VMSP1_1_INT	      54 */
+    4, /* PNX8335_PIC_VMSP1_DMA_INT	      55 */
+    4, /* PNX8335_PIC_TDGR_DE_INT	      56 */
+    4, /* PNX8335_PIC_IR1_IRQ_INT	      57 */
 #endif
 };
 
@@ -152,10 +153,6 @@ static inline void pnx833x_hard_disable_pic_irq(unsigned int irq)
 	PNX833X_PIC_INT_REG(irq) = 0;
 }
 
-static int irqflags[PNX833X_PIC_NUM_IRQ];	/* initialized by zeroes */
-#define IRQFLAG_STARTED		1
-#define IRQFLAG_DISABLED	2
-
 static DEFINE_RAW_SPINLOCK(pnx833x_irq_lock);
 
 static unsigned int pnx833x_startup_pic_irq(unsigned int irq)
@@ -164,108 +161,54 @@ static unsigned int pnx833x_startup_pic_irq(unsigned int irq)
 	unsigned int pic_irq = irq - PNX833X_PIC_IRQ_BASE;
 
 	raw_spin_lock_irqsave(&pnx833x_irq_lock, flags);
-
-	irqflags[pic_irq] = IRQFLAG_STARTED;	/* started, not disabled */
 	pnx833x_hard_enable_pic_irq(pic_irq);
-
 	raw_spin_unlock_irqrestore(&pnx833x_irq_lock, flags);
 	return 0;
 }
 
-static void pnx833x_shutdown_pic_irq(unsigned int irq)
+static void pnx833x_enable_pic_irq(struct irq_data *d)
 {
 	unsigned long flags;
-	unsigned int pic_irq = irq - PNX833X_PIC_IRQ_BASE;
+	unsigned int pic_irq = d->irq - PNX833X_PIC_IRQ_BASE;
 
 	raw_spin_lock_irqsave(&pnx833x_irq_lock, flags);
+	pnx833x_hard_enable_pic_irq(pic_irq);
+	raw_spin_unlock_irqrestore(&pnx833x_irq_lock, flags);
+}
 
-	irqflags[pic_irq] = 0;			/* not started */
+static void pnx833x_disable_pic_irq(struct irq_data *d)
+{
+	unsigned long flags;
+	unsigned int pic_irq = d->irq - PNX833X_PIC_IRQ_BASE;
+
+	raw_spin_lock_irqsave(&pnx833x_irq_lock, flags);
 	pnx833x_hard_disable_pic_irq(pic_irq);
-
 	raw_spin_unlock_irqrestore(&pnx833x_irq_lock, flags);
-}
-
-static void pnx833x_enable_pic_irq(unsigned int irq)
-{
-	unsigned long flags;
-	unsigned int pic_irq = irq - PNX833X_PIC_IRQ_BASE;
-
-	raw_spin_lock_irqsave(&pnx833x_irq_lock, flags);
-
-	irqflags[pic_irq] &= ~IRQFLAG_DISABLED;
-	if (irqflags[pic_irq] == IRQFLAG_STARTED)
-		pnx833x_hard_enable_pic_irq(pic_irq);
-
-	raw_spin_unlock_irqrestore(&pnx833x_irq_lock, flags);
-}
-
-static void pnx833x_disable_pic_irq(unsigned int irq)
-{
-	unsigned long flags;
-	unsigned int pic_irq = irq - PNX833X_PIC_IRQ_BASE;
-
-	raw_spin_lock_irqsave(&pnx833x_irq_lock, flags);
-
-	irqflags[pic_irq] |= IRQFLAG_DISABLED;
-	pnx833x_hard_disable_pic_irq(pic_irq);
-
-	raw_spin_unlock_irqrestore(&pnx833x_irq_lock, flags);
-}
-
-static void pnx833x_ack_pic_irq(unsigned int irq)
-{
-}
-
-static void pnx833x_end_pic_irq(unsigned int irq)
-{
 }
 
 static DEFINE_RAW_SPINLOCK(pnx833x_gpio_pnx833x_irq_lock);
 
-static unsigned int pnx833x_startup_gpio_irq(unsigned int irq)
+static void pnx833x_enable_gpio_irq(struct irq_data *d)
 {
-	int pin = irq - PNX833X_GPIO_IRQ_BASE;
-	unsigned long flags;
-	raw_spin_lock_irqsave(&pnx833x_gpio_pnx833x_irq_lock, flags);
-	pnx833x_gpio_enable_irq(pin);
-	raw_spin_unlock_irqrestore(&pnx833x_gpio_pnx833x_irq_lock, flags);
-	return 0;
-}
-
-static void pnx833x_enable_gpio_irq(unsigned int irq)
-{
-	int pin = irq - PNX833X_GPIO_IRQ_BASE;
+	int pin = d->irq - PNX833X_GPIO_IRQ_BASE;
 	unsigned long flags;
 	raw_spin_lock_irqsave(&pnx833x_gpio_pnx833x_irq_lock, flags);
 	pnx833x_gpio_enable_irq(pin);
 	raw_spin_unlock_irqrestore(&pnx833x_gpio_pnx833x_irq_lock, flags);
 }
 
-static void pnx833x_disable_gpio_irq(unsigned int irq)
+static void pnx833x_disable_gpio_irq(struct irq_data *d)
 {
-	int pin = irq - PNX833X_GPIO_IRQ_BASE;
+	int pin = d->irq - PNX833X_GPIO_IRQ_BASE;
 	unsigned long flags;
 	raw_spin_lock_irqsave(&pnx833x_gpio_pnx833x_irq_lock, flags);
 	pnx833x_gpio_disable_irq(pin);
 	raw_spin_unlock_irqrestore(&pnx833x_gpio_pnx833x_irq_lock, flags);
 }
 
-static void pnx833x_ack_gpio_irq(unsigned int irq)
+static int pnx833x_set_type_gpio_irq(struct irq_data *d, unsigned int flow_type)
 {
-}
-
-static void pnx833x_end_gpio_irq(unsigned int irq)
-{
-	int pin = irq - PNX833X_GPIO_IRQ_BASE;
-	unsigned long flags;
-	raw_spin_lock_irqsave(&pnx833x_gpio_pnx833x_irq_lock, flags);
-	pnx833x_gpio_clear_irq(pin);
-	raw_spin_unlock_irqrestore(&pnx833x_gpio_pnx833x_irq_lock, flags);
-}
-
-static int pnx833x_set_type_gpio_irq(unsigned int irq, unsigned int flow_type)
-{
-	int pin = irq - PNX833X_GPIO_IRQ_BASE;
+	int pin = d->irq - PNX833X_GPIO_IRQ_BASE;
 	int gpio_mode;
 
 	switch (flow_type) {
@@ -296,23 +239,15 @@ static int pnx833x_set_type_gpio_irq(unsigned int irq, unsigned int flow_type)
 
 static struct irq_chip pnx833x_pic_irq_type = {
 	.name = "PNX-PIC",
-	.startup = pnx833x_startup_pic_irq,
-	.shutdown = pnx833x_shutdown_pic_irq,
-	.enable = pnx833x_enable_pic_irq,
-	.disable = pnx833x_disable_pic_irq,
-	.ack = pnx833x_ack_pic_irq,
-	.end = pnx833x_end_pic_irq
+	.irq_enable = pnx833x_enable_pic_irq,
+	.irq_disable = pnx833x_disable_pic_irq,
 };
 
 static struct irq_chip pnx833x_gpio_irq_type = {
 	.name = "PNX-GPIO",
-	.startup = pnx833x_startup_gpio_irq,
-	.shutdown = pnx833x_disable_gpio_irq,
-	.enable = pnx833x_enable_gpio_irq,
-	.disable = pnx833x_disable_gpio_irq,
-	.ack = pnx833x_ack_gpio_irq,
-	.end = pnx833x_end_gpio_irq,
-	.set_type = pnx833x_set_type_gpio_irq
+	.irq_enable = pnx833x_enable_gpio_irq,
+	.irq_disable = pnx833x_disable_gpio_irq,
+	.irq_set_type = pnx833x_set_type_gpio_irq,
 };
 
 void __init arch_init_irq(void)
@@ -325,11 +260,13 @@ void __init arch_init_irq(void)
 	/* Set IRQ information in irq_desc */
 	for (irq = PNX833X_PIC_IRQ_BASE; irq < (PNX833X_PIC_IRQ_BASE + PNX833X_PIC_NUM_IRQ); irq++) {
 		pnx833x_hard_disable_pic_irq(irq);
-		set_irq_chip_and_handler(irq, &pnx833x_pic_irq_type, handle_simple_irq);
+		irq_set_chip_and_handler(irq, &pnx833x_pic_irq_type,
+					 handle_simple_irq);
 	}
 
 	for (irq = PNX833X_GPIO_IRQ_BASE; irq < (PNX833X_GPIO_IRQ_BASE + PNX833X_GPIO_NUM_IRQ); irq++)
-		set_irq_chip_and_handler(irq, &pnx833x_gpio_irq_type, handle_simple_irq);
+		irq_set_chip_and_handler(irq, &pnx833x_gpio_irq_type,
+					 handle_simple_irq);
 
 	/* Set PIC priority limiter register to 0 */
 	PNX833X_PIC_INT_PRIORITY = 0;

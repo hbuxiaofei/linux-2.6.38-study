@@ -1,6 +1,6 @@
 /******************************************************************************
  *
- * Copyright(c) 2009-2010  Realtek Corporation.
+ * Copyright(c) 2009-2012  Realtek Corporation.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of version 2 of the GNU General Public License as
@@ -116,7 +116,11 @@
 	LE_BITS_TO_4BYTE(((__pcmdfbhdr) + 4), 20, 12)
 
 #define CHIP_VER_B			BIT(4)
+#define CHIP_BONDING_IDENTIFIER(_value) (((_value) >> 22) & 0x3)
+#define CHIP_BONDING_92C_1T2R		0x1
+#define RF_TYPE_1T2R			BIT(1)
 #define CHIP_92C_BITMASK		BIT(0)
+#define CHIP_UNKNOWN			BIT(7)
 #define CHIP_92C_1T2R			0x03
 #define CHIP_92C			0x01
 #define CHIP_88C			0x00
@@ -126,11 +130,38 @@ enum version_8192c {
 	VERSION_A_CHIP_88C = 0x00,
 	VERSION_B_CHIP_92C = 0x11,
 	VERSION_B_CHIP_88C = 0x10,
+	VERSION_TEST_CHIP_88C = 0x00,
+	VERSION_TEST_CHIP_92C = 0x01,
+	VERSION_NORMAL_TSMC_CHIP_88C = 0x10,
+	VERSION_NORMAL_TSMC_CHIP_92C = 0x11,
+	VERSION_NORMAL_TSMC_CHIP_92C_1T2R = 0x13,
+	VERSION_NORMAL_UMC_CHIP_88C_A_CUT = 0x30,
+	VERSION_NORMAL_UMC_CHIP_92C_A_CUT = 0x31,
+	VERSION_NORMAL_UMC_CHIP_92C_1T2R_A_CUT = 0x33,
+	VERSION_NORMA_UMC_CHIP_8723_1T1R_A_CUT = 0x34,
+	VERSION_NORMA_UMC_CHIP_8723_1T1R_B_CUT = 0x3c,
+	VERSION_NORMAL_UMC_CHIP_88C_B_CUT = 0x70,
+	VERSION_NORMAL_UMC_CHIP_92C_B_CUT = 0x71,
+	VERSION_NORMAL_UMC_CHIP_92C_1T2R_B_CUT = 0x73,
 	VERSION_UNKNOWN = 0x88,
 };
 
+#define CUT_VERSION_MASK		(BIT(6)|BIT(7))
+#define CHIP_VENDOR_UMC			BIT(5)
+#define CHIP_VENDOR_UMC_B_CUT		BIT(6) /* Chip version for ECO */
+#define IS_VENDOR_UMC_A_CUT(version)	((IS_CHIP_VENDOR_UMC(version)) ? \
+	((GET_CVID_CUT_VERSION(version)) ? false : true) : false)
 #define IS_CHIP_VER_B(version)  ((version & CHIP_VER_B) ? true : false)
+#define IS_VENDOR_UMC_A_CUT(version)	((IS_CHIP_VENDOR_UMC(version)) ? \
+	((GET_CVID_CUT_VERSION(version)) ? false : true) : false)
 #define IS_92C_SERIAL(version)  ((version & CHIP_92C_BITMASK) ? true : false)
+#define IS_CHIP_VENDOR_UMC(version)		\
+	((version & CHIP_VENDOR_UMC) ? true : false)
+#define GET_CVID_CUT_VERSION(version)	((version) & CUT_VERSION_MASK)
+#define IS_81xxC_VENDOR_UMC_B_CUT(version)		\
+	((IS_CHIP_VENDOR_UMC(version)) ? \
+	((GET_CVID_CUT_VERSION(version) == CHIP_VENDOR_UMC_B_CUT) ?	\
+	true : false) : false)
 
 enum rtl819x_loopback_e {
 	RTL819X_NO_LOOPBACK = 0,
@@ -205,41 +236,6 @@ enum rtl_desc_qsel {
 	QSLT_HIGH = 0x11,
 	QSLT_MGNT = 0x12,
 	QSLT_CMD = 0x13,
-};
-
-enum rtl_desc92c_rate {
-	DESC92C_RATE1M = 0x00,
-	DESC92C_RATE2M = 0x01,
-	DESC92C_RATE5_5M = 0x02,
-	DESC92C_RATE11M = 0x03,
-
-	DESC92C_RATE6M = 0x04,
-	DESC92C_RATE9M = 0x05,
-	DESC92C_RATE12M = 0x06,
-	DESC92C_RATE18M = 0x07,
-	DESC92C_RATE24M = 0x08,
-	DESC92C_RATE36M = 0x09,
-	DESC92C_RATE48M = 0x0a,
-	DESC92C_RATE54M = 0x0b,
-
-	DESC92C_RATEMCS0 = 0x0c,
-	DESC92C_RATEMCS1 = 0x0d,
-	DESC92C_RATEMCS2 = 0x0e,
-	DESC92C_RATEMCS3 = 0x0f,
-	DESC92C_RATEMCS4 = 0x10,
-	DESC92C_RATEMCS5 = 0x11,
-	DESC92C_RATEMCS6 = 0x12,
-	DESC92C_RATEMCS7 = 0x13,
-	DESC92C_RATEMCS8 = 0x14,
-	DESC92C_RATEMCS9 = 0x15,
-	DESC92C_RATEMCS10 = 0x16,
-	DESC92C_RATEMCS11 = 0x17,
-	DESC92C_RATEMCS12 = 0x18,
-	DESC92C_RATEMCS13 = 0x19,
-	DESC92C_RATEMCS14 = 0x1a,
-	DESC92C_RATEMCS15 = 0x1b,
-	DESC92C_RATEMCS15_SG = 0x1c,
-	DESC92C_RATEMCS32 = 0x20,
 };
 
 struct phy_sts_cck_8192s_t {

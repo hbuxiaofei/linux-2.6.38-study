@@ -17,18 +17,21 @@
  */
 
 #include <linux/types.h>
+#include <linux/gpio.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/device.h>
 #include <linux/errno.h>
 #include <linux/io.h>
 
-#include <mach/hardware.h>
 #include <asm/irq.h>
 #include <asm/mach/irq.h>
 
-#include <plat/fpga.h>
-#include <mach/gpio.h>
+#include <mach/hardware.h>
+
+#include "iomap.h"
+#include "common.h"
+#include "fpga.h"
 
 static void fpga_mask_irq(struct irq_data *d)
 {
@@ -84,7 +87,7 @@ static void fpga_mask_ack_irq(struct irq_data *d)
 	fpga_ack_irq(d);
 }
 
-void innovator_fpga_IRQ_demux(unsigned int irq, struct irq_desc *desc)
+static void innovator_fpga_IRQ_demux(unsigned int irq, struct irq_desc *desc)
 {
 	u32 stat;
 	int fpga_irq;
@@ -156,17 +159,17 @@ void omap1510_fpga_init_irq(void)
 			 * The touchscreen interrupt is level-sensitive, so
 			 * we'll use the regular mask_ack routine for it.
 			 */
-			set_irq_chip(i, &omap_fpga_irq_ack);
+			irq_set_chip(i, &omap_fpga_irq_ack);
 		}
 		else {
 			/*
 			 * All FPGA interrupts except the touchscreen are
 			 * edge-sensitive, so we won't mask them.
 			 */
-			set_irq_chip(i, &omap_fpga_irq);
+			irq_set_chip(i, &omap_fpga_irq);
 		}
 
-		set_irq_handler(i, handle_edge_irq);
+		irq_set_handler(i, handle_edge_irq);
 		set_irq_flags(i, IRQF_VALID);
 	}
 
@@ -183,6 +186,6 @@ void omap1510_fpga_init_irq(void)
 		return;
 	}
 	gpio_direction_input(13);
-	set_irq_type(gpio_to_irq(13), IRQ_TYPE_EDGE_RISING);
-	set_irq_chained_handler(OMAP1510_INT_FPGA, innovator_fpga_IRQ_demux);
+	irq_set_irq_type(gpio_to_irq(13), IRQ_TYPE_EDGE_RISING);
+	irq_set_chained_handler(OMAP1510_INT_FPGA, innovator_fpga_IRQ_demux);
 }

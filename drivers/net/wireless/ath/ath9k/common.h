@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009 Atheros Communications Inc.
+ * Copyright (c) 2009-2011 Atheros Communications Inc.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -23,21 +23,11 @@
 
 /* Common header for Atheros 802.11n base driver cores */
 
-#define IEEE80211_WEP_NKID 4
-
-#define WME_NUM_TID             16
 #define WME_BA_BMP_SIZE         64
 #define WME_MAX_BA              WME_BA_BMP_SIZE
 #define ATH_TID_MAX_BUFS        (2 * WME_MAX_BA)
 
-/* These must match mac80211 skb queue mapping numbers */
-#define WME_AC_VO   0
-#define WME_AC_VI   1
-#define WME_AC_BE   2
-#define WME_AC_BK   3
-#define WME_NUM_AC  4
-
-#define ATH_RSSI_DUMMY_MARKER   0x127
+#define ATH_RSSI_DUMMY_MARKER   127
 #define ATH_RSSI_LPF_LEN 		10
 #define RSSI_LPF_THRESHOLD		-20
 #define ATH_RSSI_EP_MULTIPLIER     (1<<7)
@@ -50,17 +40,8 @@
 	x = ATH_LPF_RSSI((x), ATH_RSSI_IN((y)), ATH_RSSI_LPF_LEN);  	\
 } while (0)
 #define ATH_EP_RND(x, mul) 						\
-	((((x)%(mul)) >= ((mul)/2)) ? ((x) + ((mul) - 1)) / (mul) : (x)/(mul))
+	(((x) + ((mul)/2)) / (mul))
 
-/* Defines the BT AR_BT_COEX_WGHT used */
-enum ath_stomp_type {
-	ATH_BTCOEX_NO_STOMP,
-	ATH_BTCOEX_STOMP_ALL,
-	ATH_BTCOEX_STOMP_LOW,
-	ATH_BTCOEX_STOMP_NONE
-};
-
-int ath9k_cmn_padpos(__le16 frame_control);
 int ath9k_cmn_get_hw_crypto_keytype(struct sk_buff *skb);
 void ath9k_cmn_update_ichannel(struct ath9k_channel *ichan,
 			       struct ieee80211_channel *chan,
@@ -70,3 +51,6 @@ struct ath9k_channel *ath9k_cmn_get_curchannel(struct ieee80211_hw *hw,
 int ath9k_cmn_count_streams(unsigned int chainmask, int max);
 void ath9k_cmn_btcoex_bt_stomp(struct ath_common *common,
 				  enum ath_stomp_type stomp_type);
+void ath9k_cmn_update_txpow(struct ath_hw *ah, u16 cur_txpow,
+			    u16 new_txpow, u16 *txpower);
+void ath9k_cmn_init_crypto(struct ath_hw *ah);

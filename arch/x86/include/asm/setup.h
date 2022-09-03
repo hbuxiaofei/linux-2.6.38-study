@@ -1,7 +1,8 @@
 #ifndef _ASM_X86_SETUP_H
 #define _ASM_X86_SETUP_H
 
-#ifdef __KERNEL__
+#include <uapi/asm/setup.h>
+
 
 #define COMMAND_LINE_SIZE 2048
 
@@ -47,7 +48,7 @@ extern void reserve_standard_io_resources(void);
 extern void i386_reserve_resources(void);
 extern void setup_default_timer_irq(void);
 
-#ifdef CONFIG_X86_MRST
+#ifdef CONFIG_X86_INTEL_MID
 extern void x86_mrst_early_setup(void);
 #else
 static inline void x86_mrst_early_setup(void) { }
@@ -88,7 +89,7 @@ void *extend_brk(size_t size, size_t align);
  * executable.)
  */
 #define RESERVE_BRK(name,sz)						\
-	static void __section(.discard.text) __used			\
+	static void __section(.discard.text) __used notrace		\
 	__brk_reservation_fn_##name##__(void) {				\
 		asm volatile (						\
 			".pushsection .brk_reservation,\"aw\",@nobits;" \
@@ -104,10 +105,10 @@ void *extend_brk(size_t size, size_t align);
 	type *name;					\
 	RESERVE_BRK(name, sizeof(type) * entries)
 
+extern void probe_roms(void);
 #ifdef __i386__
 
 void __init i386_start_kernel(void);
-extern void probe_roms(void);
 
 #else
 void __init x86_64_start_kernel(char *real_mode);
@@ -123,6 +124,4 @@ void __init x86_64_start_reservations(char *real_mode_data);
 	.size .brk.name,.-1b;				\
 	.popsection
 #endif /* __ASSEMBLY__ */
-#endif  /*  __KERNEL__  */
-
 #endif /* _ASM_X86_SETUP_H */

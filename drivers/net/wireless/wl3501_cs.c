@@ -53,7 +53,6 @@
 
 #include <asm/io.h>
 #include <asm/uaccess.h>
-#include <asm/system.h>
 
 #include "wl3501.h"
 
@@ -290,7 +289,7 @@ static void wl3501_get_from_wla(struct wl3501_card *this, u16 src, void *dest,
  *  \               \- IEEE 802.11 -/ \-------------- len --------------/
  *   \-struct wl3501_80211_tx_hdr--/   \-------- Ethernet Frame -------/
  *
- * Return = Postion in Card
+ * Return = Position in Card
  */
 static u16 wl3501_get_tx_buffer(struct wl3501_card *this, u16 len)
 {
@@ -1521,13 +1520,12 @@ static int wl3501_set_wap(struct net_device *dev, struct iw_request_info *info,
 			  union iwreq_data *wrqu, char *extra)
 {
 	struct wl3501_card *this = netdev_priv(dev);
-	static const u8 bcast[ETH_ALEN] = { 255, 255, 255, 255, 255, 255 };
 	int rc = -EINVAL;
 
 	/* FIXME: we support other ARPHRDs...*/
 	if (wrqu->ap_addr.sa_family != ARPHRD_ETHER)
 		goto out;
-	if (!memcmp(bcast, wrqu->ap_addr.sa_data, ETH_ALEN)) {
+	if (is_broadcast_ether_addr(wrqu->ap_addr.sa_data)) {
 		/* FIXME: rescan? */
 	} else
 		memcpy(this->bssid, wrqu->ap_addr.sa_data, ETH_ALEN);
@@ -1781,7 +1779,7 @@ static int wl3501_get_encode(struct net_device *dev,
 				  keys, len_keys);
 	if (rc)
 		goto out;
-	tocopy = min_t(u8, len_keys, wrqu->encoding.length);
+	tocopy = min_t(u16, len_keys, wrqu->encoding.length);
 	tocopy = min_t(u8, tocopy, 100);
 	wrqu->encoding.length = tocopy;
 	memcpy(extra, keys, tocopy);
@@ -1932,7 +1930,7 @@ static int wl3501_config(struct pcmcia_device *link)
 	this->base_addr = dev->base_addr;
 
 	if (!wl3501_get_flash_mac_addr(this)) {
-		printk(KERN_WARNING "%s: Cant read MAC addr in flash ROM?\n",
+		printk(KERN_WARNING "%s: Can't read MAC addr in flash ROM?\n",
 		       dev->name);
 		unregister_netdev(dev);
 		goto failed;
@@ -2000,7 +1998,7 @@ static int wl3501_resume(struct pcmcia_device *link)
 }
 
 
-static struct pcmcia_device_id wl3501_ids[] = {
+static const struct pcmcia_device_id wl3501_ids[] = {
 	PCMCIA_DEVICE_MANF_CARD(0xd601, 0x0001),
 	PCMCIA_DEVICE_NULL
 };
@@ -2015,19 +2013,7 @@ static struct pcmcia_driver wl3501_driver = {
 	.suspend	= wl3501_suspend,
 	.resume		= wl3501_resume,
 };
-
-static int __init wl3501_init_module(void)
-{
-	return pcmcia_register_driver(&wl3501_driver);
-}
-
-static void __exit wl3501_exit_module(void)
-{
-	pcmcia_unregister_driver(&wl3501_driver);
-}
-
-module_init(wl3501_init_module);
-module_exit(wl3501_exit_module);
+module_pcmcia_driver(wl3501_driver);
 
 MODULE_AUTHOR("Fox Chen <mhchen@golf.ccl.itri.org.tw>, "
 	      "Arnaldo Carvalho de Melo <acme@conectiva.com.br>,"

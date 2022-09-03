@@ -40,6 +40,7 @@
  */
 
 #include <linux/slab.h>
+#include <linux/module.h>
 
 #include <scsi/osd_initiator.h>
 #include <scsi/osd_sec.h>
@@ -143,6 +144,10 @@ static int _osd_get_print_system_info(struct osd_dev *od,
 	odi->osdname_len = get_attrs[a].len;
 	/* Avoid NULL for memcmp optimization 0-length is good enough */
 	odi->osdname = kzalloc(odi->osdname_len + 1, GFP_KERNEL);
+	if (!odi->osdname) {
+		ret = -ENOMEM;
+		goto out;
+	}
 	if (odi->osdname_len)
 		memcpy(odi->osdname, get_attrs[a].val_ptr, odi->osdname_len);
 	OSD_INFO("OSD_NAME               [%s]\n", odi->osdname);
@@ -1005,11 +1010,23 @@ int osd_req_read_sg(struct osd_request *or,
 	const struct osd_sg_entry *sglist, unsigned numentries)
 {
 	u64 len;
-	int ret = _add_sg_continuation_descriptor(or, sglist, numentries, &len);
+	u64 off;
+	int ret;
 
-	if (ret)
-		return ret;
-	osd_req_read(or, obj, 0, bio, len);
+	if (numentries > 1) {
+		off = 0;
+		ret = _add_sg_continuation_descriptor(or, sglist, numentries,
+						      &len);
+		if (ret)
+			return ret;
+	} else {
+		/* Optimize the case of single segment, read_sg is a
+		 * bidi operation.
+		 */
+		len = sglist->len;
+		off = sglist->offset;
+	}
+	osd_req_read(or, obj, off, bio, len);
 
 	return 0;
 }
@@ -1032,7 +1049,7 @@ static struct bio *_create_sg_bios(struct osd_request *or,
 
 	bio = bio_kmalloc(GFP_KERNEL, numentries);
 	if (unlikely(!bio)) {
-		OSD_DEBUG("Faild to allocate BIO size=%u\n", numentries);
+		OSD_DEBUG("Failed to allocate BIO size=%u\n", numentries);
 		return ERR_PTR(-ENOMEM);
 	}
 

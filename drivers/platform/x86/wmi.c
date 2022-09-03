@@ -36,6 +36,7 @@
 #include <linux/list.h>
 #include <linux/acpi.h>
 #include <linux/slab.h>
+#include <linux/module.h>
 #include <acpi/acpi_bus.h>
 #include <acpi/acpi_drivers.h>
 
@@ -81,17 +82,17 @@ struct wmi_block {
 #define ACPI_WMI_STRING      0x4	/* GUID takes & returns a string */
 #define ACPI_WMI_EVENT       0x8	/* GUID is an event */
 
-static int debug_event;
+static bool debug_event;
 module_param(debug_event, bool, 0444);
 MODULE_PARM_DESC(debug_event,
 		 "Log WMI Events [0/1]");
 
-static int debug_dump_wdg;
+static bool debug_dump_wdg;
 module_param(debug_dump_wdg, bool, 0444);
 MODULE_PARM_DESC(debug_dump_wdg,
 		 "Dump available WMI interfaces [0/1]");
 
-static int acpi_wmi_remove(struct acpi_device *device, int type);
+static int acpi_wmi_remove(struct acpi_device *device);
 static int acpi_wmi_add(struct acpi_device *device);
 static void acpi_wmi_notify(struct acpi_device *device, u32 event);
 
@@ -486,16 +487,16 @@ static void wmi_dump_wdg(const struct guid_block *g)
 	pr_info("\tnotify_id: %02X\n", g->notify_id);
 	pr_info("\treserved: %02X\n", g->reserved);
 	pr_info("\tinstance_count: %d\n", g->instance_count);
-	pr_info("\tflags: %#x ", g->flags);
+	pr_info("\tflags: %#x", g->flags);
 	if (g->flags) {
 		if (g->flags & ACPI_WMI_EXPENSIVE)
-			pr_cont("ACPI_WMI_EXPENSIVE ");
+			pr_cont(" ACPI_WMI_EXPENSIVE");
 		if (g->flags & ACPI_WMI_METHOD)
-			pr_cont("ACPI_WMI_METHOD ");
+			pr_cont(" ACPI_WMI_METHOD");
 		if (g->flags & ACPI_WMI_STRING)
-			pr_cont("ACPI_WMI_STRING ");
+			pr_cont(" ACPI_WMI_STRING");
 		if (g->flags & ACPI_WMI_EVENT)
-			pr_cont("ACPI_WMI_EVENT ");
+			pr_cont(" ACPI_WMI_EVENT");
 	}
 	pr_cont("\n");
 
@@ -754,9 +755,13 @@ static void wmi_free_devices(void)
 	struct wmi_block *wblock, *next;
 
 	/* Delete devices for all the GUIDs */
-	list_for_each_entry_safe(wblock, next, &wmi_block_list, list)
+	list_for_each_entry_safe(wblock, next, &wmi_block_list, list) {
+		list_del(&wblock->list);
 		if (wblock->dev.class)
 			device_unregister(&wblock->dev);
+		else
+			kfree(wblock);
+	}
 }
 
 static bool guid_already_parsed(const char *guid_string)
@@ -912,7 +917,7 @@ static void acpi_wmi_notify(struct acpi_device *device, u32 event)
 	}
 }
 
-static int acpi_wmi_remove(struct acpi_device *device, int type)
+static int acpi_wmi_remove(struct acpi_device *device)
 {
 	acpi_remove_address_space_handler(device->handle,
 				ACPI_ADR_SPACE_EC, &acpi_wmi_ec_space_handler);

@@ -12,20 +12,13 @@
  */
 
 #include <linux/module.h>
-#include <linux/moduleparam.h>
-#include <linux/io.h>
-#include <linux/platform_device.h>
 #include <sound/soc.h>
 #include <sound/jack.h>
+
 #include <asm/mach-types.h>
 #include <mach/gpio.h>
-#include <mach/regs-clock.h>
 
-#include <linux/mfd/wm8994/core.h>
-#include <linux/mfd/wm8994/registers.h>
 #include "../codecs/wm8994.h"
-#include "dma.h"
-#include "i2s.h"
 
 #define MACHINE_NAME	0
 #define CPU_VOICE_DAI	1
@@ -107,14 +100,6 @@ static int goni_wm8994_init(struct snd_soc_pcm_runtime *rtd)
 	struct snd_soc_dapm_context *dapm = &codec->dapm;
 	int ret;
 
-	/* add goni specific widgets */
-	snd_soc_dapm_new_controls(dapm, goni_dapm_widgets,
-			ARRAY_SIZE(goni_dapm_widgets));
-
-	/* set up goni specific audio routes */
-	snd_soc_dapm_add_routes(dapm, goni_dapm_routes,
-			ARRAY_SIZE(goni_dapm_routes));
-
 	/* set endpoints to not connected */
 	snd_soc_dapm_nc_pin(dapm, "IN2LP:VXRN");
 	snd_soc_dapm_nc_pin(dapm, "IN2RP:VXRP");
@@ -127,8 +112,6 @@ static int goni_wm8994_init(struct snd_soc_pcm_runtime *rtd)
 		snd_soc_dapm_nc_pin(dapm, "SPKOUTRN");
 		snd_soc_dapm_nc_pin(dapm, "SPKOUTRP");
 	}
-
-	snd_soc_dapm_sync(dapm);
 
 	/* Headset jack detection */
 	ret = snd_soc_jack_new(codec, "Headset Jack",
@@ -235,6 +218,10 @@ static struct snd_soc_dai_driver voice_dai = {
 		.formats = SNDRV_PCM_FMTBIT_S16_LE,},
 };
 
+static const struct snd_soc_component_driver voice_component = {
+	.name		= "goni-voice",
+};
+
 static struct snd_soc_ops goni_voice_ops = {
 	.hw_params = goni_voice_hw_params,
 };
@@ -244,26 +231,31 @@ static struct snd_soc_dai_link goni_dai[] = {
 	.name = "WM8994",
 	.stream_name = "WM8994 HiFi",
 	.cpu_dai_name = "samsung-i2s.0",
-	.codec_dai_name = "wm8994-hifi",
-	.platform_name = "samsung-audio",
-	.codec_name = "wm8994-codec.0-0x1a",
+	.codec_dai_name = "wm8994-aif1",
+	.platform_name = "samsung-i2s.0",
+	.codec_name = "wm8994-codec.0-001a",
 	.init = goni_wm8994_init,
 	.ops = &goni_hifi_ops,
 }, {
 	.name = "WM8994 Voice",
 	.stream_name = "Voice",
 	.cpu_dai_name = "goni-voice-dai",
-	.codec_dai_name = "wm8994-voice",
-	.platform_name = "samsung-audio",
-	.codec_name = "wm8994-codec.0-0x1a",
+	.codec_dai_name = "wm8994-aif2",
+	.codec_name = "wm8994-codec.0-001a",
 	.ops = &goni_voice_ops,
 },
 };
 
 static struct snd_soc_card goni = {
 	.name = "goni",
+	.owner = THIS_MODULE,
 	.dai_link = goni_dai,
 	.num_links = ARRAY_SIZE(goni_dai),
+
+	.dapm_widgets = goni_dapm_widgets,
+	.num_dapm_widgets = ARRAY_SIZE(goni_dapm_widgets),
+	.dapm_routes = goni_dapm_routes,
+	.num_dapm_routes = ARRAY_SIZE(goni_dapm_routes),
 };
 
 static int __init goni_init(void)
@@ -282,7 +274,8 @@ static int __init goni_init(void)
 		return -ENOMEM;
 
 	/* register voice DAI here */
-	ret = snd_soc_register_dai(&goni_snd_device->dev, &voice_dai);
+	ret = snd_soc_register_component(&goni_snd_device->dev, &voice_component,
+					 &voice_dai, 1);
 	if (ret) {
 		platform_device_put(goni_snd_device);
 		return ret;
@@ -292,7 +285,7 @@ static int __init goni_init(void)
 	ret = platform_device_add(goni_snd_device);
 
 	if (ret) {
-		snd_soc_unregister_dai(&goni_snd_device->dev);
+		snd_soc_unregister_component(&goni_snd_device->dev);
 		platform_device_put(goni_snd_device);
 	}
 
@@ -301,7 +294,7 @@ static int __init goni_init(void)
 
 static void __exit goni_exit(void)
 {
-	snd_soc_unregister_dai(&goni_snd_device->dev);
+	snd_soc_unregister_component(&goni_snd_device->dev);
 	platform_device_unregister(goni_snd_device);
 }
 

@@ -268,8 +268,10 @@ int dcdbas_smi_request(struct smi_cmd *smi_cmd)
 	}
 
 	/* generate SMI */
+	/* inb to force posted write through and make SMI happen now */
 	asm volatile (
-		"outb %b0,%w1"
+		"outb %b0,%w1\n"
+		"inb %w1"
 		: /* no output args */
 		: "a" (smi_cmd->command_code),
 		  "d" (smi_cmd->command_address),
@@ -535,7 +537,7 @@ static struct attribute_group dcdbas_attr_group = {
 	.attrs = dcdbas_dev_attrs,
 };
 
-static int __devinit dcdbas_probe(struct platform_device *dev)
+static int dcdbas_probe(struct platform_device *dev)
 {
 	int i, error;
 
@@ -573,7 +575,7 @@ static int __devinit dcdbas_probe(struct platform_device *dev)
 	return 0;
 }
 
-static int __devexit dcdbas_remove(struct platform_device *dev)
+static int dcdbas_remove(struct platform_device *dev)
 {
 	int i;
 
@@ -591,7 +593,7 @@ static struct platform_driver dcdbas_driver = {
 		.owner	= THIS_MODULE,
 	},
 	.probe		= dcdbas_probe,
-	.remove		= __devexit_p(dcdbas_remove),
+	.remove		= dcdbas_remove,
 };
 
 /**

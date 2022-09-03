@@ -63,6 +63,7 @@ typedef enum {
 	SCTP_CMD_ECN_ECNE,	/* Do delayed ECNE processing. */
 	SCTP_CMD_ECN_CWR,	/* Do delayed CWR processing.  */
 	SCTP_CMD_TIMER_START,	/* Start a timer.  */
+	SCTP_CMD_TIMER_START_ONCE, /* Start a timer once */
 	SCTP_CMD_TIMER_RESTART,	/* Restart a timer. */
 	SCTP_CMD_TIMER_STOP,	/* Stop a timer. */
 	SCTP_CMD_INIT_CHOOSE_TRANSPORT, /* Choose transport for an INIT. */
@@ -73,7 +74,6 @@ typedef enum {
 	SCTP_CMD_INIT_FAILED,   /* High level, do init failure work. */
 	SCTP_CMD_REPORT_DUP,	/* Report a duplicate TSN.  */
 	SCTP_CMD_STRIKE,	/* Mark a strike against a transport.  */
-	SCTP_CMD_TRANSMIT,      /* Transmit the outqueue. */
 	SCTP_CMD_HB_TIMERS_START,    /* Start the heartbeat timers. */
 	SCTP_CMD_HB_TIMER_UPDATE,    /* Update a heartbeat timers.  */
 	SCTP_CMD_HB_TIMERS_STOP,     /* Stop the heartbeat timers.  */
@@ -108,6 +108,8 @@ typedef enum {
 	SCTP_CMD_UPDATE_INITTAG, /* Update peer inittag */
 	SCTP_CMD_SEND_MSG,	 /* Send the whole use message */
 	SCTP_CMD_SEND_NEXT_ASCONF, /* Send the next ASCONF after ACK */
+	SCTP_CMD_PURGE_ASCONF_QUEUE, /* Purge all asconf queues.*/
+	SCTP_CMD_SET_ASOC,	 /* Restore association context */
 	SCTP_CMD_LAST
 } sctp_verb_t;
 
@@ -128,8 +130,6 @@ typedef union {
 	__be16 err;
 	sctp_state_t state;
 	sctp_event_timeout_t to;
-	unsigned long zero;
-	void *ptr;
 	struct sctp_chunk *chunk;
 	struct sctp_association *asoc;
 	struct sctp_transport *transport;
@@ -152,23 +152,15 @@ typedef union {
  * which takes an __s32 and returns a sctp_arg_t containing the
  * __s32.  So, after foo = SCTP_I32(arg), foo.i32 == arg.
  */
-static inline sctp_arg_t SCTP_NULL(void)
-{
-	sctp_arg_t retval; retval.ptr = NULL; return retval;
-}
-static inline sctp_arg_t SCTP_NOFORCE(void)
-{
-	sctp_arg_t retval = {.zero = 0UL}; retval.i32 = 0; return retval;
-}
-static inline sctp_arg_t SCTP_FORCE(void)
-{
-	sctp_arg_t retval = {.zero = 0UL}; retval.i32 = 1; return retval;
-}
 
 #define SCTP_ARG_CONSTRUCTOR(name, type, elt) \
 static inline sctp_arg_t	\
 SCTP_## name (type arg)		\
-{ sctp_arg_t retval = {.zero = 0UL}; retval.elt = arg; return retval; }
+{ sctp_arg_t retval;\
+  memset(&retval, 0, sizeof(sctp_arg_t));\
+  retval.elt = arg;\
+  return retval;\
+}
 
 SCTP_ARG_CONSTRUCTOR(I32,	__s32, i32)
 SCTP_ARG_CONSTRUCTOR(U32,	__u32, u32)
@@ -179,7 +171,6 @@ SCTP_ARG_CONSTRUCTOR(ERROR,     int, error)
 SCTP_ARG_CONSTRUCTOR(PERR,      __be16, err)	/* protocol error */
 SCTP_ARG_CONSTRUCTOR(STATE,	sctp_state_t, state)
 SCTP_ARG_CONSTRUCTOR(TO,	sctp_event_timeout_t, to)
-SCTP_ARG_CONSTRUCTOR(PTR,	void *, ptr)
 SCTP_ARG_CONSTRUCTOR(CHUNK,	struct sctp_chunk *, chunk)
 SCTP_ARG_CONSTRUCTOR(ASOC,	struct sctp_association *, asoc)
 SCTP_ARG_CONSTRUCTOR(TRANSPORT,	struct sctp_transport *, transport)
@@ -189,6 +180,23 @@ SCTP_ARG_CONSTRUCTOR(ULPEVENT,  struct sctp_ulpevent *, ulpevent)
 SCTP_ARG_CONSTRUCTOR(PACKET,	struct sctp_packet *, packet)
 SCTP_ARG_CONSTRUCTOR(SACKH,	sctp_sackhdr_t *, sackh)
 SCTP_ARG_CONSTRUCTOR(DATAMSG,	struct sctp_datamsg *, msg)
+
+static inline sctp_arg_t SCTP_FORCE(void)
+{
+	return SCTP_I32(1);
+}
+
+static inline sctp_arg_t SCTP_NOFORCE(void)
+{
+	return SCTP_I32(0);
+}
+
+static inline sctp_arg_t SCTP_NULL(void)
+{
+	sctp_arg_t retval;
+	memset(&retval, 0, sizeof(sctp_arg_t));
+	return retval;
+}
 
 typedef struct {
 	sctp_arg_t obj;

@@ -31,14 +31,14 @@
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
 
+#include <mach/pxa25x.h>
 #include <mach/audio.h>
 #include <mach/palmte2.h>
-#include <mach/mmc.h>
-#include <mach/pxafb.h>
-#include <mach/mfp-pxa25x.h>
-#include <mach/irda.h>
+#include <linux/platform_data/mmc-pxamci.h>
+#include <linux/platform_data/video-pxafb.h>
+#include <linux/platform_data/irda-pxaficp.h>
 #include <mach/udc.h>
-#include <mach/palmasoc.h>
+#include <linux/platform_data/asoc-palm27x.h>
 
 #include "generic.h"
 #include "devices.h"
@@ -105,6 +105,7 @@ static struct pxamci_platform_data palmte2_mci_platform_data = {
 	.gpio_power		= GPIO_NR_PALMTE2_SD_POWER,
 };
 
+#if defined(CONFIG_KEYBOARD_GPIO) || defined(CONFIG_KEYBOARD_GPIO_MODULE)
 /******************************************************************************
  * GPIO keys
  ******************************************************************************/
@@ -132,34 +133,19 @@ static struct platform_device palmte2_pxa_keys = {
 		.platform_data = &palmte2_pxa_keys_data,
 	},
 };
+#endif
 
 /******************************************************************************
  * Backlight
  ******************************************************************************/
+static struct gpio palmte_bl_gpios[] = {
+	{ GPIO_NR_PALMTE2_BL_POWER, GPIOF_INIT_LOW, "Backlight power" },
+	{ GPIO_NR_PALMTE2_LCD_POWER, GPIOF_INIT_LOW, "LCD power" },
+};
+
 static int palmte2_backlight_init(struct device *dev)
 {
-	int ret;
-
-	ret = gpio_request(GPIO_NR_PALMTE2_BL_POWER, "BL POWER");
-	if (ret)
-		goto err;
-	ret = gpio_direction_output(GPIO_NR_PALMTE2_BL_POWER, 0);
-	if (ret)
-		goto err2;
-	ret = gpio_request(GPIO_NR_PALMTE2_LCD_POWER, "LCD POWER");
-	if (ret)
-		goto err2;
-	ret = gpio_direction_output(GPIO_NR_PALMTE2_LCD_POWER, 0);
-	if (ret)
-		goto err3;
-
-	return 0;
-err3:
-	gpio_free(GPIO_NR_PALMTE2_LCD_POWER);
-err2:
-	gpio_free(GPIO_NR_PALMTE2_BL_POWER);
-err:
-	return ret;
+	return gpio_request_array(ARRAY_AND_SIZE(palmte_bl_gpios));
 }
 
 static int palmte2_backlight_notify(struct device *dev, int brightness)
@@ -171,8 +157,7 @@ static int palmte2_backlight_notify(struct device *dev, int brightness)
 
 static void palmte2_backlight_exit(struct device *dev)
 {
-	gpio_free(GPIO_NR_PALMTE2_BL_POWER);
-	gpio_free(GPIO_NR_PALMTE2_LCD_POWER);
+	gpio_free_array(ARRAY_AND_SIZE(palmte_bl_gpios));
 }
 
 static struct platform_pwm_backlight_data palmte2_backlight_data = {
@@ -363,7 +348,7 @@ static void __init palmte2_init(void)
 	pxa_set_btuart_info(NULL);
 	pxa_set_stuart_info(NULL);
 
-	set_pxa_fb_info(&palmte2_lcd_screen);
+	pxa_set_fb_info(NULL, &palmte2_lcd_screen);
 	pxa_set_mci_info(&palmte2_mci_platform_data);
 	palmte2_udc_init();
 	pxa_set_ac97_info(&palmte2_ac97_pdata);
@@ -373,9 +358,12 @@ static void __init palmte2_init(void)
 }
 
 MACHINE_START(PALMTE2, "Palm Tungsten|E2")
-	.boot_params	= 0xa0000100,
+	.atag_offset	= 0x100,
 	.map_io		= pxa25x_map_io,
+	.nr_irqs	= PXA_NR_IRQS,
 	.init_irq	= pxa25x_init_irq,
-	.timer		= &pxa_timer,
-	.init_machine	= palmte2_init
+	.handle_irq	= pxa25x_handle_irq,
+	.init_time	= pxa_timer_init,
+	.init_machine	= palmte2_init,
+	.restart	= pxa_restart,
 MACHINE_END

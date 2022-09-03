@@ -35,6 +35,8 @@
 #define RFKILL_MASK_8187_89_97	0x2
 #define RFKILL_MASK_8198	0x4
 
+#define RETRY_COUNT		7
+
 struct rtl8187_rx_info {
 	struct urb *urb;
 	struct ieee80211_hw *dev;
@@ -85,6 +87,14 @@ struct rtl8187b_tx_hdr {
 enum {
 	DEVICE_RTL8187,
 	DEVICE_RTL8187B
+};
+
+struct rtl8187_vif {
+	struct ieee80211_hw *dev;
+
+	/* beaconing */
+	struct delayed_work beacon_work;
+	bool enable_beacon;
 };
 
 struct rtl8187_priv {
@@ -139,6 +149,7 @@ struct rtl8187_priv {
 		__le32 bits32;
 	} *io_dmabuf;
 	bool rfkill_off;
+	u16 seqno;
 };
 
 void rtl8187_write_phy(struct ieee80211_hw *dev, u8 addr, u32 data);

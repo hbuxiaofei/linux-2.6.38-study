@@ -24,12 +24,18 @@
 #include <linux/delay.h>
 #include <linux/slab.h>
 #include <linux/pci.h>
+#include <linux/module.h>
 #include <sound/core.h>
 #include <sound/jack.h>
 
 #include "hda_codec.h"
 #include "hda_local.h"
+#include "hda_auto_parser.h"
 #include "hda_beep.h"
+#include "hda_jack.h"
+#include "hda_generic.h"
+
+#define ENABLE_CXT_STATIC_QUIRKS
 
 #define CXT_PIN_DIR_IN              0x00
 #define CXT_PIN_DIR_OUT             0x01
@@ -39,6 +45,7 @@
 
 #define CONEXANT_HP_EVENT	0x37
 #define CONEXANT_MIC_EVENT	0x38
+#define CONEXANT_LINE_EVENT	0x39
 
 /* Conexant 5051 specific */
 
@@ -49,23 +56,18 @@
 #define AUTO_MIC_PORTB		(1 << 1)
 #define AUTO_MIC_PORTC		(1 << 2)
 
-struct conexant_jack {
-
-	hda_nid_t nid;
-	int type;
-	struct snd_jack *jack;
-
-};
-
-struct pin_dac_pair {
-	hda_nid_t pin;
-	hda_nid_t dac;
-	int type;
-};
-
 struct conexant_spec {
+	struct hda_gen_spec gen;
 
-	struct snd_kcontrol_new *mixers[5];
+	unsigned int beep_amp;
+
+	/* extra EAPD pins */
+	unsigned int num_eapds;
+	hda_nid_t eapds[4];
+	bool dynamic_eapd;
+
+#ifdef ENABLE_CXT_STATIC_QUIRKS
+	const struct snd_kcontrol_new *mixers[5];
 	int num_mixers;
 	hda_nid_t vmaster_nid;
 
@@ -82,14 +84,12 @@ struct conexant_spec {
 					 */
 	unsigned int cur_eapd;
 	unsigned int hp_present;
+	unsigned int line_present;
 	unsigned int auto_mic;
-	int auto_mic_ext;		/* autocfg.inputs[] index for ext mic */
-	unsigned int need_dac_fix;
-	hda_nid_t slave_dig_outs[2];
 
 	/* capture */
 	unsigned int num_adc_nids;
-	hda_nid_t *adc_nids;
+	const hda_nid_t *adc_nids;
 	hda_nid_t dig_in_nid;		/* digital-in NID; optional */
 
 	unsigned int cur_adc_idx;
@@ -97,9 +97,11 @@ struct conexant_spec {
 	unsigned int cur_adc_stream_tag;
 	unsigned int cur_adc_format;
 
+	const struct hda_pcm_stream *capture_stream;
+
 	/* capture source */
 	const struct hda_input_mux *input_mux;
-	hda_nid_t *capsrc_nids;
+	const hda_nid_t *capsrc_nids;
 	unsigned int cur_mux[3];
 
 	/* channel model */
@@ -111,18 +113,7 @@ struct conexant_spec {
 
 	unsigned int spdif_route;
 
-	/* jack detection */
-	struct snd_array jacks;
-
-	/* dynamic controls, init_verbs and input_mux */
-	struct auto_pin_cfg autocfg;
-	struct hda_input_mux private_imux;
-	hda_nid_t private_dac_nids[AUTO_CFG_MAX_OUTS];
-	struct pin_dac_pair dac_info[8];
-	int dac_info_filled;
-
 	unsigned int port_d_mode;
-	unsigned int auto_mute:1;	/* used in auto-parser */
 	unsigned int dell_automute:1;
 	unsigned int dell_vostro:1;
 	unsigned int ideapad:1;
@@ -144,10 +135,52 @@ struct conexant_spec {
 	unsigned int dc_enable;
 	unsigned int dc_input_bias; /* offset into cxt5066_olpc_dc_bias */
 	unsigned int mic_boost; /* offset into cxt5066_analog_mic_boost */
-
-	unsigned int beep_amp;
+#endif /* ENABLE_CXT_STATIC_QUIRKS */
 };
 
+
+#ifdef CONFIG_SND_HDA_INPUT_BEEP
+static inline void set_beep_amp(struct conexant_spec *spec, hda_nid_t nid,
+				int idx, int dir)
+{
+	spec->gen.beep_nid = nid;
+	spec->beep_amp = HDA_COMPOSE_AMP_VAL(nid, 1, idx, dir);
+}
+/* additional beep mixers; the actual parameters are overwritten at build */
+static const struct snd_kcontrol_new cxt_beep_mixer[] = {
+	HDA_CODEC_VOLUME_MONO("Beep Playback Volume", 0, 1, 0, HDA_OUTPUT),
+	HDA_CODEC_MUTE_BEEP_MONO("Beep Playback Switch", 0, 1, 0, HDA_OUTPUT),
+	{ } /* end */
+};
+
+/* create beep controls if needed */
+static int add_beep_ctls(struct hda_codec *codec)
+{
+	struct conexant_spec *spec = codec->spec;
+	int err;
+
+	if (spec->beep_amp) {
+		const struct snd_kcontrol_new *knew;
+		for (knew = cxt_beep_mixer; knew->name; knew++) {
+			struct snd_kcontrol *kctl;
+			kctl = snd_ctl_new1(knew, codec);
+			if (!kctl)
+				return -ENOMEM;
+			kctl->private_value = spec->beep_amp;
+			err = snd_hda_ctl_add(codec, 0, kctl);
+			if (err < 0)
+				return err;
+		}
+	}
+	return 0;
+}
+#else
+#define set_beep_amp(spec, nid, idx, dir) /* NOP */
+#define add_beep_ctls(codec)	0
+#endif
+
+
+#ifdef ENABLE_CXT_STATIC_QUIRKS
 static int conexant_playback_pcm_open(struct hda_pcm_stream *hinfo,
 				      struct hda_codec *codec,
 				      struct snd_pcm_substream *substream)
@@ -238,7 +271,7 @@ static int conexant_capture_pcm_cleanup(struct hda_pcm_stream *hinfo,
 
 
 
-static struct hda_pcm_stream conexant_pcm_analog_playback = {
+static const struct hda_pcm_stream conexant_pcm_analog_playback = {
 	.substreams = 1,
 	.channels_min = 2,
 	.channels_max = 2,
@@ -250,7 +283,7 @@ static struct hda_pcm_stream conexant_pcm_analog_playback = {
 	},
 };
 
-static struct hda_pcm_stream conexant_pcm_analog_capture = {
+static const struct hda_pcm_stream conexant_pcm_analog_capture = {
 	.substreams = 1,
 	.channels_min = 2,
 	.channels_max = 2,
@@ -262,7 +295,7 @@ static struct hda_pcm_stream conexant_pcm_analog_capture = {
 };
 
 
-static struct hda_pcm_stream conexant_pcm_digital_playback = {
+static const struct hda_pcm_stream conexant_pcm_digital_playback = {
 	.substreams = 1,
 	.channels_min = 2,
 	.channels_max = 2,
@@ -274,7 +307,7 @@ static struct hda_pcm_stream conexant_pcm_digital_playback = {
 	},
 };
 
-static struct hda_pcm_stream conexant_pcm_digital_capture = {
+static const struct hda_pcm_stream conexant_pcm_digital_capture = {
 	.substreams = 1,
 	.channels_min = 2,
 	.channels_max = 2,
@@ -305,7 +338,7 @@ static int cx5051_capture_pcm_cleanup(struct hda_pcm_stream *hinfo,
 	return 0;
 }
 
-static struct hda_pcm_stream cx5051_pcm_analog_capture = {
+static const struct hda_pcm_stream cx5051_pcm_analog_capture = {
 	.substreams = 1,
 	.channels_min = 2,
 	.channels_max = 2,
@@ -330,13 +363,19 @@ static int conexant_build_pcms(struct hda_codec *codec)
 		spec->multiout.max_channels;
 	info->stream[SNDRV_PCM_STREAM_PLAYBACK].nid =
 		spec->multiout.dac_nids[0];
-	if (codec->vendor_id == 0x14f15051)
-		info->stream[SNDRV_PCM_STREAM_CAPTURE] =
-			cx5051_pcm_analog_capture;
-	else
-		info->stream[SNDRV_PCM_STREAM_CAPTURE] =
-			conexant_pcm_analog_capture;
-	info->stream[SNDRV_PCM_STREAM_CAPTURE].substreams = spec->num_adc_nids;
+	if (spec->capture_stream)
+		info->stream[SNDRV_PCM_STREAM_CAPTURE] = *spec->capture_stream;
+	else {
+		if (codec->vendor_id == 0x14f15051)
+			info->stream[SNDRV_PCM_STREAM_CAPTURE] =
+				cx5051_pcm_analog_capture;
+		else {
+			info->stream[SNDRV_PCM_STREAM_CAPTURE] =
+				conexant_pcm_analog_capture;
+			info->stream[SNDRV_PCM_STREAM_CAPTURE].substreams =
+				spec->num_adc_nids;
+		}
+	}
 	info->stream[SNDRV_PCM_STREAM_CAPTURE].nid = spec->adc_nids[0];
 
 	if (spec->multiout.dig_out_nid) {
@@ -354,8 +393,6 @@ static int conexant_build_pcms(struct hda_codec *codec)
 			info->stream[SNDRV_PCM_STREAM_CAPTURE].nid =
 				spec->dig_in_nid;
 		}
-		if (spec->slave_dig_outs[0])
-			codec->slave_dig_outs = spec->slave_dig_outs;
 	}
 
 	return 0;
@@ -393,111 +430,18 @@ static int conexant_mux_enum_put(struct snd_kcontrol *kcontrol,
 				     &spec->cur_mux[adc_idx]);
 }
 
-#ifdef CONFIG_SND_HDA_INPUT_JACK
-static void conexant_free_jack_priv(struct snd_jack *jack)
+static void conexant_set_power(struct hda_codec *codec, hda_nid_t fg,
+			       unsigned int power_state)
 {
-	struct conexant_jack *jacks = jack->private_data;
-	jacks->nid = 0;
-	jacks->jack = NULL;
+	if (power_state == AC_PWRST_D3)
+		msleep(100);
+	snd_hda_codec_read(codec, fg, 0, AC_VERB_SET_POWER_STATE,
+			    power_state);
+	/* partial workaround for "azx_get_response timeout" */
+	if (power_state == AC_PWRST_D0)
+		msleep(10);
+	snd_hda_codec_set_power_to_all(codec, fg, power_state);
 }
-
-static int conexant_add_jack(struct hda_codec *codec,
-		hda_nid_t nid, int type)
-{
-	struct conexant_spec *spec;
-	struct conexant_jack *jack;
-	const char *name;
-	int i, err;
-
-	spec = codec->spec;
-	snd_array_init(&spec->jacks, sizeof(*jack), 32);
-
-	jack = spec->jacks.list;
-	for (i = 0; i < spec->jacks.used; i++, jack++)
-		if (jack->nid == nid)
-			return 0 ; /* already present */
-
-	jack = snd_array_new(&spec->jacks);
-	name = (type == SND_JACK_HEADPHONE) ? "Headphone" : "Mic" ;
-
-	if (!jack)
-		return -ENOMEM;
-
-	jack->nid = nid;
-	jack->type = type;
-
-	err = snd_jack_new(codec->bus->card, name, type, &jack->jack);
-	if (err < 0)
-		return err;
-	jack->jack->private_data = jack;
-	jack->jack->private_free = conexant_free_jack_priv;
-	return 0;
-}
-
-static void conexant_report_jack(struct hda_codec *codec, hda_nid_t nid)
-{
-	struct conexant_spec *spec = codec->spec;
-	struct conexant_jack *jacks = spec->jacks.list;
-
-	if (jacks) {
-		int i;
-		for (i = 0; i < spec->jacks.used; i++) {
-			if (jacks->nid == nid) {
-				unsigned int present;
-				present = snd_hda_jack_detect(codec, nid);
-
-				present = (present) ? jacks->type : 0 ;
-
-				snd_jack_report(jacks->jack,
-						present);
-			}
-			jacks++;
-		}
-	}
-}
-
-static int conexant_init_jacks(struct hda_codec *codec)
-{
-	struct conexant_spec *spec = codec->spec;
-	int i;
-
-	for (i = 0; i < spec->num_init_verbs; i++) {
-		const struct hda_verb *hv;
-
-		hv = spec->init_verbs[i];
-		while (hv->nid) {
-			int err = 0;
-			switch (hv->param ^ AC_USRSP_EN) {
-			case CONEXANT_HP_EVENT:
-				err = conexant_add_jack(codec, hv->nid,
-						SND_JACK_HEADPHONE);
-				conexant_report_jack(codec, hv->nid);
-				break;
-			case CXT5051_PORTC_EVENT:
-			case CONEXANT_MIC_EVENT:
-				err = conexant_add_jack(codec, hv->nid,
-						SND_JACK_MICROPHONE);
-				conexant_report_jack(codec, hv->nid);
-				break;
-			}
-			if (err < 0)
-				return err;
-			++hv;
-		}
-	}
-	return 0;
-
-}
-#else
-static inline void conexant_report_jack(struct hda_codec *codec, hda_nid_t nid)
-{
-}
-
-static inline int conexant_init_jacks(struct hda_codec *codec)
-{
-	return 0;
-}
-#endif
 
 static int conexant_init(struct hda_codec *codec)
 {
@@ -511,23 +455,12 @@ static int conexant_init(struct hda_codec *codec)
 
 static void conexant_free(struct hda_codec *codec)
 {
-#ifdef CONFIG_SND_HDA_INPUT_JACK
 	struct conexant_spec *spec = codec->spec;
-	if (spec->jacks.list) {
-		struct conexant_jack *jacks = spec->jacks.list;
-		int i;
-		for (i = 0; i < spec->jacks.used; i++, jacks++) {
-			if (jacks->jack)
-				snd_device_free(codec->bus->card, jacks->jack);
-		}
-		snd_array_free(&spec->jacks);
-	}
-#endif
 	snd_hda_detach_beep_device(codec);
-	kfree(codec->spec);
+	kfree(spec);
 }
 
-static struct snd_kcontrol_new cxt_capture_mixers[] = {
+static const struct snd_kcontrol_new cxt_capture_mixers[] = {
 	{
 		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 		.name = "Capture Source",
@@ -538,24 +471,8 @@ static struct snd_kcontrol_new cxt_capture_mixers[] = {
 	{}
 };
 
-#ifdef CONFIG_SND_HDA_INPUT_BEEP
-/* additional beep mixers; the actual parameters are overwritten at build */
-static struct snd_kcontrol_new cxt_beep_mixer[] = {
-	HDA_CODEC_VOLUME_MONO("Beep Playback Volume", 0, 1, 0, HDA_OUTPUT),
-	HDA_CODEC_MUTE_BEEP_MONO("Beep Playback Switch", 0, 1, 0, HDA_OUTPUT),
-	{ } /* end */
-};
-#endif
-
-static const char * const slave_vols[] = {
-	"Headphone Playback Volume",
-	"Speaker Playback Volume",
-	NULL
-};
-
-static const char * const slave_sws[] = {
-	"Headphone Playback Switch",
-	"Speaker Playback Switch",
+static const char * const slave_pfxs[] = {
+	"Headphone", "Speaker", "Bass Speaker", "Front", "Surround", "CLFE",
 	NULL
 };
 
@@ -572,6 +489,7 @@ static int conexant_build_controls(struct hda_codec *codec)
 	}
 	if (spec->multiout.dig_out_nid) {
 		err = snd_hda_create_spdif_out_ctls(codec,
+						    spec->multiout.dig_out_nid,
 						    spec->multiout.dig_out_nid);
 		if (err < 0)
 			return err;
@@ -594,14 +512,16 @@ static int conexant_build_controls(struct hda_codec *codec)
 		snd_hda_set_vmaster_tlv(codec, spec->vmaster_nid,
 					HDA_OUTPUT, vmaster_tlv);
 		err = snd_hda_add_vmaster(codec, "Master Playback Volume",
-					  vmaster_tlv, slave_vols);
+					  vmaster_tlv, slave_pfxs,
+					  "Playback Volume");
 		if (err < 0)
 			return err;
 	}
 	if (spec->vmaster_nid &&
 	    !snd_hda_find_mixer_ctl(codec, "Master Playback Switch")) {
 		err = snd_hda_add_vmaster(codec, "Master Playback Switch",
-					  NULL, slave_sws);
+					  NULL, slave_pfxs,
+					  "Playback Switch");
 		if (err < 0)
 			return err;
 	}
@@ -612,52 +532,22 @@ static int conexant_build_controls(struct hda_codec *codec)
 			return err;
 	}
 
-#ifdef CONFIG_SND_HDA_INPUT_BEEP
-	/* create beep controls if needed */
-	if (spec->beep_amp) {
-		struct snd_kcontrol_new *knew;
-		for (knew = cxt_beep_mixer; knew->name; knew++) {
-			struct snd_kcontrol *kctl;
-			kctl = snd_ctl_new1(knew, codec);
-			if (!kctl)
-				return -ENOMEM;
-			kctl->private_value = spec->beep_amp;
-			err = snd_hda_ctl_add(codec, 0, kctl);
-			if (err < 0)
-				return err;
-		}
-	}
-#endif
+	err = add_beep_ctls(codec);
+	if (err < 0)
+		return err;
 
 	return 0;
 }
 
-#ifdef CONFIG_SND_HDA_POWER_SAVE
-static int conexant_suspend(struct hda_codec *codec, pm_message_t state)
-{
-	snd_hda_shutup_pins(codec);
-	return 0;
-}
-#endif
-
-static struct hda_codec_ops conexant_patch_ops = {
+static const struct hda_codec_ops conexant_patch_ops = {
 	.build_controls = conexant_build_controls,
 	.build_pcms = conexant_build_pcms,
 	.init = conexant_init,
 	.free = conexant_free,
-#ifdef CONFIG_SND_HDA_POWER_SAVE
-	.suspend = conexant_suspend,
-#endif
-	.reboot_notify = snd_hda_shutup_pins,
+	.set_power_state = conexant_set_power,
 };
 
-#ifdef CONFIG_SND_HDA_INPUT_BEEP
-#define set_beep_amp(spec, nid, idx, dir) \
-	((spec)->beep_amp = HDA_COMPOSE_AMP_VAL(nid, 1, idx, dir))
-#else
-#define set_beep_amp(spec, nid, idx, dir) /* NOP */
-#endif
-
+static int patch_conexant_auto(struct hda_codec *codec);
 /*
  * EAPD control
  * the private value = nid | (invert << 8)
@@ -740,8 +630,6 @@ static int conexant_ch_mode_put(struct snd_kcontrol *kcontrol,
 	int err = snd_hda_ch_mode_put(codec, ucontrol, spec->channel_mode,
 				      spec->num_channel_mode,
 				      &spec->multiout.max_channels);
-	if (err >= 0 && spec->need_dac_fix)
-		spec->multiout.num_dacs = spec->multiout.max_channels / 2;
 	return err;
 }
 
@@ -756,39 +644,38 @@ static int conexant_ch_mode_put(struct snd_kcontrol *kcontrol,
 
 /* Conexant 5045 specific */
 
-static hda_nid_t cxt5045_dac_nids[1] = { 0x19 };
-static hda_nid_t cxt5045_adc_nids[1] = { 0x1a };
-static hda_nid_t cxt5045_capsrc_nids[1] = { 0x1a };
+static const hda_nid_t cxt5045_dac_nids[1] = { 0x19 };
+static const hda_nid_t cxt5045_adc_nids[1] = { 0x1a };
+static const hda_nid_t cxt5045_capsrc_nids[1] = { 0x1a };
 #define CXT5045_SPDIF_OUT	0x18
 
-static struct hda_channel_mode cxt5045_modes[1] = {
+static const struct hda_channel_mode cxt5045_modes[1] = {
 	{ 2, NULL },
 };
 
-static struct hda_input_mux cxt5045_capture_source = {
+static const struct hda_input_mux cxt5045_capture_source = {
 	.num_items = 2,
 	.items = {
-		{ "IntMic", 0x1 },
-		{ "ExtMic", 0x2 },
+		{ "Internal Mic", 0x1 },
+		{ "Mic",          0x2 },
 	}
 };
 
-static struct hda_input_mux cxt5045_capture_source_benq = {
-	.num_items = 5,
+static const struct hda_input_mux cxt5045_capture_source_benq = {
+	.num_items = 4,
 	.items = {
-		{ "IntMic", 0x1 },
-		{ "ExtMic", 0x2 },
-		{ "LineIn", 0x3 },
-		{ "CD",     0x4 },
-		{ "Mixer",  0x0 },
+		{ "Internal Mic", 0x1 },
+		{ "Mic",          0x2 },
+		{ "Line",         0x3 },
+		{ "Mixer",        0x0 },
 	}
 };
 
-static struct hda_input_mux cxt5045_capture_source_hp530 = {
+static const struct hda_input_mux cxt5045_capture_source_hp530 = {
 	.num_items = 2,
 	.items = {
-		{ "ExtMic", 0x1 },
-		{ "IntMic", 0x2 },
+		{ "Mic",          0x1 },
+		{ "Internal Mic", 0x2 },
 	}
 };
 
@@ -817,7 +704,7 @@ static int cxt5045_hp_master_sw_put(struct snd_kcontrol *kcontrol,
 }
 
 /* bind volumes of both NID 0x10 and 0x11 */
-static struct hda_bind_ctls cxt5045_hp_bind_master_vol = {
+static const struct hda_bind_ctls cxt5045_hp_bind_master_vol = {
 	.ops = &snd_hda_bind_vol,
 	.values = {
 		HDA_COMPOSE_AMP_VAL(0x10, 3, 0, HDA_OUTPUT),
@@ -829,12 +716,12 @@ static struct hda_bind_ctls cxt5045_hp_bind_master_vol = {
 /* toggle input of built-in and mic jack appropriately */
 static void cxt5045_hp_automic(struct hda_codec *codec)
 {
-	static struct hda_verb mic_jack_on[] = {
+	static const struct hda_verb mic_jack_on[] = {
 		{0x14, AC_VERB_SET_AMP_GAIN_MUTE, 0xb080},
 		{0x12, AC_VERB_SET_AMP_GAIN_MUTE, 0xb000},
 		{}
 	};
-	static struct hda_verb mic_jack_off[] = {
+	static const struct hda_verb mic_jack_off[] = {
 		{0x12, AC_VERB_SET_AMP_GAIN_MUTE, 0xb080},
 		{0x14, AC_VERB_SET_AMP_GAIN_MUTE, 0xb000},
 		{}
@@ -878,11 +765,9 @@ static void cxt5045_hp_unsol_event(struct hda_codec *codec,
 	}
 }
 
-static struct snd_kcontrol_new cxt5045_mixers[] = {
-	HDA_CODEC_VOLUME("Internal Mic Capture Volume", 0x1a, 0x01, HDA_INPUT),
-	HDA_CODEC_MUTE("Internal Mic Capture Switch", 0x1a, 0x01, HDA_INPUT),
-	HDA_CODEC_VOLUME("Mic Capture Volume", 0x1a, 0x02, HDA_INPUT),
-	HDA_CODEC_MUTE("Mic Capture Switch", 0x1a, 0x02, HDA_INPUT),
+static const struct snd_kcontrol_new cxt5045_mixers[] = {
+	HDA_CODEC_VOLUME("Capture Volume", 0x1a, 0x00, HDA_INPUT),
+	HDA_CODEC_MUTE("Capture Switch", 0x1a, 0x0, HDA_INPUT),
 	HDA_CODEC_VOLUME("PCM Playback Volume", 0x17, 0x0, HDA_INPUT),
 	HDA_CODEC_MUTE("PCM Playback Switch", 0x17, 0x0, HDA_INPUT),
 	HDA_CODEC_VOLUME("Internal Mic Playback Volume", 0x17, 0x1, HDA_INPUT),
@@ -902,28 +787,16 @@ static struct snd_kcontrol_new cxt5045_mixers[] = {
 	{}
 };
 
-static struct snd_kcontrol_new cxt5045_benq_mixers[] = {
-	HDA_CODEC_VOLUME("CD Capture Volume", 0x1a, 0x04, HDA_INPUT),
-	HDA_CODEC_MUTE("CD Capture Switch", 0x1a, 0x04, HDA_INPUT),
-	HDA_CODEC_VOLUME("CD Playback Volume", 0x17, 0x4, HDA_INPUT),
-	HDA_CODEC_MUTE("CD Playback Switch", 0x17, 0x4, HDA_INPUT),
-
-	HDA_CODEC_VOLUME("Line In Capture Volume", 0x1a, 0x03, HDA_INPUT),
-	HDA_CODEC_MUTE("Line In Capture Switch", 0x1a, 0x03, HDA_INPUT),
-	HDA_CODEC_VOLUME("Line In Playback Volume", 0x17, 0x3, HDA_INPUT),
-	HDA_CODEC_MUTE("Line In Playback Switch", 0x17, 0x3, HDA_INPUT),
-
-	HDA_CODEC_VOLUME("Mixer Capture Volume", 0x1a, 0x0, HDA_INPUT),
-	HDA_CODEC_MUTE("Mixer Capture Switch", 0x1a, 0x0, HDA_INPUT),
+static const struct snd_kcontrol_new cxt5045_benq_mixers[] = {
+	HDA_CODEC_VOLUME("Line Playback Volume", 0x17, 0x3, HDA_INPUT),
+	HDA_CODEC_MUTE("Line Playback Switch", 0x17, 0x3, HDA_INPUT),
 
 	{}
 };
 
-static struct snd_kcontrol_new cxt5045_mixers_hp530[] = {
-	HDA_CODEC_VOLUME("Internal Mic Capture Volume", 0x1a, 0x02, HDA_INPUT),
-	HDA_CODEC_MUTE("Internal Mic Capture Switch", 0x1a, 0x02, HDA_INPUT),
-	HDA_CODEC_VOLUME("Mic Capture Volume", 0x1a, 0x01, HDA_INPUT),
-	HDA_CODEC_MUTE("Mic Capture Switch", 0x1a, 0x01, HDA_INPUT),
+static const struct snd_kcontrol_new cxt5045_mixers_hp530[] = {
+	HDA_CODEC_VOLUME("Capture Volume", 0x1a, 0x00, HDA_INPUT),
+	HDA_CODEC_MUTE("Capture Switch", 0x1a, 0x0, HDA_INPUT),
 	HDA_CODEC_VOLUME("PCM Playback Volume", 0x17, 0x0, HDA_INPUT),
 	HDA_CODEC_MUTE("PCM Playback Switch", 0x17, 0x0, HDA_INPUT),
 	HDA_CODEC_VOLUME("Internal Mic Playback Volume", 0x17, 0x2, HDA_INPUT),
@@ -943,7 +816,7 @@ static struct snd_kcontrol_new cxt5045_mixers_hp530[] = {
 	{}
 };
 
-static struct hda_verb cxt5045_init_verbs[] = {
+static const struct hda_verb cxt5045_init_verbs[] = {
 	/* Line in, Mic */
 	{0x12, AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_IN|AC_PINCTL_VREF_80 },
 	{0x14, AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_IN|AC_PINCTL_VREF_80 },
@@ -969,7 +842,7 @@ static struct hda_verb cxt5045_init_verbs[] = {
 	{ } /* end */
 };
 
-static struct hda_verb cxt5045_benq_init_verbs[] = {
+static const struct hda_verb cxt5045_benq_init_verbs[] = {
 	/* Internal Mic, Mic */
 	{0x12, AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_IN|AC_PINCTL_VREF_80 },
 	{0x14, AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_IN|AC_PINCTL_VREF_80 },
@@ -995,13 +868,13 @@ static struct hda_verb cxt5045_benq_init_verbs[] = {
 	{ } /* end */
 };
 
-static struct hda_verb cxt5045_hp_sense_init_verbs[] = {
+static const struct hda_verb cxt5045_hp_sense_init_verbs[] = {
 	/* pin sensing on HP jack */
 	{0x11, AC_VERB_SET_UNSOLICITED_ENABLE, AC_USRSP_EN | CONEXANT_HP_EVENT},
 	{ } /* end */
 };
 
-static struct hda_verb cxt5045_mic_sense_init_verbs[] = {
+static const struct hda_verb cxt5045_mic_sense_init_verbs[] = {
 	/* pin sensing on HP jack */
 	{0x12, AC_VERB_SET_UNSOLICITED_ENABLE, AC_USRSP_EN | CONEXANT_MIC_EVENT},
 	{ } /* end */
@@ -1011,7 +884,7 @@ static struct hda_verb cxt5045_mic_sense_init_verbs[] = {
 /* Test configuration for debugging, modelled after the ALC260 test
  * configuration.
  */
-static struct hda_input_mux cxt5045_test_capture_source = {
+static const struct hda_input_mux cxt5045_test_capture_source = {
 	.num_items = 5,
 	.items = {
 		{ "MIXER", 0x0 },
@@ -1022,15 +895,15 @@ static struct hda_input_mux cxt5045_test_capture_source = {
         },
 };
 
-static struct snd_kcontrol_new cxt5045_test_mixer[] = {
+static const struct snd_kcontrol_new cxt5045_test_mixer[] = {
 
 	/* Output controls */
 	HDA_CODEC_VOLUME("Speaker Playback Volume", 0x10, 0x0, HDA_OUTPUT),
 	HDA_CODEC_MUTE("Speaker Playback Switch", 0x10, 0x0, HDA_OUTPUT),
-	HDA_CODEC_VOLUME("Node 11 Playback Volume", 0x11, 0x0, HDA_OUTPUT),
-	HDA_CODEC_MUTE("Node 11 Playback Switch", 0x11, 0x0, HDA_OUTPUT),
-	HDA_CODEC_VOLUME("Node 12 Playback Volume", 0x12, 0x0, HDA_OUTPUT),
-	HDA_CODEC_MUTE("Node 12 Playback Switch", 0x12, 0x0, HDA_OUTPUT),
+	HDA_CODEC_VOLUME("HP-OUT Playback Volume", 0x11, 0x0, HDA_OUTPUT),
+	HDA_CODEC_MUTE("HP-OUT Playback Switch", 0x11, 0x0, HDA_OUTPUT),
+	HDA_CODEC_VOLUME("LINE1 Playback Volume", 0x12, 0x0, HDA_OUTPUT),
+	HDA_CODEC_MUTE("LINE1 Playback Switch", 0x12, 0x0, HDA_OUTPUT),
 	
 	/* Modes for retasking pin widgets */
 	CXT_PIN_MODE("HP-OUT pin mode", 0x11, CXT_PIN_DIR_INOUT),
@@ -1041,16 +914,16 @@ static struct snd_kcontrol_new cxt5045_test_mixer[] = {
 
 	/* Loopback mixer controls */
 
-	HDA_CODEC_VOLUME("Mixer-1 Volume", 0x17, 0x0, HDA_INPUT),
-	HDA_CODEC_MUTE("Mixer-1 Switch", 0x17, 0x0, HDA_INPUT),
-	HDA_CODEC_VOLUME("Mixer-2 Volume", 0x17, 0x1, HDA_INPUT),
-	HDA_CODEC_MUTE("Mixer-2 Switch", 0x17, 0x1, HDA_INPUT),
-	HDA_CODEC_VOLUME("Mixer-3 Volume", 0x17, 0x2, HDA_INPUT),
-	HDA_CODEC_MUTE("Mixer-3 Switch", 0x17, 0x2, HDA_INPUT),
-	HDA_CODEC_VOLUME("Mixer-4 Volume", 0x17, 0x3, HDA_INPUT),
-	HDA_CODEC_MUTE("Mixer-4 Switch", 0x17, 0x3, HDA_INPUT),
-	HDA_CODEC_VOLUME("Mixer-5 Volume", 0x17, 0x4, HDA_INPUT),
-	HDA_CODEC_MUTE("Mixer-5 Switch", 0x17, 0x4, HDA_INPUT),
+	HDA_CODEC_VOLUME("PCM Volume", 0x17, 0x0, HDA_INPUT),
+	HDA_CODEC_MUTE("PCM Switch", 0x17, 0x0, HDA_INPUT),
+	HDA_CODEC_VOLUME("MIC1 pin Volume", 0x17, 0x1, HDA_INPUT),
+	HDA_CODEC_MUTE("MIC1 pin Switch", 0x17, 0x1, HDA_INPUT),
+	HDA_CODEC_VOLUME("LINE1 pin Volume", 0x17, 0x2, HDA_INPUT),
+	HDA_CODEC_MUTE("LINE1 pin Switch", 0x17, 0x2, HDA_INPUT),
+	HDA_CODEC_VOLUME("HP-OUT pin Volume", 0x17, 0x3, HDA_INPUT),
+	HDA_CODEC_MUTE("HP-OUT pin Switch", 0x17, 0x3, HDA_INPUT),
+	HDA_CODEC_VOLUME("CD pin Volume", 0x17, 0x4, HDA_INPUT),
+	HDA_CODEC_MUTE("CD pin Switch", 0x17, 0x4, HDA_INPUT),
 	{
 		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 		.name = "Input Source",
@@ -1059,20 +932,12 @@ static struct snd_kcontrol_new cxt5045_test_mixer[] = {
 		.put = conexant_mux_enum_put,
 	},
 	/* Audio input controls */
-	HDA_CODEC_VOLUME("Input-1 Volume", 0x1a, 0x0, HDA_INPUT),
-	HDA_CODEC_MUTE("Input-1 Switch", 0x1a, 0x0, HDA_INPUT),
-	HDA_CODEC_VOLUME("Input-2 Volume", 0x1a, 0x1, HDA_INPUT),
-	HDA_CODEC_MUTE("Input-2 Switch", 0x1a, 0x1, HDA_INPUT),
-	HDA_CODEC_VOLUME("Input-3 Volume", 0x1a, 0x2, HDA_INPUT),
-	HDA_CODEC_MUTE("Input-3 Switch", 0x1a, 0x2, HDA_INPUT),
-	HDA_CODEC_VOLUME("Input-4 Volume", 0x1a, 0x3, HDA_INPUT),
-	HDA_CODEC_MUTE("Input-4 Switch", 0x1a, 0x3, HDA_INPUT),
-	HDA_CODEC_VOLUME("Input-5 Volume", 0x1a, 0x4, HDA_INPUT),
-	HDA_CODEC_MUTE("Input-5 Switch", 0x1a, 0x4, HDA_INPUT),
+	HDA_CODEC_VOLUME("Capture Volume", 0x1a, 0x0, HDA_INPUT),
+	HDA_CODEC_MUTE("Capture Switch", 0x1a, 0x0, HDA_INPUT),
 	{ } /* end */
 };
 
-static struct hda_verb cxt5045_test_init_verbs[] = {
+static const struct hda_verb cxt5045_test_init_verbs[] = {
 	/* Set connections */
 	{ 0x10, AC_VERB_SET_CONNECT_SEL, 0x0 },
 	{ 0x11, AC_VERB_SET_CONNECT_SEL, 0x0 },
@@ -1090,10 +955,6 @@ static struct hda_verb cxt5045_test_init_verbs[] = {
 	{0x13, AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_OUT},
 	{0x18, AC_VERB_SET_DIGI_CONVERT_1, 0},
 
-	/* Start with output sum widgets muted and their output gains at min */
-	{0x17, AC_VERB_SET_AMP_GAIN_MUTE, AMP_IN_MUTE(0)},
-	{0x17, AC_VERB_SET_AMP_GAIN_MUTE, AMP_IN_MUTE(1)},
-
 	/* Unmute retasking pin widget output buffers since the default
 	 * state appears to be output.  As the pin mode is changed by the
 	 * user the pin mode control will take care of enabling the pin's
@@ -1108,11 +969,11 @@ static struct hda_verb cxt5045_test_init_verbs[] = {
 	/* Set ADC connection select to match default mixer setting (mic1
 	 * pin)
 	 */
-	{0x1a, AC_VERB_SET_CONNECT_SEL, 0x00},
-	{0x17, AC_VERB_SET_CONNECT_SEL, 0x00},
+	{0x1a, AC_VERB_SET_CONNECT_SEL, 0x01},
+	{0x17, AC_VERB_SET_CONNECT_SEL, 0x01},
 
 	/* Mute all inputs to mixer widget (even unconnected ones) */
-	{0x17, AC_VERB_SET_AMP_GAIN_MUTE, AMP_IN_MUTE(0)}, /* Mixer pin */
+	{0x17, AC_VERB_SET_AMP_GAIN_MUTE, AMP_IN_MUTE(0)}, /* Mixer */
 	{0x17, AC_VERB_SET_AMP_GAIN_MUTE, AMP_IN_MUTE(1)}, /* Mic1 pin */
 	{0x17, AC_VERB_SET_AMP_GAIN_MUTE, AMP_IN_MUTE(2)}, /* Line pin */
 	{0x17, AC_VERB_SET_AMP_GAIN_MUTE, AMP_IN_MUTE(3)}, /* HP pin */
@@ -1141,6 +1002,7 @@ enum {
 #ifdef CONFIG_SND_DEBUG
 	CXT5045_TEST,
 #endif
+	CXT5045_AUTO,
 	CXT5045_MODELS
 };
 
@@ -1153,12 +1015,11 @@ static const char * const cxt5045_models[CXT5045_MODELS] = {
 #ifdef CONFIG_SND_DEBUG
 	[CXT5045_TEST]		= "test",
 #endif
+	[CXT5045_AUTO]			= "auto",
 };
 
-static struct snd_pci_quirk cxt5045_cfg_tbl[] = {
+static const struct snd_pci_quirk cxt5045_cfg_tbl[] = {
 	SND_PCI_QUIRK(0x103c, 0x30d5, "HP 530", CXT5045_LAPTOP_HP530),
-	SND_PCI_QUIRK_MASK(0x103c, 0xff00, 0x3000, "HP DV Series",
-			   CXT5045_LAPTOP_HPSENSE),
 	SND_PCI_QUIRK(0x1179, 0xff31, "Toshiba P105", CXT5045_LAPTOP_MICSENSE),
 	SND_PCI_QUIRK(0x152d, 0x0753, "Benq R55E", CXT5045_BENQ),
 	SND_PCI_QUIRK(0x1734, 0x10ad, "Fujitsu Si1520", CXT5045_LAPTOP_MICSENSE),
@@ -1179,11 +1040,19 @@ static int patch_cxt5045(struct hda_codec *codec)
 	struct conexant_spec *spec;
 	int board_config;
 
+	board_config = snd_hda_check_board_config(codec, CXT5045_MODELS,
+						  cxt5045_models,
+						  cxt5045_cfg_tbl);
+	if (board_config < 0)
+		board_config = CXT5045_AUTO; /* model=auto as default */
+	if (board_config == CXT5045_AUTO)
+		return patch_conexant_auto(codec);
+
 	spec = kzalloc(sizeof(*spec), GFP_KERNEL);
 	if (!spec)
 		return -ENOMEM;
 	codec->spec = spec;
-	codec->pin_amp_workaround = 1;
+	codec->single_adc_amp = 1;
 
 	spec->multiout.max_channels = 2;
 	spec->multiout.num_dacs = ARRAY_SIZE(cxt5045_dac_nids);
@@ -1205,9 +1074,6 @@ static int patch_cxt5045(struct hda_codec *codec)
 
 	codec->patch_ops = conexant_patch_ops;
 
-	board_config = snd_hda_check_board_config(codec, CXT5045_MODELS,
-						  cxt5045_models,
-						  cxt5045_cfg_tbl);
 	switch (board_config) {
 	case CXT5045_LAPTOP_HPSENSE:
 		codec->patch_ops.unsol_event = cxt5045_hp_unsol_event;
@@ -1281,7 +1147,7 @@ static int patch_cxt5045(struct hda_codec *codec)
 	}
 
 	if (spec->beep_amp)
-		snd_hda_attach_beep_device(codec, spec->beep_amp);
+		snd_hda_attach_beep_device(codec, get_amp_nid_(spec->beep_amp));
 
 	return 0;
 }
@@ -1290,15 +1156,15 @@ static int patch_cxt5045(struct hda_codec *codec)
 /* Conexant 5047 specific */
 #define CXT5047_SPDIF_OUT	0x11
 
-static hda_nid_t cxt5047_dac_nids[1] = { 0x10 }; /* 0x1c */
-static hda_nid_t cxt5047_adc_nids[1] = { 0x12 };
-static hda_nid_t cxt5047_capsrc_nids[1] = { 0x1a };
+static const hda_nid_t cxt5047_dac_nids[1] = { 0x10 }; /* 0x1c */
+static const hda_nid_t cxt5047_adc_nids[1] = { 0x12 };
+static const hda_nid_t cxt5047_capsrc_nids[1] = { 0x1a };
 
-static struct hda_channel_mode cxt5047_modes[1] = {
+static const struct hda_channel_mode cxt5047_modes[1] = {
 	{ 2, NULL },
 };
 
-static struct hda_input_mux cxt5047_toshiba_capture_source = {
+static const struct hda_input_mux cxt5047_toshiba_capture_source = {
 	.num_items = 2,
 	.items = {
 		{ "ExtMic", 0x2 },
@@ -1350,12 +1216,12 @@ static void cxt5047_hp_automute(struct hda_codec *codec)
 /* toggle input of built-in and mic jack appropriately */
 static void cxt5047_hp_automic(struct hda_codec *codec)
 {
-	static struct hda_verb mic_jack_on[] = {
+	static const struct hda_verb mic_jack_on[] = {
 		{0x15, AC_VERB_SET_AMP_GAIN_MUTE, AMP_OUT_MUTE},
 		{0x17, AC_VERB_SET_AMP_GAIN_MUTE, AMP_OUT_UNMUTE},
 		{}
 	};
-	static struct hda_verb mic_jack_off[] = {
+	static const struct hda_verb mic_jack_off[] = {
 		{0x17, AC_VERB_SET_AMP_GAIN_MUTE, AMP_OUT_MUTE},
 		{0x15, AC_VERB_SET_AMP_GAIN_MUTE, AMP_OUT_UNMUTE},
 		{}
@@ -1383,7 +1249,7 @@ static void cxt5047_hp_unsol_event(struct hda_codec *codec,
 	}
 }
 
-static struct snd_kcontrol_new cxt5047_base_mixers[] = {
+static const struct snd_kcontrol_new cxt5047_base_mixers[] = {
 	HDA_CODEC_VOLUME("Mic Playback Volume", 0x19, 0x02, HDA_INPUT),
 	HDA_CODEC_MUTE("Mic Playback Switch", 0x19, 0x02, HDA_INPUT),
 	HDA_CODEC_VOLUME("Mic Boost Volume", 0x1a, 0x0, HDA_OUTPUT),
@@ -1403,19 +1269,19 @@ static struct snd_kcontrol_new cxt5047_base_mixers[] = {
 	{}
 };
 
-static struct snd_kcontrol_new cxt5047_hp_spk_mixers[] = {
+static const struct snd_kcontrol_new cxt5047_hp_spk_mixers[] = {
 	/* See the note in cxt5047_hp_master_sw_put */
 	HDA_CODEC_VOLUME("Speaker Playback Volume", 0x1d, 0x01, HDA_OUTPUT),
 	HDA_CODEC_VOLUME("Headphone Playback Volume", 0x13, 0x00, HDA_OUTPUT),
 	{}
 };
 
-static struct snd_kcontrol_new cxt5047_hp_only_mixers[] = {
+static const struct snd_kcontrol_new cxt5047_hp_only_mixers[] = {
 	HDA_CODEC_VOLUME("Master Playback Volume", 0x13, 0x00, HDA_OUTPUT),
 	{ } /* end */
 };
 
-static struct hda_verb cxt5047_init_verbs[] = {
+static const struct hda_verb cxt5047_init_verbs[] = {
 	/* Line in, Mic, Built-in Mic */
 	{0x14, AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_IN },
 	{0x15, AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_IN|AC_PINCTL_VREF_50 },
@@ -1442,7 +1308,7 @@ static struct hda_verb cxt5047_init_verbs[] = {
 };
 
 /* configuration for Toshiba Laptops */
-static struct hda_verb cxt5047_toshiba_init_verbs[] = {
+static const struct hda_verb cxt5047_toshiba_init_verbs[] = {
 	{0x13, AC_VERB_SET_EAPD_BTLENABLE, 0x0}, /* default off */
 	{}
 };
@@ -1451,7 +1317,7 @@ static struct hda_verb cxt5047_toshiba_init_verbs[] = {
  * configuration.
  */
 #ifdef CONFIG_SND_DEBUG
-static struct hda_input_mux cxt5047_test_capture_source = {
+static const struct hda_input_mux cxt5047_test_capture_source = {
 	.num_items = 4,
 	.items = {
 		{ "LINE1 pin", 0x0 },
@@ -1461,7 +1327,7 @@ static struct hda_input_mux cxt5047_test_capture_source = {
         },
 };
 
-static struct snd_kcontrol_new cxt5047_test_mixer[] = {
+static const struct snd_kcontrol_new cxt5047_test_mixer[] = {
 
 	/* Output only controls */
 	HDA_CODEC_VOLUME("OutAmp-1 Volume", 0x10, 0x0, HDA_OUTPUT),
@@ -1514,7 +1380,7 @@ static struct snd_kcontrol_new cxt5047_test_mixer[] = {
 	{ } /* end */
 };
 
-static struct hda_verb cxt5047_test_init_verbs[] = {
+static const struct hda_verb cxt5047_test_init_verbs[] = {
 	/* Enable retasking pins as output, initially without power amp */
 	{0x15, AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_OUT},
 	{0x14, AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_OUT},
@@ -1586,6 +1452,7 @@ enum {
 #ifdef CONFIG_SND_DEBUG
 	CXT5047_TEST,
 #endif
+	CXT5047_AUTO,
 	CXT5047_MODELS
 };
 
@@ -1596,9 +1463,10 @@ static const char * const cxt5047_models[CXT5047_MODELS] = {
 #ifdef CONFIG_SND_DEBUG
 	[CXT5047_TEST]		= "test",
 #endif
+	[CXT5047_AUTO]		= "auto",
 };
 
-static struct snd_pci_quirk cxt5047_cfg_tbl[] = {
+static const struct snd_pci_quirk cxt5047_cfg_tbl[] = {
 	SND_PCI_QUIRK(0x103c, 0x30a5, "HP DV5200T/DV8000T", CXT5047_LAPTOP_HP),
 	SND_PCI_QUIRK_MASK(0x103c, 0xff00, 0x3000, "HP DV Series",
 			   CXT5047_LAPTOP),
@@ -1610,6 +1478,14 @@ static int patch_cxt5047(struct hda_codec *codec)
 {
 	struct conexant_spec *spec;
 	int board_config;
+
+	board_config = snd_hda_check_board_config(codec, CXT5047_MODELS,
+						  cxt5047_models,
+						  cxt5047_cfg_tbl);
+	if (board_config < 0)
+		board_config = CXT5047_AUTO; /* model=auto as default */
+	if (board_config == CXT5047_AUTO)
+		return patch_conexant_auto(codec);
 
 	spec = kzalloc(sizeof(*spec), GFP_KERNEL);
 	if (!spec)
@@ -1634,9 +1510,6 @@ static int patch_cxt5047(struct hda_codec *codec)
 
 	codec->patch_ops = conexant_patch_ops;
 
-	board_config = snd_hda_check_board_config(codec, CXT5047_MODELS,
-						  cxt5047_models,
-						  cxt5047_cfg_tbl);
 	switch (board_config) {
 	case CXT5047_LAPTOP:
 		spec->num_mixers = 2;
@@ -1685,10 +1558,10 @@ static int patch_cxt5047(struct hda_codec *codec)
 }
 
 /* Conexant 5051 specific */
-static hda_nid_t cxt5051_dac_nids[1] = { 0x10 };
-static hda_nid_t cxt5051_adc_nids[2] = { 0x14, 0x15 };
+static const hda_nid_t cxt5051_dac_nids[1] = { 0x10 };
+static const hda_nid_t cxt5051_adc_nids[2] = { 0x14, 0x15 };
 
-static struct hda_channel_mode cxt5051_modes[1] = {
+static const struct hda_channel_mode cxt5051_modes[1] = {
 	{ 2, NULL },
 };
 
@@ -1698,17 +1571,13 @@ static void cxt5051_update_speaker(struct hda_codec *codec)
 	unsigned int pinctl;
 	/* headphone pin */
 	pinctl = (spec->hp_present && spec->cur_eapd) ? PIN_HP : 0;
-	snd_hda_codec_write(codec, 0x16, 0, AC_VERB_SET_PIN_WIDGET_CONTROL,
-			    pinctl);
+	snd_hda_set_pin_ctl(codec, 0x16, pinctl);
 	/* speaker pin */
 	pinctl = (!spec->hp_present && spec->cur_eapd) ? PIN_OUT : 0;
-	snd_hda_codec_write(codec, 0x1a, 0, AC_VERB_SET_PIN_WIDGET_CONTROL,
-			    pinctl);
-	/* on ideapad there is an aditional speaker (subwoofer) to mute */
+	snd_hda_set_pin_ctl(codec, 0x1a, pinctl);
+	/* on ideapad there is an additional speaker (subwoofer) to mute */
 	if (spec->ideapad)
-		snd_hda_codec_write(codec, 0x1b, 0,
-				    AC_VERB_SET_PIN_WIDGET_CONTROL,
-				    pinctl);
+		snd_hda_set_pin_ctl(codec, 0x1b, pinctl);
 }
 
 /* turn on/off EAPD (+ mute HP) as a master switch */
@@ -1775,7 +1644,6 @@ static void cxt5051_hp_automute(struct hda_codec *codec)
 static void cxt5051_hp_unsol_event(struct hda_codec *codec,
 				   unsigned int res)
 {
-	int nid = (res & AC_UNSOL_RES_SUBTAG) >> 20;
 	switch (res >> 26) {
 	case CONEXANT_HP_EVENT:
 		cxt5051_hp_automute(codec);
@@ -1787,10 +1655,9 @@ static void cxt5051_hp_unsol_event(struct hda_codec *codec,
 		cxt5051_portc_automic(codec);
 		break;
 	}
-	conexant_report_jack(codec, nid);
 }
 
-static struct snd_kcontrol_new cxt5051_playback_mixers[] = {
+static const struct snd_kcontrol_new cxt5051_playback_mixers[] = {
 	HDA_CODEC_VOLUME("Master Playback Volume", 0x10, 0x00, HDA_OUTPUT),
 	{
 		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
@@ -1803,17 +1670,17 @@ static struct snd_kcontrol_new cxt5051_playback_mixers[] = {
 	{}
 };
 
-static struct snd_kcontrol_new cxt5051_capture_mixers[] = {
+static const struct snd_kcontrol_new cxt5051_capture_mixers[] = {
 	HDA_CODEC_VOLUME("Internal Mic Volume", 0x14, 0x00, HDA_INPUT),
 	HDA_CODEC_MUTE("Internal Mic Switch", 0x14, 0x00, HDA_INPUT),
 	HDA_CODEC_VOLUME("Mic Volume", 0x14, 0x01, HDA_INPUT),
 	HDA_CODEC_MUTE("Mic Switch", 0x14, 0x01, HDA_INPUT),
-	HDA_CODEC_VOLUME("Docking Mic Volume", 0x15, 0x00, HDA_INPUT),
-	HDA_CODEC_MUTE("Docking Mic Switch", 0x15, 0x00, HDA_INPUT),
+	HDA_CODEC_VOLUME("Dock Mic Volume", 0x15, 0x00, HDA_INPUT),
+	HDA_CODEC_MUTE("Dock Mic Switch", 0x15, 0x00, HDA_INPUT),
 	{}
 };
 
-static struct snd_kcontrol_new cxt5051_hp_mixers[] = {
+static const struct snd_kcontrol_new cxt5051_hp_mixers[] = {
 	HDA_CODEC_VOLUME("Internal Mic Volume", 0x14, 0x00, HDA_INPUT),
 	HDA_CODEC_MUTE("Internal Mic Switch", 0x14, 0x00, HDA_INPUT),
 	HDA_CODEC_VOLUME("Mic Volume", 0x15, 0x00, HDA_INPUT),
@@ -1821,19 +1688,19 @@ static struct snd_kcontrol_new cxt5051_hp_mixers[] = {
 	{}
 };
 
-static struct snd_kcontrol_new cxt5051_hp_dv6736_mixers[] = {
+static const struct snd_kcontrol_new cxt5051_hp_dv6736_mixers[] = {
 	HDA_CODEC_VOLUME("Capture Volume", 0x14, 0x00, HDA_INPUT),
 	HDA_CODEC_MUTE("Capture Switch", 0x14, 0x00, HDA_INPUT),
 	{}
 };
 
-static struct snd_kcontrol_new cxt5051_f700_mixers[] = {
+static const struct snd_kcontrol_new cxt5051_f700_mixers[] = {
 	HDA_CODEC_VOLUME("Capture Volume", 0x14, 0x01, HDA_INPUT),
 	HDA_CODEC_MUTE("Capture Switch", 0x14, 0x01, HDA_INPUT),
 	{}
 };
 
-static struct snd_kcontrol_new cxt5051_toshiba_mixers[] = {
+static const struct snd_kcontrol_new cxt5051_toshiba_mixers[] = {
 	HDA_CODEC_VOLUME("Internal Mic Volume", 0x14, 0x00, HDA_INPUT),
 	HDA_CODEC_MUTE("Internal Mic Switch", 0x14, 0x00, HDA_INPUT),
 	HDA_CODEC_VOLUME("Mic Volume", 0x14, 0x01, HDA_INPUT),
@@ -1841,7 +1708,7 @@ static struct snd_kcontrol_new cxt5051_toshiba_mixers[] = {
 	{}
 };
 
-static struct hda_verb cxt5051_init_verbs[] = {
+static const struct hda_verb cxt5051_init_verbs[] = {
 	/* Line in, Mic */
 	{0x17, AC_VERB_SET_AMP_GAIN_MUTE, AMP_IN_UNMUTE(0) | 0x03},
 	{0x17, AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_VREF80},
@@ -1870,7 +1737,7 @@ static struct hda_verb cxt5051_init_verbs[] = {
 	{ } /* end */
 };
 
-static struct hda_verb cxt5051_hp_dv6736_init_verbs[] = {
+static const struct hda_verb cxt5051_hp_dv6736_init_verbs[] = {
 	/* Line in, Mic */
 	{0x17, AC_VERB_SET_AMP_GAIN_MUTE, AMP_IN_UNMUTE(0) | 0x03},
 	{0x17, AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_VREF80},
@@ -1895,40 +1762,7 @@ static struct hda_verb cxt5051_hp_dv6736_init_verbs[] = {
 	{ } /* end */
 };
 
-static struct hda_verb cxt5051_lenovo_x200_init_verbs[] = {
-	/* Line in, Mic */
-	{0x17, AC_VERB_SET_AMP_GAIN_MUTE, AMP_IN_UNMUTE(0) | 0x03},
-	{0x17, AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_VREF80},
-	{0x18, AC_VERB_SET_AMP_GAIN_MUTE, AMP_IN_UNMUTE(0) | 0x03},
-	{0x18, AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_VREF80},
-	{0x1d, AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_IN},
-	{0x1d, AC_VERB_SET_AMP_GAIN_MUTE, AMP_IN_UNMUTE(0) | 0x03},
-	/* SPK  */
-	{0x1a, AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_OUT},
-	{0x1a, AC_VERB_SET_CONNECT_SEL, 0x00},
-	/* HP, Amp  */
-	{0x16, AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_HP},
-	{0x16, AC_VERB_SET_CONNECT_SEL, 0x00},
-	/* Docking HP */
-	{0x19, AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_HP},
-	{0x19, AC_VERB_SET_CONNECT_SEL, 0x00},
-	/* DAC1 */
-	{0x10, AC_VERB_SET_AMP_GAIN_MUTE, AMP_OUT_UNMUTE},
-	/* Record selector: Internal mic */
-	{0x14, AC_VERB_SET_AMP_GAIN_MUTE, AMP_IN_UNMUTE(0) | 0x44},
-	{0x14, AC_VERB_SET_AMP_GAIN_MUTE, AMP_IN_UNMUTE(1) | 0x44},
-	{0x15, AC_VERB_SET_AMP_GAIN_MUTE, AMP_IN_UNMUTE(0) | 0x44},
-	/* SPDIF route: PCM */
-	{0x1c, AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_OUT}, /* needed for W500 Advanced Mini Dock 250410 */
-	{0x1c, AC_VERB_SET_CONNECT_SEL, 0x0},
-	/* EAPD */
-	{0x1a, AC_VERB_SET_EAPD_BTLENABLE, 0x2}, /* default on */
-	{0x16, AC_VERB_SET_UNSOLICITED_ENABLE, AC_USRSP_EN|CONEXANT_HP_EVENT},
-	{0x19, AC_VERB_SET_UNSOLICITED_ENABLE, AC_USRSP_EN|CONEXANT_HP_EVENT},
-	{ } /* end */
-};
-
-static struct hda_verb cxt5051_f700_init_verbs[] = {
+static const struct hda_verb cxt5051_f700_init_verbs[] = {
 	/* Line in, Mic */
 	{0x17, AC_VERB_SET_AMP_GAIN_MUTE, AMP_IN_UNMUTE(0) | 0x03},
 	{0x17, AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_VREF80},
@@ -1959,13 +1793,9 @@ static void cxt5051_init_mic_port(struct hda_codec *codec, hda_nid_t nid,
 	snd_hda_codec_write(codec, nid, 0,
 			    AC_VERB_SET_UNSOLICITED_ENABLE,
 			    AC_USRSP_EN | event);
-#ifdef CONFIG_SND_HDA_INPUT_JACK
-	conexant_add_jack(codec, nid, SND_JACK_MICROPHONE);
-	conexant_report_jack(codec, nid);
-#endif
 }
 
-static struct hda_verb cxt5051_ideapad_init_verbs[] = {
+static const struct hda_verb cxt5051_ideapad_init_verbs[] = {
 	/* Subwoofer */
 	{0x1b, AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_OUT},
 	{0x1b, AC_VERB_SET_CONNECT_SEL, 0x00},
@@ -1978,7 +1808,6 @@ static int cxt5051_init(struct hda_codec *codec)
 	struct conexant_spec *spec = codec->spec;
 
 	conexant_init(codec);
-	conexant_init_jacks(codec);
 
 	if (spec->auto_mic & AUTO_MIC_PORTB)
 		cxt5051_init_mic_port(codec, 0x17, CXT5051_PORTB_EVENT);
@@ -1998,10 +1827,10 @@ enum {
 	CXT5051_LAPTOP,	 /* Laptops w/ EAPD support */
 	CXT5051_HP,	/* no docking */
 	CXT5051_HP_DV6736,	/* HP without mic switch */
-	CXT5051_LENOVO_X200,	/* Lenovo X200 laptop, also used for Advanced Mini Dock 250410 */
 	CXT5051_F700,       /* HP Compaq Presario F700 */
 	CXT5051_TOSHIBA,	/* Toshiba M300 & co */
 	CXT5051_IDEAPAD,	/* Lenovo IdeaPad Y430 */
+	CXT5051_AUTO,		/* auto-parser */
 	CXT5051_MODELS
 };
 
@@ -2009,13 +1838,13 @@ static const char *const cxt5051_models[CXT5051_MODELS] = {
 	[CXT5051_LAPTOP]	= "laptop",
 	[CXT5051_HP]		= "hp",
 	[CXT5051_HP_DV6736]	= "hp-dv6736",
-	[CXT5051_LENOVO_X200]	= "lenovo-x200",
 	[CXT5051_F700]          = "hp-700",
 	[CXT5051_TOSHIBA]	= "toshiba",
 	[CXT5051_IDEAPAD]	= "ideapad",
+	[CXT5051_AUTO]		= "auto",
 };
 
-static struct snd_pci_quirk cxt5051_cfg_tbl[] = {
+static const struct snd_pci_quirk cxt5051_cfg_tbl[] = {
 	SND_PCI_QUIRK(0x103c, 0x30cf, "HP DV6736", CXT5051_HP_DV6736),
 	SND_PCI_QUIRK(0x103c, 0x360b, "Compaq Presario CQ60", CXT5051_HP),
 	SND_PCI_QUIRK(0x103c, 0x30ea, "Compaq Presario F700", CXT5051_F700),
@@ -2023,7 +1852,6 @@ static struct snd_pci_quirk cxt5051_cfg_tbl[] = {
 	SND_PCI_QUIRK(0x14f1, 0x0101, "Conexant Reference board",
 		      CXT5051_LAPTOP),
 	SND_PCI_QUIRK(0x14f1, 0x5051, "HP Spartan 1.1", CXT5051_HP),
-	SND_PCI_QUIRK(0x17aa, 0x20f2, "Lenovo X200", CXT5051_LENOVO_X200),
 	SND_PCI_QUIRK(0x17aa, 0x3a0d, "Lenovo IdeaPad", CXT5051_IDEAPAD),
 	{}
 };
@@ -2032,6 +1860,14 @@ static int patch_cxt5051(struct hda_codec *codec)
 {
 	struct conexant_spec *spec;
 	int board_config;
+
+	board_config = snd_hda_check_board_config(codec, CXT5051_MODELS,
+						  cxt5051_models,
+						  cxt5051_cfg_tbl);
+	if (board_config < 0)
+		board_config = CXT5051_AUTO; /* model=auto as default */
+	if (board_config == CXT5051_AUTO)
+		return patch_conexant_auto(codec);
 
 	spec = kzalloc(sizeof(*spec), GFP_KERNEL);
 	if (!spec)
@@ -2063,9 +1899,6 @@ static int patch_cxt5051(struct hda_codec *codec)
 
 	codec->patch_ops.unsol_event = cxt5051_hp_unsol_event;
 
-	board_config = snd_hda_check_board_config(codec, CXT5051_MODELS,
-						  cxt5051_models,
-						  cxt5051_cfg_tbl);
 	spec->auto_mic = AUTO_MIC_PORTB | AUTO_MIC_PORTC;
 	switch (board_config) {
 	case CXT5051_HP:
@@ -2075,13 +1908,6 @@ static int patch_cxt5051(struct hda_codec *codec)
 		spec->init_verbs[0] = cxt5051_hp_dv6736_init_verbs;
 		spec->mixers[0] = cxt5051_hp_dv6736_mixers;
 		spec->auto_mic = 0;
-		break;
-	case CXT5051_LENOVO_X200:
-		spec->init_verbs[0] = cxt5051_lenovo_x200_init_verbs;
-		/* Thinkpad X301 does not have S/PDIF wired and no ability
-		   to use a docking station. */
-		if (codec->subsystem_id == 0x17aa211f)
-			spec->multiout.dig_out_nid = 0;
 		break;
 	case CXT5051_F700:
 		spec->init_verbs[0] = cxt5051_f700_init_verbs;
@@ -2100,24 +1926,24 @@ static int patch_cxt5051(struct hda_codec *codec)
 	}
 
 	if (spec->beep_amp)
-		snd_hda_attach_beep_device(codec, spec->beep_amp);
+		snd_hda_attach_beep_device(codec, get_amp_nid_(spec->beep_amp));
 
 	return 0;
 }
 
 /* Conexant 5066 specific */
 
-static hda_nid_t cxt5066_dac_nids[1] = { 0x10 };
-static hda_nid_t cxt5066_adc_nids[3] = { 0x14, 0x15, 0x16 };
-static hda_nid_t cxt5066_capsrc_nids[1] = { 0x17 };
-static hda_nid_t cxt5066_digout_pin_nids[2] = { 0x20, 0x22 };
+static const hda_nid_t cxt5066_dac_nids[1] = { 0x10 };
+static const hda_nid_t cxt5066_adc_nids[3] = { 0x14, 0x15, 0x16 };
+static const hda_nid_t cxt5066_capsrc_nids[1] = { 0x17 };
+static const hda_nid_t cxt5066_digout_pin_nids[2] = { 0x20, 0x22 };
 
 /* OLPC's microphone port is DC coupled for use with external sensors,
  * therefore we use a 50% mic bias in order to center the input signal with
  * the DC input range of the codec. */
 #define CXT5066_OLPC_EXT_MIC_BIAS PIN_VREF50
 
-static struct hda_channel_mode cxt5066_modes[1] = {
+static const struct hda_channel_mode cxt5066_modes[1] = {
 	{ 2, NULL },
 };
 
@@ -2136,8 +1962,7 @@ static void cxt5066_update_speaker(struct hda_codec *codec)
 
 	/* Port A (HP) */
 	pinctl = (hp_port_a_present(spec) && spec->cur_eapd) ? PIN_HP : 0;
-	snd_hda_codec_write(codec, 0x19, 0, AC_VERB_SET_PIN_WIDGET_CONTROL,
-			pinctl);
+	snd_hda_set_pin_ctl(codec, 0x19, pinctl);
 
 	/* Port D (HP/LO) */
 	pinctl = spec->cur_eapd ? spec->port_d_mode : 0;
@@ -2150,13 +1975,11 @@ static void cxt5066_update_speaker(struct hda_codec *codec)
 		if (!hp_port_d_present(spec))
 			pinctl = 0;
 	}
-	snd_hda_codec_write(codec, 0x1c, 0, AC_VERB_SET_PIN_WIDGET_CONTROL,
-			pinctl);
+	snd_hda_set_pin_ctl(codec, 0x1c, pinctl);
 
 	/* CLASS_D AMP */
 	pinctl = (!spec->hp_present && spec->cur_eapd) ? PIN_OUT : 0;
-	snd_hda_codec_write(codec, 0x1f, 0, AC_VERB_SET_PIN_WIDGET_CONTROL,
-			pinctl);
+	snd_hda_set_pin_ctl(codec, 0x1f, pinctl);
 }
 
 /* turn on/off EAPD (+ mute HP) as a master switch */
@@ -2187,8 +2010,7 @@ static int cxt5066_set_olpc_dc_bias(struct hda_codec *codec)
 	/* Even though port F is the DC input, the bias is controlled on port B.
 	 * we also leave that port as an active input (but unselected) in DC mode
 	 * just in case that is necessary to make the bias setting take effect. */
-	return snd_hda_codec_write_cache(codec, 0x1a, 0,
-		AC_VERB_SET_PIN_WIDGET_CONTROL,
+	return snd_hda_set_pin_ctl_cache(codec, 0x1a,
 		cxt5066_olpc_dc_bias.items[spec->dc_input_bias].index);
 }
 
@@ -2221,14 +2043,14 @@ static void cxt5066_olpc_select_mic(struct hda_codec *codec)
 	}
 
 	/* disable DC (port F) */
-	snd_hda_codec_write(codec, 0x1e, 0, AC_VERB_SET_PIN_WIDGET_CONTROL, 0);
+	snd_hda_set_pin_ctl(codec, 0x1e, 0);
 
 	/* external mic, port B */
-	snd_hda_codec_write(codec, 0x1a, 0, AC_VERB_SET_PIN_WIDGET_CONTROL,
+	snd_hda_set_pin_ctl(codec, 0x1a,
 		spec->ext_mic_present ? CXT5066_OLPC_EXT_MIC_BIAS : 0);
 
 	/* internal mic, port C */
-	snd_hda_codec_write(codec, 0x1b, 0, AC_VERB_SET_PIN_WIDGET_CONTROL,
+	snd_hda_set_pin_ctl(codec, 0x1b,
 		spec->ext_mic_present ? 0 : PIN_VREF80);
 }
 
@@ -2272,7 +2094,7 @@ static void cxt5066_vostro_automic(struct hda_codec *codec)
 		{0x23, AC_VERB_SET_PIN_WIDGET_CONTROL, 0},
 		{}
 	};
-	static struct hda_verb ext_mic_absent[] = {
+	static const struct hda_verb ext_mic_absent[] = {
 		/* enable internal mic, port C */
 		{0x23, AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_IN},
 
@@ -2305,7 +2127,7 @@ static void cxt5066_ideapad_automic(struct hda_codec *codec)
 		{0x23, AC_VERB_SET_PIN_WIDGET_CONTROL, 0},
 		{}
 	};
-	static struct hda_verb ext_mic_absent[] = {
+	static const struct hda_verb ext_mic_absent[] = {
 		{0x14, AC_VERB_SET_CONNECT_SEL, 2},
 		{0x23, AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_IN},
 		{0x1b, AC_VERB_SET_PIN_WIDGET_CONTROL, 0},
@@ -2353,7 +2175,7 @@ static void cxt5066_thinkpad_automic(struct hda_codec *codec)
 {
 	unsigned int ext_present, dock_present;
 
-	static struct hda_verb ext_mic_present[] = {
+	static const struct hda_verb ext_mic_present[] = {
 		{0x14, AC_VERB_SET_CONNECT_SEL, 0},
 		{0x17, AC_VERB_SET_CONNECT_SEL, 1},
 		{0x1b, AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_VREF80},
@@ -2361,7 +2183,7 @@ static void cxt5066_thinkpad_automic(struct hda_codec *codec)
 		{0x1a, AC_VERB_SET_PIN_WIDGET_CONTROL, 0},
 		{}
 	};
-	static struct hda_verb dock_mic_present[] = {
+	static const struct hda_verb dock_mic_present[] = {
 		{0x14, AC_VERB_SET_CONNECT_SEL, 0},
 		{0x17, AC_VERB_SET_CONNECT_SEL, 0},
 		{0x1a, AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_VREF80},
@@ -2369,7 +2191,7 @@ static void cxt5066_thinkpad_automic(struct hda_codec *codec)
 		{0x1b, AC_VERB_SET_PIN_WIDGET_CONTROL, 0},
 		{}
 	};
-	static struct hda_verb ext_mic_absent[] = {
+	static const struct hda_verb ext_mic_absent[] = {
 		{0x14, AC_VERB_SET_CONNECT_SEL, 2},
 		{0x23, AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_IN},
 		{0x1b, AC_VERB_SET_PIN_WIDGET_CONTROL, 0},
@@ -2633,7 +2455,7 @@ static void cxt5066_olpc_capture_cleanup(struct hda_codec *codec)
 }
 
 static void conexant_check_dig_outs(struct hda_codec *codec,
-				    hda_nid_t *dig_pins,
+				    const hda_nid_t *dig_pins,
 				    int num_pins)
 {
 	struct conexant_spec *spec = codec->spec;
@@ -2646,14 +2468,10 @@ static void conexant_check_dig_outs(struct hda_codec *codec,
 			continue;
 		if (snd_hda_get_connections(codec, *dig_pins, nid_loc, 1) != 1)
 			continue;
-		if (spec->slave_dig_outs[0])
-			nid_loc++;
-		else
-			nid_loc = spec->slave_dig_outs;
 	}
 }
 
-static struct hda_input_mux cxt5066_capture_source = {
+static const struct hda_input_mux cxt5066_capture_source = {
 	.num_items = 4,
 	.items = {
 		{ "Mic B", 0 },
@@ -2663,7 +2481,7 @@ static struct hda_input_mux cxt5066_capture_source = {
 	},
 };
 
-static struct hda_bind_ctls cxt5066_bind_capture_vol_others = {
+static const struct hda_bind_ctls cxt5066_bind_capture_vol_others = {
 	.ops = &snd_hda_bind_vol,
 	.values = {
 		HDA_COMPOSE_AMP_VAL(0x14, 3, 0, HDA_INPUT),
@@ -2672,7 +2490,7 @@ static struct hda_bind_ctls cxt5066_bind_capture_vol_others = {
 	},
 };
 
-static struct hda_bind_ctls cxt5066_bind_capture_sw_others = {
+static const struct hda_bind_ctls cxt5066_bind_capture_sw_others = {
 	.ops = &snd_hda_bind_sw,
 	.values = {
 		HDA_COMPOSE_AMP_VAL(0x14, 3, 0, HDA_INPUT),
@@ -2681,12 +2499,12 @@ static struct hda_bind_ctls cxt5066_bind_capture_sw_others = {
 	},
 };
 
-static struct snd_kcontrol_new cxt5066_mixer_master[] = {
+static const struct snd_kcontrol_new cxt5066_mixer_master[] = {
 	HDA_CODEC_VOLUME("Master Playback Volume", 0x10, 0x00, HDA_OUTPUT),
 	{}
 };
 
-static struct snd_kcontrol_new cxt5066_mixer_master_olpc[] = {
+static const struct snd_kcontrol_new cxt5066_mixer_master_olpc[] = {
 	{
 		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 		.name = "Master Playback Volume",
@@ -2705,7 +2523,7 @@ static struct snd_kcontrol_new cxt5066_mixer_master_olpc[] = {
 	{}
 };
 
-static struct snd_kcontrol_new cxt5066_mixer_olpc_dc[] = {
+static const struct snd_kcontrol_new cxt5066_mixer_olpc_dc[] = {
 	{
 		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 		.name = "DC Mode Enable Switch",
@@ -2723,7 +2541,7 @@ static struct snd_kcontrol_new cxt5066_mixer_olpc_dc[] = {
 	{}
 };
 
-static struct snd_kcontrol_new cxt5066_mixers[] = {
+static const struct snd_kcontrol_new cxt5066_mixers[] = {
 	{
 		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 		.name = "Master Playback Switch",
@@ -2746,7 +2564,7 @@ static struct snd_kcontrol_new cxt5066_mixers[] = {
 	{}
 };
 
-static struct snd_kcontrol_new cxt5066_vostro_mixers[] = {
+static const struct snd_kcontrol_new cxt5066_vostro_mixers[] = {
 	{
 		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 		.name = "Internal Mic Boost Capture Enum",
@@ -2758,7 +2576,7 @@ static struct snd_kcontrol_new cxt5066_vostro_mixers[] = {
 	{}
 };
 
-static struct hda_verb cxt5066_init_verbs[] = {
+static const struct hda_verb cxt5066_init_verbs[] = {
 	{0x1a, AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_VREF80}, /* Port B */
 	{0x1b, AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_VREF80}, /* Port C */
 	{0x1e, AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_IN}, /* Port F */
@@ -2813,7 +2631,7 @@ static struct hda_verb cxt5066_init_verbs[] = {
 	{ } /* end */
 };
 
-static struct hda_verb cxt5066_init_verbs_olpc[] = {
+static const struct hda_verb cxt5066_init_verbs_olpc[] = {
 	/* Port A: headphones */
 	{0x19, AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_HP},
 	{0x19, AC_VERB_SET_CONNECT_SEL, 0x00}, /* DAC1 */
@@ -2874,7 +2692,7 @@ static struct hda_verb cxt5066_init_verbs_olpc[] = {
 	{ } /* end */
 };
 
-static struct hda_verb cxt5066_init_verbs_vostro[] = {
+static const struct hda_verb cxt5066_init_verbs_vostro[] = {
 	/* Port A: headphones */
 	{0x19, AC_VERB_SET_PIN_WIDGET_CONTROL, 0},
 	{0x19, AC_VERB_SET_CONNECT_SEL, 0x00}, /* DAC1 */
@@ -2935,7 +2753,7 @@ static struct hda_verb cxt5066_init_verbs_vostro[] = {
 	{ } /* end */
 };
 
-static struct hda_verb cxt5066_init_verbs_ideapad[] = {
+static const struct hda_verb cxt5066_init_verbs_ideapad[] = {
 	{0x1a, AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_VREF80}, /* Port B */
 	{0x1b, AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_VREF80}, /* Port C */
 	{0x1e, AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_IN}, /* Port F */
@@ -2985,7 +2803,7 @@ static struct hda_verb cxt5066_init_verbs_ideapad[] = {
 	{ } /* end */
 };
 
-static struct hda_verb cxt5066_init_verbs_thinkpad[] = {
+static const struct hda_verb cxt5066_init_verbs_thinkpad[] = {
 	{0x1e, AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_IN}, /* Port F */
 	{0x1d, AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_IN}, /* Port E */
 
@@ -3043,13 +2861,13 @@ static struct hda_verb cxt5066_init_verbs_thinkpad[] = {
 	{ } /* end */
 };
 
-static struct hda_verb cxt5066_init_verbs_portd_lo[] = {
+static const struct hda_verb cxt5066_init_verbs_portd_lo[] = {
 	{0x1c, AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_OUT},
 	{ } /* end */
 };
 
 
-static struct hda_verb cxt5066_init_verbs_hp_laptop[] = {
+static const struct hda_verb cxt5066_init_verbs_hp_laptop[] = {
 	{0x14, AC_VERB_SET_CONNECT_SEL, 0x0},
 	{0x19, AC_VERB_SET_UNSOLICITED_ENABLE, AC_USRSP_EN | CONEXANT_HP_EVENT},
 	{0x1b, AC_VERB_SET_UNSOLICITED_ENABLE, AC_USRSP_EN | CONEXANT_MIC_EVENT},
@@ -3093,6 +2911,7 @@ enum {
 	CXT5066_THINKPAD,	/* Lenovo ThinkPad T410s, others? */
 	CXT5066_ASUS,		/* Asus K52JU, Lenovo G560 - Int mic at 0x1a and Ext mic at 0x1b */
 	CXT5066_HP_LAPTOP,      /* HP Laptop */
+	CXT5066_AUTO,		/* BIOS auto-parser */
 	CXT5066_MODELS
 };
 
@@ -3105,14 +2924,14 @@ static const char * const cxt5066_models[CXT5066_MODELS] = {
 	[CXT5066_THINKPAD]	= "thinkpad",
 	[CXT5066_ASUS]		= "asus",
 	[CXT5066_HP_LAPTOP]	= "hp-laptop",
+	[CXT5066_AUTO]		= "auto",
 };
 
-static struct snd_pci_quirk cxt5066_cfg_tbl[] = {
+static const struct snd_pci_quirk cxt5066_cfg_tbl[] = {
 	SND_PCI_QUIRK_MASK(0x1025, 0xff00, 0x0400, "Acer", CXT5066_IDEAPAD),
 	SND_PCI_QUIRK(0x1028, 0x02d8, "Dell Vostro", CXT5066_DELL_VOSTRO),
 	SND_PCI_QUIRK(0x1028, 0x02f5, "Dell Vostro 320", CXT5066_IDEAPAD),
 	SND_PCI_QUIRK(0x1028, 0x0401, "Dell Vostro 1014", CXT5066_DELL_VOSTRO),
-	SND_PCI_QUIRK(0x1028, 0x0402, "Dell Vostro", CXT5066_DELL_VOSTRO),
 	SND_PCI_QUIRK(0x1028, 0x0408, "Dell Inspiron One 19T", CXT5066_IDEAPAD),
 	SND_PCI_QUIRK(0x1028, 0x050f, "Dell Inspiron", CXT5066_IDEAPAD),
 	SND_PCI_QUIRK(0x1028, 0x0510, "Dell Vostro", CXT5066_IDEAPAD),
@@ -3122,16 +2941,15 @@ static struct snd_pci_quirk cxt5066_cfg_tbl[] = {
 	SND_PCI_QUIRK(0x1043, 0x1993, "Asus U50F", CXT5066_ASUS),
 	SND_PCI_QUIRK(0x1179, 0xff1e, "Toshiba Satellite C650D", CXT5066_IDEAPAD),
 	SND_PCI_QUIRK(0x1179, 0xff50, "Toshiba Satellite P500-PSPGSC-01800T", CXT5066_OLPC_XO_1_5),
-	SND_PCI_QUIRK(0x1179, 0xffe0, "Toshiba Satellite Pro T130-15F", CXT5066_OLPC_XO_1_5),
 	SND_PCI_QUIRK(0x14f1, 0x0101, "Conexant Reference board",
 		      CXT5066_LAPTOP),
 	SND_PCI_QUIRK(0x152d, 0x0833, "OLPC XO-1.5", CXT5066_OLPC_XO_1_5),
 	SND_PCI_QUIRK(0x17aa, 0x20f2, "Lenovo T400s", CXT5066_THINKPAD),
 	SND_PCI_QUIRK(0x17aa, 0x21c5, "Thinkpad Edge 13", CXT5066_THINKPAD),
 	SND_PCI_QUIRK(0x17aa, 0x21c6, "Thinkpad Edge 13", CXT5066_ASUS),
- 	SND_PCI_QUIRK(0x17aa, 0x215e, "Lenovo Thinkpad", CXT5066_THINKPAD),
+	SND_PCI_QUIRK(0x17aa, 0x21db, "Lenovo X220-tablet", CXT5066_THINKPAD),
+	SND_PCI_QUIRK(0x17aa, 0x3a0d, "Lenovo U350", CXT5066_ASUS),
 	SND_PCI_QUIRK(0x17aa, 0x38af, "Lenovo G560", CXT5066_ASUS),
-	SND_PCI_QUIRK_VENDOR(0x17aa, "Lenovo", CXT5066_IDEAPAD), /* Fallback for Lenovos without dock mic */
 	{}
 };
 
@@ -3139,6 +2957,13 @@ static int patch_cxt5066(struct hda_codec *codec)
 {
 	struct conexant_spec *spec;
 	int board_config;
+
+	board_config = snd_hda_check_board_config(codec, CXT5066_MODELS,
+						  cxt5066_models, cxt5066_cfg_tbl);
+	if (board_config < 0)
+		board_config = CXT5066_AUTO; /* model=auto as default */
+	if (board_config == CXT5066_AUTO)
+		return patch_conexant_auto(codec);
 
 	spec = kzalloc(sizeof(*spec), GFP_KERNEL);
 	if (!spec)
@@ -3170,8 +2995,6 @@ static int patch_cxt5066(struct hda_codec *codec)
 
 	set_beep_amp(spec, 0x13, 0, HDA_OUTPUT);
 
-	board_config = snd_hda_check_board_config(codec, CXT5066_MODELS,
-						  cxt5066_models, cxt5066_cfg_tbl);
 	switch (board_config) {
 	default:
 	case CXT5066_LAPTOP:
@@ -3280,303 +3103,17 @@ static int patch_cxt5066(struct hda_codec *codec)
 	}
 
 	if (spec->beep_amp)
-		snd_hda_attach_beep_device(codec, spec->beep_amp);
+		snd_hda_attach_beep_device(codec, get_amp_nid_(spec->beep_amp));
 
 	return 0;
 }
+
+#endif /* ENABLE_CXT_STATIC_QUIRKS */
+
 
 /*
  * Automatic parser for CX20641 & co
  */
-
-static hda_nid_t cx_auto_adc_nids[] = { 0x14 };
-
-/* get the connection index of @nid in the widget @mux */
-static int get_connection_index(struct hda_codec *codec, hda_nid_t mux,
-				hda_nid_t nid)
-{
-	hda_nid_t conn[HDA_MAX_NUM_INPUTS];
-	int i, nums;
-
-	nums = snd_hda_get_connections(codec, mux, conn, ARRAY_SIZE(conn));
-	for (i = 0; i < nums; i++)
-		if (conn[i] == nid)
-			return i;
-	return -1;
-}
-
-/* get an unassigned DAC from the given list.
- * Return the nid if found and reduce the DAC list, or return zero if
- * not found
- */
-static hda_nid_t get_unassigned_dac(struct hda_codec *codec, hda_nid_t pin,
-				    hda_nid_t *dacs, int *num_dacs)
-{
-	int i, nums = *num_dacs;
-	hda_nid_t ret = 0;
-
-	for (i = 0; i < nums; i++) {
-		if (get_connection_index(codec, pin, dacs[i]) >= 0) {
-			ret = dacs[i];
-			break;
-		}
-	}
-	if (!ret)
-		return 0;
-	if (--nums > 0)
-		memmove(dacs, dacs + 1, nums * sizeof(hda_nid_t));
-	*num_dacs = nums;
-	return ret;
-}
-
-#define MAX_AUTO_DACS	5
-
-/* fill analog DAC list from the widget tree */
-static int fill_cx_auto_dacs(struct hda_codec *codec, hda_nid_t *dacs)
-{
-	hda_nid_t nid, end_nid;
-	int nums = 0;
-
-	end_nid = codec->start_nid + codec->num_nodes;
-	for (nid = codec->start_nid; nid < end_nid; nid++) {
-		unsigned int wcaps = get_wcaps(codec, nid);
-		unsigned int type = get_wcaps_type(wcaps);
-		if (type == AC_WID_AUD_OUT && !(wcaps & AC_WCAP_DIGITAL)) {
-			dacs[nums++] = nid;
-			if (nums >= MAX_AUTO_DACS)
-				break;
-		}
-	}
-	return nums;
-}
-
-/* fill pin_dac_pair list from the pin and dac list */
-static int fill_dacs_for_pins(struct hda_codec *codec, hda_nid_t *pins,
-			      int num_pins, hda_nid_t *dacs, int *rest,
-			      struct pin_dac_pair *filled, int type)
-{
-	int i, nums;
-
-	nums = 0;
-	for (i = 0; i < num_pins; i++) {
-		filled[nums].pin = pins[i];
-		filled[nums].type = type;
-		filled[nums].dac = get_unassigned_dac(codec, pins[i], dacs, rest);
-		nums++;
-	}
-	return nums;
-}
-
-/* parse analog output paths */
-static void cx_auto_parse_output(struct hda_codec *codec)
-{
-	struct conexant_spec *spec = codec->spec;
-	struct auto_pin_cfg *cfg = &spec->autocfg;
-	hda_nid_t dacs[MAX_AUTO_DACS];
-	int i, j, nums, rest;
-
-	rest = fill_cx_auto_dacs(codec, dacs);
-	/* parse all analog output pins */
-	nums = fill_dacs_for_pins(codec, cfg->line_out_pins, cfg->line_outs,
-				  dacs, &rest, spec->dac_info,
-				  AUTO_PIN_LINE_OUT);
-	nums += fill_dacs_for_pins(codec, cfg->hp_pins, cfg->hp_outs,
-				  dacs, &rest, spec->dac_info + nums,
-				  AUTO_PIN_HP_OUT);
-	nums += fill_dacs_for_pins(codec, cfg->speaker_pins, cfg->speaker_outs,
-				  dacs, &rest, spec->dac_info + nums,
-				  AUTO_PIN_SPEAKER_OUT);
-	spec->dac_info_filled = nums;
-	/* fill multiout struct */
-	for (i = 0; i < nums; i++) {
-		hda_nid_t dac = spec->dac_info[i].dac;
-		if (!dac)
-			continue;
-		switch (spec->dac_info[i].type) {
-		case AUTO_PIN_LINE_OUT:
-			spec->private_dac_nids[spec->multiout.num_dacs] = dac;
-			spec->multiout.num_dacs++;
-			break;
-		case AUTO_PIN_HP_OUT:
-		case AUTO_PIN_SPEAKER_OUT:
-			if (!spec->multiout.hp_nid) {
-				spec->multiout.hp_nid = dac;
-				break;
-			}
-			for (j = 0; j < ARRAY_SIZE(spec->multiout.extra_out_nid); j++)
-				if (!spec->multiout.extra_out_nid[j]) {
-					spec->multiout.extra_out_nid[j] = dac;
-					break;
-				}
-			break;
-		}
-	}
-	spec->multiout.dac_nids = spec->private_dac_nids;
-	spec->multiout.max_channels = spec->multiout.num_dacs * 2;
-
-	if (cfg->hp_outs > 0)
-		spec->auto_mute = 1;
-	spec->vmaster_nid = spec->private_dac_nids[0];
-}
-
-/* auto-mute/unmute speaker and line outs according to headphone jack */
-static void cx_auto_hp_automute(struct hda_codec *codec)
-{
-	struct conexant_spec *spec = codec->spec;
-	struct auto_pin_cfg *cfg = &spec->autocfg;
-	int i, present;
-
-	if (!spec->auto_mute)
-		return;
-	present = 0;
-	for (i = 0; i < cfg->hp_outs; i++) {
-		if (snd_hda_jack_detect(codec, cfg->hp_pins[i])) {
-			present = 1;
-			break;
-		}
-	}
-	for (i = 0; i < cfg->line_outs; i++) {
-		snd_hda_codec_write(codec, cfg->line_out_pins[i], 0,
-				    AC_VERB_SET_PIN_WIDGET_CONTROL,
-				    present ? 0 : PIN_OUT);
-	}
-	for (i = 0; !present && i < cfg->line_outs; i++)
-		if (snd_hda_jack_detect(codec, cfg->line_out_pins[i]))
-			present = 1;
-	for (i = 0; i < cfg->speaker_outs; i++) {
-		snd_hda_codec_write(codec, cfg->speaker_pins[i], 0,
-				    AC_VERB_SET_PIN_WIDGET_CONTROL,
-				    present ? 0 : PIN_OUT);
-	}
-}
-
-/* automatic switch internal and external mic */
-static void cx_auto_automic(struct hda_codec *codec)
-{
-	struct conexant_spec *spec = codec->spec;
-	struct auto_pin_cfg *cfg = &spec->autocfg;
-	struct hda_input_mux *imux = &spec->private_imux;
-	int ext_idx = spec->auto_mic_ext;
-
-	if (!spec->auto_mic)
-		return;
-	if (snd_hda_jack_detect(codec, cfg->inputs[ext_idx].pin)) {
-		snd_hda_codec_write(codec, spec->adc_nids[0], 0,
-				    AC_VERB_SET_CONNECT_SEL,
-				    imux->items[ext_idx].index);
-	} else {
-		snd_hda_codec_write(codec, spec->adc_nids[0], 0,
-				    AC_VERB_SET_CONNECT_SEL,
-				    imux->items[!ext_idx].index);
-	}
-}
-
-static void cx_auto_unsol_event(struct hda_codec *codec, unsigned int res)
-{
-	int nid = (res & AC_UNSOL_RES_SUBTAG) >> 20;
-	switch (res >> 26) {
-	case CONEXANT_HP_EVENT:
-		cx_auto_hp_automute(codec);
-		conexant_report_jack(codec, nid);
-		break;
-	case CONEXANT_MIC_EVENT:
-		cx_auto_automic(codec);
-		conexant_report_jack(codec, nid);
-		break;
-	}
-}
-
-/* return true if it's an internal-mic pin */
-static int is_int_mic(struct hda_codec *codec, hda_nid_t pin)
-{
-	unsigned int def_conf = snd_hda_codec_get_pincfg(codec, pin);
-	return get_defcfg_device(def_conf) == AC_JACK_MIC_IN &&
-		snd_hda_get_input_pin_attr(def_conf) == INPUT_PIN_ATTR_INT;
-}
-
-/* return true if it's an external-mic pin */
-static int is_ext_mic(struct hda_codec *codec, hda_nid_t pin)
-{
-	unsigned int def_conf = snd_hda_codec_get_pincfg(codec, pin);
-	return get_defcfg_device(def_conf) == AC_JACK_MIC_IN &&
-		snd_hda_get_input_pin_attr(def_conf) >= INPUT_PIN_ATTR_NORMAL &&
-		(snd_hda_query_pin_caps(codec, pin) & AC_PINCAP_PRES_DETECT);
-}
-
-/* check whether the pin config is suitable for auto-mic switching;
- * auto-mic is enabled only when one int-mic and one-ext mic exist
- */
-static void cx_auto_check_auto_mic(struct hda_codec *codec)
-{
-	struct conexant_spec *spec = codec->spec;
-	struct auto_pin_cfg *cfg = &spec->autocfg;
-
-	if (is_ext_mic(codec, cfg->inputs[0].pin) &&
-	    is_int_mic(codec, cfg->inputs[1].pin)) {
-		spec->auto_mic = 1;
-		spec->auto_mic_ext = 1;
-		return;
-	}
-	if (is_int_mic(codec, cfg->inputs[1].pin) &&
-	    is_ext_mic(codec, cfg->inputs[0].pin)) {
-		spec->auto_mic = 1;
-		spec->auto_mic_ext = 0;
-		return;
-	}
-}
-
-static void cx_auto_parse_input(struct hda_codec *codec)
-{
-	struct conexant_spec *spec = codec->spec;
-	struct auto_pin_cfg *cfg = &spec->autocfg;
-	struct hda_input_mux *imux;
-	int i;
-
-	imux = &spec->private_imux;
-	for (i = 0; i < cfg->num_inputs; i++) {
-		int idx = get_connection_index(codec, spec->adc_nids[0],
-					       cfg->inputs[i].pin);
-		if (idx >= 0) {
-			const char *label;
-			label = hda_get_autocfg_input_label(codec, cfg, i);
-			snd_hda_add_imux_item(imux, label, idx, NULL);
-		}
-	}
-	if (imux->num_items == 2 && cfg->num_inputs == 2)
-		cx_auto_check_auto_mic(codec);
-	if (imux->num_items > 1 && !spec->auto_mic)
-		spec->input_mux = imux;
-}
-
-/* get digital-input audio widget corresponding to the given pin */
-static hda_nid_t cx_auto_get_dig_in(struct hda_codec *codec, hda_nid_t pin)
-{
-	hda_nid_t nid, end_nid;
-
-	end_nid = codec->start_nid + codec->num_nodes;
-	for (nid = codec->start_nid; nid < end_nid; nid++) {
-		unsigned int wcaps = get_wcaps(codec, nid);
-		unsigned int type = get_wcaps_type(wcaps);
-		if (type == AC_WID_AUD_IN && (wcaps & AC_WCAP_DIGITAL)) {
-			if (get_connection_index(codec, nid, pin) >= 0)
-				return nid;
-		}
-	}
-	return 0;
-}
-
-static void cx_auto_parse_digital(struct hda_codec *codec)
-{
-	struct conexant_spec *spec = codec->spec;
-	struct auto_pin_cfg *cfg = &spec->autocfg;
-	hda_nid_t nid;
-
-	if (cfg->dig_outs &&
-	    snd_hda_get_connections(codec, cfg->dig_out_pins[0], &nid, 1) == 1)
-		spec->multiout.dig_out_nid = nid;
-	if (cfg->dig_in_pin)
-		spec->dig_in_nid = cx_auto_get_dig_in(codec, cfg->dig_in_pin);
-}
 
 #ifdef CONFIG_SND_HDA_INPUT_BEEP
 static void cx_auto_parse_beep(struct hda_codec *codec)
@@ -3595,336 +3132,308 @@ static void cx_auto_parse_beep(struct hda_codec *codec)
 #define cx_auto_parse_beep(codec)
 #endif
 
-static int cx_auto_parse_auto_config(struct hda_codec *codec)
+/* parse EAPDs */
+static void cx_auto_parse_eapd(struct hda_codec *codec)
 {
 	struct conexant_spec *spec = codec->spec;
-	int err;
+	hda_nid_t nid, end_nid;
 
-	err = snd_hda_parse_pin_def_config(codec, &spec->autocfg, NULL);
-	if (err < 0)
-		return err;
+	end_nid = codec->start_nid + codec->num_nodes;
+	for (nid = codec->start_nid; nid < end_nid; nid++) {
+		if (get_wcaps_type(get_wcaps(codec, nid)) != AC_WID_PIN)
+			continue;
+		if (!(snd_hda_query_pin_caps(codec, nid) & AC_PINCAP_EAPD))
+			continue;
+		spec->eapds[spec->num_eapds++] = nid;
+		if (spec->num_eapds >= ARRAY_SIZE(spec->eapds))
+			break;
+	}
 
-	cx_auto_parse_output(codec);
-	cx_auto_parse_input(codec);
-	cx_auto_parse_digital(codec);
-	cx_auto_parse_beep(codec);
-	return 0;
+	/* NOTE: below is a wild guess; if we have more than two EAPDs,
+	 * it's a new chip, where EAPDs are supposed to be associated to
+	 * pins, and we can control EAPD per pin.
+	 * OTOH, if only one or two EAPDs are found, it's an old chip,
+	 * thus it might control over all pins.
+	 */
+	if (spec->num_eapds > 2)
+		spec->dynamic_eapd = 1;
 }
 
-static void cx_auto_turn_on_eapd(struct hda_codec *codec, int num_pins,
-				 hda_nid_t *pins)
+static void cx_auto_turn_eapd(struct hda_codec *codec, int num_pins,
+			      hda_nid_t *pins, bool on)
 {
 	int i;
 	for (i = 0; i < num_pins; i++) {
 		if (snd_hda_query_pin_caps(codec, pins[i]) & AC_PINCAP_EAPD)
 			snd_hda_codec_write(codec, pins[i], 0,
-					    AC_VERB_SET_EAPD_BTLENABLE, 0x02);
+					    AC_VERB_SET_EAPD_BTLENABLE,
+					    on ? 0x02 : 0);
 	}
 }
 
-static void select_connection(struct hda_codec *codec, hda_nid_t pin,
-			      hda_nid_t src)
+/* turn on/off EAPD according to Master switch */
+static void cx_auto_vmaster_hook(void *private_data, int enabled)
 {
-	int idx = get_connection_index(codec, pin, src);
-	if (idx >= 0)
-		snd_hda_codec_write(codec, pin, 0,
-				    AC_VERB_SET_CONNECT_SEL, idx);
-}
-
-static void cx_auto_init_output(struct hda_codec *codec)
-{
+	struct hda_codec *codec = private_data;
 	struct conexant_spec *spec = codec->spec;
-	struct auto_pin_cfg *cfg = &spec->autocfg;
-	hda_nid_t nid;
-	int i;
 
-	for (i = 0; i < spec->multiout.num_dacs; i++)
-		snd_hda_codec_write(codec, spec->multiout.dac_nids[i], 0,
-				    AC_VERB_SET_AMP_GAIN_MUTE, AMP_OUT_MUTE);
-
-	for (i = 0; i < cfg->hp_outs; i++)
-		snd_hda_codec_write(codec, cfg->hp_pins[i], 0,
-				    AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_HP);
-	if (spec->auto_mute) {
-		for (i = 0; i < cfg->hp_outs; i++) {
-			snd_hda_codec_write(codec, cfg->hp_pins[i], 0,
-				    AC_VERB_SET_UNSOLICITED_ENABLE,
-				    AC_USRSP_EN | CONEXANT_HP_EVENT);
-		}
-		cx_auto_hp_automute(codec);
-	} else {
-		for (i = 0; i < cfg->line_outs; i++)
-			snd_hda_codec_write(codec, cfg->line_out_pins[i], 0,
-				    AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_OUT);
-		for (i = 0; i < cfg->speaker_outs; i++)
-			snd_hda_codec_write(codec, cfg->speaker_pins[i], 0,
-				    AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_OUT);
-	}
-
-	for (i = 0; i < spec->dac_info_filled; i++) {
-		nid = spec->dac_info[i].dac;
-		if (!nid)
-			nid = spec->multiout.dac_nids[0];
-		select_connection(codec, spec->dac_info[i].pin, nid);
-	}
-
-	/* turn on EAPD */
-	cx_auto_turn_on_eapd(codec, cfg->line_outs, cfg->line_out_pins);
-	cx_auto_turn_on_eapd(codec, cfg->hp_outs, cfg->hp_pins);
-	cx_auto_turn_on_eapd(codec, cfg->speaker_outs, cfg->speaker_pins);
-}
-
-static void cx_auto_init_input(struct hda_codec *codec)
-{
-	struct conexant_spec *spec = codec->spec;
-	struct auto_pin_cfg *cfg = &spec->autocfg;
-	int i;
-
-	for (i = 0; i < spec->num_adc_nids; i++)
-		snd_hda_codec_write(codec, spec->adc_nids[i], 0,
-				    AC_VERB_SET_AMP_GAIN_MUTE, AMP_IN_MUTE(0));
-
-	for (i = 0; i < cfg->num_inputs; i++) {
-		unsigned int type;
-		if (cfg->inputs[i].type == AUTO_PIN_MIC)
-			type = PIN_VREF80;
-		else
-			type = PIN_IN;
-		snd_hda_codec_write(codec, cfg->inputs[i].pin, 0,
-				    AC_VERB_SET_PIN_WIDGET_CONTROL, type);
-	}
-
-	if (spec->auto_mic) {
-		int ext_idx = spec->auto_mic_ext;
-		snd_hda_codec_write(codec, cfg->inputs[ext_idx].pin, 0,
-				    AC_VERB_SET_UNSOLICITED_ENABLE,
-				    AC_USRSP_EN | CONEXANT_MIC_EVENT);
-		cx_auto_automic(codec);
-	} else {
-		for (i = 0; i < spec->num_adc_nids; i++) {
-			snd_hda_codec_write(codec, spec->adc_nids[i], 0,
-					    AC_VERB_SET_CONNECT_SEL,
-					    spec->private_imux.items[0].index);
-		}
-	}
-}
-
-static void cx_auto_init_digital(struct hda_codec *codec)
-{
-	struct conexant_spec *spec = codec->spec;
-	struct auto_pin_cfg *cfg = &spec->autocfg;
-
-	if (spec->multiout.dig_out_nid)
-		snd_hda_codec_write(codec, cfg->dig_out_pins[0], 0,
-				    AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_OUT);
-	if (spec->dig_in_nid)
-		snd_hda_codec_write(codec, cfg->dig_in_pin, 0,
-				    AC_VERB_SET_PIN_WIDGET_CONTROL, PIN_IN);
-}
-
-static int cx_auto_init(struct hda_codec *codec)
-{
-	/*snd_hda_sequence_write(codec, cx_auto_init_verbs);*/
-	cx_auto_init_output(codec);
-	cx_auto_init_input(codec);
-	cx_auto_init_digital(codec);
-	return 0;
-}
-
-static int cx_auto_add_volume_idx(struct hda_codec *codec, const char *basename,
-			      const char *dir, int cidx,
-			      hda_nid_t nid, int hda_dir, int amp_idx)
-{
-	static char name[32];
-	static struct snd_kcontrol_new knew[] = {
-		HDA_CODEC_VOLUME(name, 0, 0, 0),
-		HDA_CODEC_MUTE(name, 0, 0, 0),
-	};
-	static char *sfx[2] = { "Volume", "Switch" };
-	int i, err;
-
-	for (i = 0; i < 2; i++) {
-		struct snd_kcontrol *kctl;
-		knew[i].private_value = HDA_COMPOSE_AMP_VAL(nid, 3, amp_idx,
-							    hda_dir);
-		knew[i].subdevice = HDA_SUBDEV_AMP_FLAG;
-		knew[i].index = cidx;
-		snprintf(name, sizeof(name), "%s%s %s", basename, dir, sfx[i]);
-		kctl = snd_ctl_new1(&knew[i], codec);
-		if (!kctl)
-			return -ENOMEM;
-		err = snd_hda_ctl_add(codec, nid, kctl);
-		if (err < 0)
-			return err;
-		if (!(query_amp_caps(codec, nid, hda_dir) & AC_AMPCAP_MUTE))
-			break;
-	}
-	return 0;
-}
-
-#define cx_auto_add_volume(codec, str, dir, cidx, nid, hda_dir)		\
-	cx_auto_add_volume_idx(codec, str, dir, cidx, nid, hda_dir, 0)
-
-#define cx_auto_add_pb_volume(codec, nid, str, idx)			\
-	cx_auto_add_volume(codec, str, " Playback", idx, nid, HDA_OUTPUT)
-
-static int cx_auto_build_output_controls(struct hda_codec *codec)
-{
-	struct conexant_spec *spec = codec->spec;
-	int i, err;
-	int num_line = 0, num_hp = 0, num_spk = 0;
-	static const char * const texts[3] = { "Front", "Surround", "CLFE" };
-
-	if (spec->dac_info_filled == 1)
-		return cx_auto_add_pb_volume(codec, spec->dac_info[0].dac,
-					     "Master", 0);
-	for (i = 0; i < spec->dac_info_filled; i++) {
-		const char *label;
-		int idx, type;
-		if (!spec->dac_info[i].dac)
-			continue;
-		type = spec->dac_info[i].type;
-		if (type == AUTO_PIN_LINE_OUT)
-			type = spec->autocfg.line_out_type;
-		switch (type) {
-		case AUTO_PIN_LINE_OUT:
-		default:
-			label = texts[num_line++];
-			idx = 0;
-			break;
-		case AUTO_PIN_HP_OUT:
-			label = "Headphone";
-			idx = num_hp++;
-			break;
-		case AUTO_PIN_SPEAKER_OUT:
-			label = "Speaker";
-			idx = num_spk++;
-			break;
-		}
-		err = cx_auto_add_pb_volume(codec, spec->dac_info[i].dac,
-					    label, idx);
-		if (err < 0)
-			return err;
-	}
-	return 0;
-}
-
-static int cx_auto_build_input_controls(struct hda_codec *codec)
-{
-	struct conexant_spec *spec = codec->spec;
-	struct auto_pin_cfg *cfg = &spec->autocfg;
-	static const char *prev_label;
-	int i, err, cidx, conn_len;
-	hda_nid_t conn[HDA_MAX_CONNECTIONS];
-
-	int multi_adc_volume = 0; /* If the ADC nid has several input volumes */
-	int adc_nid = spec->adc_nids[0];
-
-	conn_len = snd_hda_get_connections(codec, adc_nid, conn,
-					   HDA_MAX_CONNECTIONS);
-	if (conn_len < 0)
-		return conn_len;
-
-	multi_adc_volume = cfg->num_inputs > 1 && conn_len > 1;
-	if (!multi_adc_volume) {
-		err = cx_auto_add_volume(codec, "Capture", "", 0, adc_nid,
-					 HDA_INPUT);
-		if (err < 0)
-			return err;
-	}
-
-	prev_label = NULL;
-	cidx = 0;
-	for (i = 0; i < cfg->num_inputs; i++) {
-		hda_nid_t nid = cfg->inputs[i].pin;
-		const char *label;
-		int j;
-		int pin_amp = get_wcaps(codec, nid) & AC_WCAP_IN_AMP;
-		if (!pin_amp && !multi_adc_volume)
-			continue;
-
-		label = hda_get_autocfg_input_label(codec, cfg, i);
-		if (label == prev_label)
-			cidx++;
-		else
-			cidx = 0;
-		prev_label = label;
-
-		if (pin_amp) {
-			err = cx_auto_add_volume(codec, label, " Boost", cidx,
-						 nid, HDA_INPUT);
-			if (err < 0)
-				return err;
-		}
-
-		if (!multi_adc_volume)
-			continue;
-		for (j = 0; j < conn_len; j++) {
-			if (conn[j] == nid) {
-				err = cx_auto_add_volume_idx(codec, label,
-				    " Capture", cidx, adc_nid, HDA_INPUT, j);
-				if (err < 0)
-					return err;
-				break;
-			}
-		}
-	}
-	return 0;
+	cx_auto_turn_eapd(codec, spec->num_eapds, spec->eapds, enabled);
 }
 
 static int cx_auto_build_controls(struct hda_codec *codec)
 {
 	int err;
 
-	err = cx_auto_build_output_controls(codec);
+	err = snd_hda_gen_build_controls(codec);
 	if (err < 0)
 		return err;
-	err = cx_auto_build_input_controls(codec);
+
+	err = add_beep_ctls(codec);
 	if (err < 0)
 		return err;
-	return conexant_build_controls(codec);
+
+	return 0;
 }
 
-static struct hda_codec_ops cx_auto_patch_ops = {
+static int cx_auto_init(struct hda_codec *codec)
+{
+	struct conexant_spec *spec = codec->spec;
+	snd_hda_gen_init(codec);
+	if (!spec->dynamic_eapd)
+		cx_auto_turn_eapd(codec, spec->num_eapds, spec->eapds, true);
+	return 0;
+}
+
+static const struct hda_codec_ops cx_auto_patch_ops = {
 	.build_controls = cx_auto_build_controls,
-	.build_pcms = conexant_build_pcms,
+	.build_pcms = snd_hda_gen_build_pcms,
 	.init = cx_auto_init,
-	.free = conexant_free,
-	.unsol_event = cx_auto_unsol_event,
-#ifdef CONFIG_SND_HDA_POWER_SAVE
-	.suspend = conexant_suspend,
+	.free = snd_hda_gen_free,
+	.unsol_event = snd_hda_jack_unsol_event,
+#ifdef CONFIG_PM
+	.check_power_status = snd_hda_gen_check_power_status,
 #endif
-	.reboot_notify = snd_hda_shutup_pins,
 };
+
+/*
+ * pin fix-up
+ */
+enum {
+	CXT_PINCFG_LENOVO_X200,
+	CXT_PINCFG_LENOVO_TP410,
+	CXT_PINCFG_LEMOTE_A1004,
+	CXT_PINCFG_LEMOTE_A1205,
+	CXT_FIXUP_STEREO_DMIC,
+	CXT_FIXUP_INC_MIC_BOOST,
+};
+
+static void cxt_fixup_stereo_dmic(struct hda_codec *codec,
+				  const struct hda_fixup *fix, int action)
+{
+	struct conexant_spec *spec = codec->spec;
+	spec->gen.inv_dmic_split = 1;
+}
+
+static void cxt5066_increase_mic_boost(struct hda_codec *codec,
+				   const struct hda_fixup *fix, int action)
+{
+	if (action != HDA_FIXUP_ACT_PRE_PROBE)
+		return;
+
+	snd_hda_override_amp_caps(codec, 0x17, HDA_OUTPUT,
+				  (0x3 << AC_AMPCAP_OFFSET_SHIFT) |
+				  (0x4 << AC_AMPCAP_NUM_STEPS_SHIFT) |
+				  (0x27 << AC_AMPCAP_STEP_SIZE_SHIFT) |
+				  (0 << AC_AMPCAP_MUTE_SHIFT));
+}
+
+/* ThinkPad X200 & co with cxt5051 */
+static const struct hda_pintbl cxt_pincfg_lenovo_x200[] = {
+	{ 0x16, 0x042140ff }, /* HP (seq# overridden) */
+	{ 0x17, 0x21a11000 }, /* dock-mic */
+	{ 0x19, 0x2121103f }, /* dock-HP */
+	{ 0x1c, 0x21440100 }, /* dock SPDIF out */
+	{}
+};
+
+/* ThinkPad 410/420/510/520, X201 & co with cxt5066 */
+static const struct hda_pintbl cxt_pincfg_lenovo_tp410[] = {
+	{ 0x19, 0x042110ff }, /* HP (seq# overridden) */
+	{ 0x1a, 0x21a190f0 }, /* dock-mic */
+	{ 0x1c, 0x212140ff }, /* dock-HP */
+	{}
+};
+
+/* Lemote A1004/A1205 with cxt5066 */
+static const struct hda_pintbl cxt_pincfg_lemote[] = {
+	{ 0x1a, 0x90a10020 }, /* Internal mic */
+	{ 0x1b, 0x03a11020 }, /* External mic */
+	{ 0x1d, 0x400101f0 }, /* Not used */
+	{ 0x1e, 0x40a701f0 }, /* Not used */
+	{ 0x20, 0x404501f0 }, /* Not used */
+	{ 0x22, 0x404401f0 }, /* Not used */
+	{ 0x23, 0x40a701f0 }, /* Not used */
+	{}
+};
+
+static const struct hda_fixup cxt_fixups[] = {
+	[CXT_PINCFG_LENOVO_X200] = {
+		.type = HDA_FIXUP_PINS,
+		.v.pins = cxt_pincfg_lenovo_x200,
+	},
+	[CXT_PINCFG_LENOVO_TP410] = {
+		.type = HDA_FIXUP_PINS,
+		.v.pins = cxt_pincfg_lenovo_tp410,
+	},
+	[CXT_PINCFG_LEMOTE_A1004] = {
+		.type = HDA_FIXUP_PINS,
+		.chained = true,
+		.chain_id = CXT_FIXUP_INC_MIC_BOOST,
+		.v.pins = cxt_pincfg_lemote,
+	},
+	[CXT_PINCFG_LEMOTE_A1205] = {
+		.type = HDA_FIXUP_PINS,
+		.v.pins = cxt_pincfg_lemote,
+	},
+	[CXT_FIXUP_STEREO_DMIC] = {
+		.type = HDA_FIXUP_FUNC,
+		.v.func = cxt_fixup_stereo_dmic,
+	},
+	[CXT_FIXUP_INC_MIC_BOOST] = {
+		.type = HDA_FIXUP_FUNC,
+		.v.func = cxt5066_increase_mic_boost,
+	},
+};
+
+static const struct snd_pci_quirk cxt5051_fixups[] = {
+	SND_PCI_QUIRK(0x17aa, 0x20f2, "Lenovo X200", CXT_PINCFG_LENOVO_X200),
+	{}
+};
+
+static const struct snd_pci_quirk cxt5066_fixups[] = {
+	SND_PCI_QUIRK(0x1025, 0x0543, "Acer Aspire One 522", CXT_FIXUP_STEREO_DMIC),
+	SND_PCI_QUIRK(0x17aa, 0x20f2, "Lenovo T400", CXT_PINCFG_LENOVO_TP410),
+	SND_PCI_QUIRK(0x17aa, 0x215e, "Lenovo T410", CXT_PINCFG_LENOVO_TP410),
+	SND_PCI_QUIRK(0x17aa, 0x215f, "Lenovo T510", CXT_PINCFG_LENOVO_TP410),
+	SND_PCI_QUIRK(0x17aa, 0x21ce, "Lenovo T420", CXT_PINCFG_LENOVO_TP410),
+	SND_PCI_QUIRK(0x17aa, 0x21cf, "Lenovo T520", CXT_PINCFG_LENOVO_TP410),
+	SND_PCI_QUIRK(0x17aa, 0x21da, "Lenovo X220", CXT_PINCFG_LENOVO_TP410),
+	SND_PCI_QUIRK(0x17aa, 0x3975, "Lenovo U300s", CXT_FIXUP_STEREO_DMIC),
+	SND_PCI_QUIRK(0x17aa, 0x3977, "Lenovo IdeaPad U310", CXT_FIXUP_STEREO_DMIC),
+	SND_PCI_QUIRK(0x17aa, 0x397b, "Lenovo S205", CXT_FIXUP_STEREO_DMIC),
+	SND_PCI_QUIRK(0x1c06, 0x2011, "Lemote A1004", CXT_PINCFG_LEMOTE_A1004),
+	SND_PCI_QUIRK(0x1c06, 0x2012, "Lemote A1205", CXT_PINCFG_LEMOTE_A1205),
+	{}
+};
+
+/* add "fake" mute amp-caps to DACs on cx5051 so that mixer mute switches
+ * can be created (bko#42825)
+ */
+static void add_cx5051_fake_mutes(struct hda_codec *codec)
+{
+	static hda_nid_t out_nids[] = {
+		0x10, 0x11, 0
+	};
+	hda_nid_t *p;
+
+	for (p = out_nids; *p; p++)
+		snd_hda_override_amp_caps(codec, *p, HDA_OUTPUT,
+					  AC_AMPCAP_MIN_MUTE |
+					  query_amp_caps(codec, *p, HDA_OUTPUT));
+}
 
 static int patch_conexant_auto(struct hda_codec *codec)
 {
 	struct conexant_spec *spec;
 	int err;
 
+	printk(KERN_INFO "hda_codec: %s: BIOS auto-probing.\n",
+	       codec->chip_name);
+
 	spec = kzalloc(sizeof(*spec), GFP_KERNEL);
 	if (!spec)
 		return -ENOMEM;
+	snd_hda_gen_spec_init(&spec->gen);
 	codec->spec = spec;
-	spec->adc_nids = cx_auto_adc_nids;
-	spec->num_adc_nids = ARRAY_SIZE(cx_auto_adc_nids);
-	spec->capsrc_nids = spec->adc_nids;
-	err = cx_auto_parse_auto_config(codec);
-	if (err < 0) {
-		kfree(codec->spec);
-		codec->spec = NULL;
-		return err;
+
+	cx_auto_parse_beep(codec);
+	cx_auto_parse_eapd(codec);
+	spec->gen.own_eapd_ctl = 1;
+	if (spec->dynamic_eapd)
+		spec->gen.vmaster_mute.hook = cx_auto_vmaster_hook;
+
+	switch (codec->vendor_id) {
+	case 0x14f15045:
+		codec->single_adc_amp = 1;
+		break;
+	case 0x14f15047:
+		codec->pin_amp_workaround = 1;
+		spec->gen.mixer_nid = 0x19;
+		break;
+	case 0x14f15051:
+		add_cx5051_fake_mutes(codec);
+		codec->pin_amp_workaround = 1;
+		snd_hda_pick_fixup(codec, NULL, cxt5051_fixups, cxt_fixups);
+		break;
+	default:
+		codec->pin_amp_workaround = 1;
+		snd_hda_pick_fixup(codec, NULL, cxt5066_fixups, cxt_fixups);
+		break;
 	}
+
+	/* Show mute-led control only on HP laptops
+	 * This is a sort of white-list: on HP laptops, EAPD corresponds
+	 * only to the mute-LED without actualy amp function.  Meanwhile,
+	 * others may use EAPD really as an amp switch, so it might be
+	 * not good to expose it blindly.
+	 */
+	switch (codec->subsystem_id >> 16) {
+	case 0x103c:
+		spec->gen.vmaster_mute_enum = 1;
+		break;
+	}
+
+	snd_hda_apply_fixup(codec, HDA_FIXUP_ACT_PRE_PROBE);
+
+	err = snd_hda_parse_pin_defcfg(codec, &spec->gen.autocfg, NULL, 0);
+	if (err < 0)
+		goto error;
+
+	err = snd_hda_gen_parse_auto_config(codec, &spec->gen.autocfg);
+	if (err < 0)
+		goto error;
+
 	codec->patch_ops = cx_auto_patch_ops;
-	if (spec->beep_amp)
-		snd_hda_attach_beep_device(codec, spec->beep_amp);
+
+	/* Some laptops with Conexant chips show stalls in S3 resume,
+	 * which falls into the single-cmd mode.
+	 * Better to make reset, then.
+	 */
+	if (!codec->bus->sync_write) {
+		snd_printd("hda_codec: "
+			   "Enable sync_write for stable communication\n");
+		codec->bus->sync_write = 1;
+		codec->bus->allow_bus_reset = 1;
+	}
+
 	return 0;
+
+ error:
+	snd_hda_gen_free(codec);
+	return err;
 }
+
+#ifndef ENABLE_CXT_STATIC_QUIRKS
+#define patch_cxt5045	patch_conexant_auto
+#define patch_cxt5047	patch_conexant_auto
+#define patch_cxt5051	patch_conexant_auto
+#define patch_cxt5066	patch_conexant_auto
+#endif
 
 /*
  */
 
-static struct hda_codec_preset snd_hda_preset_conexant[] = {
+static const struct hda_codec_preset snd_hda_preset_conexant[] = {
 	{ .id = 0x14f15045, .name = "CX20549 (Venice)",
 	  .patch = patch_cxt5045 },
 	{ .id = 0x14f15047, .name = "CX20551 (Waikiki)",
@@ -3938,6 +3447,8 @@ static struct hda_codec_preset snd_hda_preset_conexant[] = {
 	{ .id = 0x14f15068, .name = "CX20584",
 	  .patch = patch_cxt5066 },
 	{ .id = 0x14f15069, .name = "CX20585",
+	  .patch = patch_cxt5066 },
+	{ .id = 0x14f1506c, .name = "CX20588",
 	  .patch = patch_cxt5066 },
 	{ .id = 0x14f1506e, .name = "CX20590",
 	  .patch = patch_cxt5066 },
@@ -3957,6 +3468,18 @@ static struct hda_codec_preset snd_hda_preset_conexant[] = {
 	  .patch = patch_conexant_auto },
 	{ .id = 0x14f150b9, .name = "CX20665",
 	  .patch = patch_conexant_auto },
+	{ .id = 0x14f1510f, .name = "CX20751/2",
+	  .patch = patch_conexant_auto },
+	{ .id = 0x14f15110, .name = "CX20751/2",
+	  .patch = patch_conexant_auto },
+	{ .id = 0x14f15111, .name = "CX20753/4",
+	  .patch = patch_conexant_auto },
+	{ .id = 0x14f15113, .name = "CX20755",
+	  .patch = patch_conexant_auto },
+	{ .id = 0x14f15114, .name = "CX20756",
+	  .patch = patch_conexant_auto },
+	{ .id = 0x14f15115, .name = "CX20757",
+	  .patch = patch_conexant_auto },
 	{} /* terminator */
 };
 
@@ -3967,6 +3490,7 @@ MODULE_ALIAS("snd-hda-codec-id:14f15066");
 MODULE_ALIAS("snd-hda-codec-id:14f15067");
 MODULE_ALIAS("snd-hda-codec-id:14f15068");
 MODULE_ALIAS("snd-hda-codec-id:14f15069");
+MODULE_ALIAS("snd-hda-codec-id:14f1506c");
 MODULE_ALIAS("snd-hda-codec-id:14f1506e");
 MODULE_ALIAS("snd-hda-codec-id:14f15097");
 MODULE_ALIAS("snd-hda-codec-id:14f15098");
@@ -3976,6 +3500,12 @@ MODULE_ALIAS("snd-hda-codec-id:14f150ab");
 MODULE_ALIAS("snd-hda-codec-id:14f150ac");
 MODULE_ALIAS("snd-hda-codec-id:14f150b8");
 MODULE_ALIAS("snd-hda-codec-id:14f150b9");
+MODULE_ALIAS("snd-hda-codec-id:14f1510f");
+MODULE_ALIAS("snd-hda-codec-id:14f15110");
+MODULE_ALIAS("snd-hda-codec-id:14f15111");
+MODULE_ALIAS("snd-hda-codec-id:14f15113");
+MODULE_ALIAS("snd-hda-codec-id:14f15114");
+MODULE_ALIAS("snd-hda-codec-id:14f15115");
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Conexant HD-audio codec");

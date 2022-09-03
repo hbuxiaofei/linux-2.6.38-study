@@ -25,7 +25,7 @@ struct gfb_info {
 	u32			pseudo_palette[16];
 };
 
-static int __devinit gfb_get_props(struct gfb_info *gp)
+static int gfb_get_props(struct gfb_info *gp)
 {
 	gp->width = of_getintprop_default(gp->of_node, "width", 0);
 	gp->height = of_getintprop_default(gp->of_node, "height", 0);
@@ -66,7 +66,7 @@ static struct fb_ops gfb_ops = {
 	.fb_imageblit		= cfb_imageblit,
 };
 
-static int __devinit gfb_set_fbinfo(struct gfb_info *gp)
+static int gfb_set_fbinfo(struct gfb_info *gp)
 {
 	struct fb_info *info = gp->info;
 	struct fb_var_screeninfo *var = &info->var;
@@ -111,8 +111,7 @@ static int __devinit gfb_set_fbinfo(struct gfb_info *gp)
         return 0;
 }
 
-static int __devinit gfb_probe(struct platform_device *op,
-			       const struct of_device_id *match)
+static int gfb_probe(struct platform_device *op)
 {
 	struct device_node *dp = op->dev.of_node;
 	struct fb_info *info;
@@ -142,8 +141,10 @@ static int __devinit gfb_probe(struct platform_device *op,
 
 	gp->fb_base = of_ioremap(&op->resource[6], 0,
 				 gp->fb_size, "gfb fb");
-	if (!gp->fb_base)
+	if (!gp->fb_base) {
+		err = -ENOMEM;
 		goto err_release_fb;
+	}
 
 	err = gfb_set_fbinfo(gp);
 	if (err)
@@ -172,7 +173,7 @@ err_out:
 	return err;
 }
 
-static int __devexit gfb_remove(struct platform_device *op)
+static int gfb_remove(struct platform_device *op)
 {
 	struct fb_info *info = dev_get_drvdata(&op->dev);
 	struct gfb_info *gp = info->par;
@@ -198,9 +199,9 @@ static const struct of_device_id gfb_match[] = {
 };
 MODULE_DEVICE_TABLE(of, ffb_match);
 
-static struct of_platform_driver gfb_driver = {
+static struct platform_driver gfb_driver = {
 	.probe		= gfb_probe,
-	.remove		= __devexit_p(gfb_remove),
+	.remove		= gfb_remove,
 	.driver = {
 		.name		= "gfb",
 		.owner		= THIS_MODULE,
@@ -213,12 +214,12 @@ static int __init gfb_init(void)
 	if (fb_get_options("gfb", NULL))
 		return -ENODEV;
 
-	return of_register_platform_driver(&gfb_driver);
+	return platform_driver_register(&gfb_driver);
 }
 
 static void __exit gfb_exit(void)
 {
-	of_unregister_platform_driver(&gfb_driver);
+	platform_driver_unregister(&gfb_driver);
 }
 
 module_init(gfb_init);

@@ -98,24 +98,6 @@ static uint16_t socrates_nand_read_word(struct mtd_info *mtd)
 	return word;
 }
 
-/**
- * socrates_nand_verify_buf -  Verify chip data against buffer
- * @mtd:	MTD device structure
- * @buf:	buffer containing the data to compare
- * @len:	number of bytes to compare
- */
-static int socrates_nand_verify_buf(struct mtd_info *mtd, const u8 *buf,
-		int len)
-{
-	int i;
-
-	for (i = 0; i < len; i++) {
-		if (buf[i] != socrates_nand_read_byte(mtd))
-			return -EFAULT;
-	}
-	return 0;
-}
-
 /*
  * Hardware specific access to control-lines
  */
@@ -155,25 +137,16 @@ static int socrates_nand_device_ready(struct mtd_info *mtd)
 	return 1;
 }
 
-#ifdef CONFIG_MTD_PARTITIONS
-static const char *part_probes[] = { "cmdlinepart", NULL };
-#endif
-
 /*
  * Probe for the NAND device.
  */
-static int __devinit socrates_nand_probe(struct platform_device *ofdev,
-					 const struct of_device_id *ofid)
+static int socrates_nand_probe(struct platform_device *ofdev)
 {
 	struct socrates_nand_host *host;
 	struct mtd_info *mtd;
 	struct nand_chip *nand_chip;
 	int res;
-
-#ifdef CONFIG_MTD_PARTITIONS
-	struct mtd_partition *partitions = NULL;
-	int num_partitions = 0;
-#endif
+	struct mtd_part_parser_data ppdata;
 
 	/* Allocate memory for the device structure (and zero it) */
 	host = kzalloc(sizeof(struct socrates_nand_host), GFP_KERNEL);
@@ -199,6 +172,7 @@ static int __devinit socrates_nand_probe(struct platform_device *ofdev,
 	mtd->name = "socrates_nand";
 	mtd->owner = THIS_MODULE;
 	mtd->dev.parent = &ofdev->dev;
+	ppdata.of_node = ofdev->dev.of_node;
 
 	/*should never be accessed directly */
 	nand_chip->IO_ADDR_R = (void *)0xdeadbeef;
@@ -209,7 +183,6 @@ static int __devinit socrates_nand_probe(struct platform_device *ofdev,
 	nand_chip->read_word = socrates_nand_read_word;
 	nand_chip->write_buf = socrates_nand_write_buf;
 	nand_chip->read_buf = socrates_nand_read_buf;
-	nand_chip->verify_buf = socrates_nand_verify_buf;
 	nand_chip->dev_ready = socrates_nand_device_ready;
 
 	nand_chip->ecc.mode = NAND_ECC_SOFT;	/* enable ECC */
@@ -231,39 +204,10 @@ static int __devinit socrates_nand_probe(struct platform_device *ofdev,
 		goto out;
 	}
 
-#ifdef CONFIG_MTD_PARTITIONS
-#ifdef CONFIG_MTD_CMDLINE_PARTS
-	num_partitions = parse_mtd_partitions(mtd, part_probes,
-					      &partitions, 0);
-	if (num_partitions < 0) {
-		res = num_partitions;
-		goto release;
-	}
-#endif
-
-#ifdef CONFIG_MTD_OF_PARTS
-	if (num_partitions == 0) {
-		num_partitions = of_mtd_parse_partitions(&ofdev->dev,
-							 ofdev->dev.of_node,
-							 &partitions);
-		if (num_partitions < 0) {
-			res = num_partitions;
-			goto release;
-		}
-	}
-#endif
-	if (partitions && (num_partitions > 0))
-		res = add_mtd_partitions(mtd, partitions, num_partitions);
-	else
-#endif
-		res = add_mtd_device(mtd);
-
+	res = mtd_device_parse_register(mtd, NULL, &ppdata, NULL, 0);
 	if (!res)
 		return res;
 
-#ifdef CONFIG_MTD_PARTITIONS
-release:
-#endif
 	nand_release(mtd);
 
 out:
@@ -276,7 +220,7 @@ out:
 /*
  * Remove a NAND device.
  */
-static int __devexit socrates_nand_remove(struct platform_device *ofdev)
+static int socrates_nand_remove(struct platform_device *ofdev)
 {
 	struct socrates_nand_host *host = dev_get_drvdata(&ofdev->dev);
 	struct mtd_info *mtd = &host->mtd;
@@ -300,28 +244,17 @@ static const struct of_device_id socrates_nand_match[] =
 
 MODULE_DEVICE_TABLE(of, socrates_nand_match);
 
-static struct of_platform_driver socrates_nand_driver = {
+static struct platform_driver socrates_nand_driver = {
 	.driver = {
 		.name = "socrates_nand",
 		.owner = THIS_MODULE,
 		.of_match_table = socrates_nand_match,
 	},
 	.probe		= socrates_nand_probe,
-	.remove		= __devexit_p(socrates_nand_remove),
+	.remove		= socrates_nand_remove,
 };
 
-static int __init socrates_nand_init(void)
-{
-	return of_register_platform_driver(&socrates_nand_driver);
-}
-
-static void __exit socrates_nand_exit(void)
-{
-	of_unregister_platform_driver(&socrates_nand_driver);
-}
-
-module_init(socrates_nand_init);
-module_exit(socrates_nand_exit);
+module_platform_driver(socrates_nand_driver);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Ilya Yanok");

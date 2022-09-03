@@ -382,14 +382,16 @@ static int c2_alloc_qpn(struct c2_dev *c2dev, struct c2_qp *qp)
 {
 	int ret;
 
-        do {
-		spin_lock_irq(&c2dev->qp_table.lock);
-		ret = idr_get_new_above(&c2dev->qp_table.idr, qp,
-					c2dev->qp_table.last++, &qp->qpn);
-		spin_unlock_irq(&c2dev->qp_table.lock);
-        } while ((ret == -EAGAIN) &&
-	 	 idr_pre_get(&c2dev->qp_table.idr, GFP_KERNEL));
-	return ret;
+	idr_preload(GFP_KERNEL);
+	spin_lock_irq(&c2dev->qp_table.lock);
+
+	ret = idr_alloc_cyclic(&c2dev->qp_table.idr, qp, 0, 0, GFP_NOWAIT);
+	if (ret >= 0)
+		qp->qpn = ret;
+
+	spin_unlock_irq(&c2dev->qp_table.lock);
+	idr_preload_end();
+	return ret < 0 ? ret : 0;
 }
 
 static void c2_free_qpn(struct c2_dev *c2dev, int qpn)
@@ -612,7 +614,7 @@ void c2_free_qp(struct c2_dev *c2dev, struct c2_qp *qp)
 	c2_unlock_cqs(send_cq, recv_cq);
 
 	/*
-	 * Destory qp in the rnic...
+	 * Destroy qp in the rnic...
 	 */
 	destroy_qp(c2dev, qp);
 
@@ -1010,13 +1012,13 @@ out:
 	return err;
 }
 
-void __devinit c2_init_qp_table(struct c2_dev *c2dev)
+void c2_init_qp_table(struct c2_dev *c2dev)
 {
 	spin_lock_init(&c2dev->qp_table.lock);
 	idr_init(&c2dev->qp_table.idr);
 }
 
-void __devexit c2_cleanup_qp_table(struct c2_dev *c2dev)
+void c2_cleanup_qp_table(struct c2_dev *c2dev)
 {
 	idr_destroy(&c2dev->qp_table.idr);
 }

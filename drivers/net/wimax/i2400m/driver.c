@@ -222,7 +222,6 @@ int i2400m_check_mac_addr(struct i2400m *i2400m)
 	struct sk_buff *skb;
 	const struct i2400m_tlv_detailed_device_info *ddi;
 	struct net_device *net_dev = i2400m->wimax_dev.net_dev;
-	const unsigned char zeromac[ETH_ALEN] = { 0 };
 
 	d_fnstart(3, dev, "(i2400m %p)\n", i2400m);
 	skb = i2400m_get_device_info(i2400m);
@@ -244,7 +243,7 @@ int i2400m_check_mac_addr(struct i2400m *i2400m)
 		 "to that of boot mode's\n");
 	dev_warn(dev, "device reports     %pM\n", ddi->mac_address);
 	dev_warn(dev, "boot mode reported %pM\n", net_dev->perm_addr);
-	if (!memcmp(zeromac, ddi->mac_address, sizeof(zeromac)))
+	if (is_zero_ether_addr(ddi->mac_address))
 		dev_err(dev, "device reports an invalid MAC address, "
 			"not updating\n");
 	else {
@@ -654,7 +653,7 @@ void __i2400m_dev_reset_handle(struct work_struct *ws)
 	if (result == -EUCLEAN) {
 		/*
 		 * We come here because the reset during operational mode
-		 * wasn't successully done and need to proceed to a bus
+		 * wasn't successfully done and need to proceed to a bus
 		 * reset. For the dev_reset_handle() to be able to handle
 		 * the reset event later properly, we restore boot_mode back
 		 * to the state before previous reset. ie: just like we are
@@ -754,8 +753,7 @@ EXPORT_SYMBOL_GPL(i2400m_error_recovery);
 /*
  * Alloc the command and ack buffers for boot mode
  *
- * Get the buffers needed to deal with boot mode messages.  These
- * buffers need to be allocated before the sdio recieve irq is setup.
+ * Get the buffers needed to deal with boot mode messages.
  */
 static
 int i2400m_bm_buf_alloc(struct i2400m *i2400m)
@@ -897,7 +895,7 @@ int i2400m_setup(struct i2400m *i2400m, enum i2400m_bri bm_flags)
 	result = i2400m_read_mac_addr(i2400m);
 	if (result < 0)
 		goto error_read_mac_addr;
-	random_ether_addr(i2400m->src_mac_addr);
+	eth_random_addr(i2400m->src_mac_addr);
 
 	i2400m->pm_notifier.notifier_call = i2400m_pm_notifier;
 	register_pm_notifier(&i2400m->pm_notifier);

@@ -10,9 +10,6 @@
 #include <asm/apicdef.h>
 #include <asm/irq_vectors.h>
 
-/* Even though we don't support this, supply it to appease OF */
-static inline void irq_dispose_mapping(unsigned int virq) { }
-
 static inline int irq_canonicalize(int irq)
 {
 	return ((irq == 2) ? 9 : irq);
@@ -43,5 +40,10 @@ extern DECLARE_BITMAP(used_vectors, NR_VECTORS);
 extern int vector_used_by_percpu_irq(unsigned int vector);
 
 extern void init_ISA_irqs(void);
+
+#ifdef CONFIG_X86_LOCAL_APIC
+void arch_trigger_all_cpu_backtrace(void);
+#define arch_trigger_all_cpu_backtrace arch_trigger_all_cpu_backtrace
+#endif
 
 #endif /* _ASM_X86_IRQ_H */

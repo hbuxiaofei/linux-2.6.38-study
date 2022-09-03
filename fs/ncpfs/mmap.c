@@ -16,9 +16,9 @@
 #include <linux/mman.h>
 #include <linux/string.h>
 #include <linux/fcntl.h>
+#include <linux/memcontrol.h>
 
 #include <asm/uaccess.h>
-#include <asm/system.h>
 
 #include "ncp_fs.h"
 
@@ -89,9 +89,10 @@ static int ncp_file_mmap_fault(struct vm_area_struct *area,
 	/*
 	 * If I understand ncp_read_kernel() properly, the above always
 	 * fetches from the network, here the analogue of disk.
-	 * -- wli
+	 * -- nyc
 	 */
 	count_vm_event(PGMAJFAULT);
+	mem_cgroup_count_vm_event(area->vm_mm, PGMAJFAULT);
 	return VM_FAULT_MAJOR;
 }
 
@@ -104,7 +105,7 @@ static const struct vm_operations_struct ncp_file_mmap =
 /* This is used for a general mmap of a ncp file */
 int ncp_mmap(struct file *file, struct vm_area_struct *vma)
 {
-	struct inode *inode = file->f_path.dentry->d_inode;
+	struct inode *inode = file_inode(file);
 	
 	DPRINTK("ncp_mmap: called\n");
 

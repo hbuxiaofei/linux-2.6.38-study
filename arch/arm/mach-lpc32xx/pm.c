@@ -13,7 +13,7 @@
 /*
  * LPC32XX CPU and system power management
  *
- * The LCP32XX has three CPU modes for controlling system power: run,
+ * The LPC32XX has three CPU modes for controlling system power: run,
  * direct-run, and halt modes. When switching between halt and run modes,
  * the CPU transistions through direct-run mode. For Linux, direct-run
  * mode is not used in normal operation. Halt mode is used when the
@@ -41,7 +41,7 @@
  * DRAM clocking and refresh are slightly different for systems with DDR
  * DRAM or regular SDRAM devices. If SDRAM is used in the system, the
  * SDRAM will still be accessible in direct-run mode. In DDR based systems,
- * a transistion to direct-run mode will stop all DDR accesses (no clocks).
+ * a transition to direct-run mode will stop all DDR accesses (no clocks).
  * Because of this, the code to switch power modes and the code to enter
  * and exit DRAM self-refresh modes must not be executed in DRAM. A small
  * section of IRAM is used instead for this.

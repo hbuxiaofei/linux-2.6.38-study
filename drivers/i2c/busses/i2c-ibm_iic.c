@@ -51,11 +51,11 @@
 MODULE_DESCRIPTION("IBM IIC driver v" DRIVER_VERSION);
 MODULE_LICENSE("GPL");
 
-static int iic_force_poll;
+static bool iic_force_poll;
 module_param(iic_force_poll, bool, 0);
 MODULE_PARM_DESC(iic_force_poll, "Force polling mode");
 
-static int iic_force_fast;
+static bool iic_force_fast;
 module_param(iic_force_fast, bool, 0);
 MODULE_PARM_DESC(iic_force_fast, "Force fast mode (400 kHz)");
 
@@ -494,7 +494,7 @@ static int iic_xfer_bytes(struct ibm_iic_private* dev, struct i2c_msg* pm,
 		if (unlikely(ret < 0))
 			break;
 		else if (unlikely(ret != count)){
-			DBG("%d: xfer_bytes, requested %d, transfered %d\n",
+			DBG("%d: xfer_bytes, requested %d, transferred %d\n",
 				dev->idx, count, ret);
 
 			/* If it's not a last part of xfer, abort it */
@@ -593,7 +593,7 @@ static int iic_xfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
 	if (unlikely((in_8(&iic->extsts) & EXTSTS_BCS_MASK) != EXTSTS_BCS_FREE)){
 		DBG("%d: iic_xfer, bus is not free\n", dev->idx);
 
-		/* Usually it means something serious has happend.
+		/* Usually it means something serious has happened.
 		 * We *cannot* have unfinished previous transfer
 		 * so it doesn't make any sense to try to stop it.
 		 * Probably we were not able to recover from the
@@ -660,7 +660,7 @@ static inline u8 iic_clckdiv(unsigned int opb)
 	return (u8)((opb + 9) / 10 - 1);
 }
 
-static int __devinit iic_request_irq(struct platform_device *ofdev,
+static int iic_request_irq(struct platform_device *ofdev,
 				     struct ibm_iic_private *dev)
 {
 	struct device_node *np = ofdev->dev.of_node;
@@ -691,8 +691,7 @@ static int __devinit iic_request_irq(struct platform_device *ofdev,
 /*
  * Register single IIC interface
  */
-static int __devinit iic_probe(struct platform_device *ofdev,
-			       const struct of_device_id *match)
+static int iic_probe(struct platform_device *ofdev)
 {
 	struct device_node *np = ofdev->dev.of_node;
 	struct ibm_iic_private *dev;
@@ -774,7 +773,6 @@ error_cleanup:
 	if (dev->vaddr)
 		iounmap(dev->vaddr);
 
-	dev_set_drvdata(&ofdev->dev, NULL);
 	kfree(dev);
 	return ret;
 }
@@ -782,11 +780,9 @@ error_cleanup:
 /*
  * Cleanup initialized IIC interface
  */
-static int __devexit iic_remove(struct platform_device *ofdev)
+static int iic_remove(struct platform_device *ofdev)
 {
 	struct ibm_iic_private *dev = dev_get_drvdata(&ofdev->dev);
-
-	dev_set_drvdata(&ofdev->dev, NULL);
 
 	i2c_del_adapter(&dev->adap);
 
@@ -806,25 +802,14 @@ static const struct of_device_id ibm_iic_match[] = {
 	{}
 };
 
-static struct of_platform_driver ibm_iic_driver = {
+static struct platform_driver ibm_iic_driver = {
 	.driver = {
 		.name = "ibm-iic",
 		.owner = THIS_MODULE,
 		.of_match_table = ibm_iic_match,
 	},
 	.probe	= iic_probe,
-	.remove	= __devexit_p(iic_remove),
+	.remove	= iic_remove,
 };
 
-static int __init iic_init(void)
-{
-	return of_register_platform_driver(&ibm_iic_driver);
-}
-
-static void __exit iic_exit(void)
-{
-	of_unregister_platform_driver(&ibm_iic_driver);
-}
-
-module_init(iic_init);
-module_exit(iic_exit);
+module_platform_driver(ibm_iic_driver);

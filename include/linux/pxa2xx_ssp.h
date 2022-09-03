@@ -122,7 +122,7 @@
 #define SSCR1_TSRE		(1 << 21)	/* Transmit Service Request Enable */
 #define SSCR1_RSRE		(1 << 20)	/* Receive Service Request Enable */
 #define SSCR1_TINTE		(1 << 19)	/* Receiver Time-out Interrupt enable */
-#define SSCR1_PINTE		(1 << 18)	/* Peripheral Trailing Byte Interupt Enable */
+#define SSCR1_PINTE		(1 << 18)	/* Peripheral Trailing Byte Interrupt Enable */
 #define SSCR1_IFS		(1 << 16)	/* Invert Frame Signal */
 #define SSCR1_STRF		(1 << 15)	/* Select FIFO or EFWR */
 #define SSCR1_EFWR		(1 << 14)	/* Enable FIFO Write/Read */
@@ -155,13 +155,24 @@
 #define SSACD_ACDS(x)		((x) << 0)	/* Audio clock divider select */
 #define SSACD_SCDX8		(1 << 7)	/* SYSCLK division ratio select */
 
+/* LPSS SSP */
+#define SSITF			0x44		/* TX FIFO trigger level */
+#define SSITF_TxLoThresh(x)	(((x) - 1) << 8)
+#define SSITF_TxHiThresh(x)	((x) - 1)
+
+#define SSIRF			0x48		/* RX FIFO trigger level */
+#define SSIRF_RxThresh(x)	((x) - 1)
+
 enum pxa_ssp_type {
 	SSP_UNDEFINED = 0,
 	PXA25x_SSP,  /* pxa 210, 250, 255, 26x */
 	PXA25x_NSSP, /* pxa 255, 26x (including ASSP) */
 	PXA27x_SSP,
+	PXA3xx_SSP,
 	PXA168_SSP,
+	PXA910_SSP,
 	CE4100_SSP,
+	LPSS_SSP,
 };
 
 struct ssp_device {
@@ -204,6 +215,15 @@ static inline u32 pxa_ssp_read_reg(struct ssp_device *dev, u32 reg)
 	return __raw_readl(dev->mmio_base + reg);
 }
 
+#ifdef CONFIG_ARCH_PXA
 struct ssp_device *pxa_ssp_request(int port, const char *label);
 void pxa_ssp_free(struct ssp_device *);
+#else
+static inline struct ssp_device *pxa_ssp_request(int port, const char *label)
+{
+	return NULL;
+}
+static inline void pxa_ssp_free(struct ssp_device *ssp) {}
+#endif
+
 #endif

@@ -42,7 +42,6 @@
 #include <linux/uio.h>
 #include <linux/slab.h>
 #include <linux/skbuff.h>
-#include <linux/smp_lock.h>
 #include <linux/socket.h>
 #include <linux/sockios.h>
 #include <linux/string.h>
@@ -149,7 +148,6 @@ static void ipx_destroy_socket(struct sock *sk)
 	ipx_remove_socket(sk);
 	skb_queue_purge(&sk->sk_receive_queue);
 	sk_refcnt_debug_dec(sk);
-	sock_put(sk);
 }
 
 /*
@@ -230,9 +228,8 @@ static struct sock *__ipxitf_find_socket(struct ipx_interface *intrfc,
 					 __be16 port)
 {
 	struct sock *s;
-	struct hlist_node *node;
 
-	sk_for_each(s, node, &intrfc->if_sklist)
+	sk_for_each(s, &intrfc->if_sklist)
 		if (ipx_sk(s)->port == port)
 			goto found;
 	s = NULL;
@@ -261,12 +258,11 @@ static struct sock *ipxitf_find_internal_socket(struct ipx_interface *intrfc,
 						__be16 port)
 {
 	struct sock *s;
-	struct hlist_node *node;
 
 	ipxitf_hold(intrfc);
 	spin_lock_bh(&intrfc->if_sklist_lock);
 
-	sk_for_each(s, node, &intrfc->if_sklist) {
+	sk_for_each(s, &intrfc->if_sklist) {
 		struct ipx_sock *ipxs = ipx_sk(s);
 
 		if (ipxs->port == port &&
@@ -284,14 +280,14 @@ found:
 static void __ipxitf_down(struct ipx_interface *intrfc)
 {
 	struct sock *s;
-	struct hlist_node *node, *t;
+	struct hlist_node *t;
 
 	/* Delete all routes associated with this interface */
 	ipxrtr_del_routes(intrfc);
 
 	spin_lock_bh(&intrfc->if_sklist_lock);
 	/* error sockets */
-	sk_for_each_safe(s, node, t, &intrfc->if_sklist) {
+	sk_for_each_safe(s, t, &intrfc->if_sklist) {
 		struct ipx_sock *ipxs = ipx_sk(s);
 
 		s->sk_err = ENOLINK;
@@ -387,12 +383,11 @@ static int ipxitf_demux_socket(struct ipx_interface *intrfc,
 	int is_broadcast = !memcmp(ipx->ipx_dest.node, ipx_broadcast_node,
 				   IPX_NODE_LEN);
 	struct sock *s;
-	struct hlist_node *node;
 	int rc;
 
 	spin_lock_bh(&intrfc->if_sklist_lock);
 
-	sk_for_each(s, node, &intrfc->if_sklist) {
+	sk_for_each(s, &intrfc->if_sklist) {
 		struct ipx_sock *ipxs = ipx_sk(s);
 
 		if (ipxs->port == ipx->ipx_dest.sock &&
@@ -448,12 +443,11 @@ static struct sock *ncp_connection_hack(struct ipx_interface *intrfc,
 		connection = (((int) *(ncphdr + 9)) << 8) | (int) *(ncphdr + 8);
 
 	if (connection) {
-		struct hlist_node *node;
 		/* Now we have to look for a special NCP connection handling
 		 * socket. Only these sockets have ipx_ncp_conn != 0, set by
 		 * SIOCIPXNCPCONN. */
 		spin_lock_bh(&intrfc->if_sklist_lock);
-		sk_for_each(sk, node, &intrfc->if_sklist)
+		sk_for_each(sk, &intrfc->if_sklist)
 			if (ipx_sk(sk)->ipx_ncp_conn == connection) {
 				sock_hold(sk);
 				goto found;
@@ -985,10 +979,6 @@ static int ipxitf_create(struct ipx_interface_definition *idef)
 		goto out;
 
 	switch (idef->ipx_dlink_type) {
-	case IPX_FRAME_TR_8022:
-		printk(KERN_WARNING "IPX frame type 802.2TR is "
-			"obsolete Use 802.2 instead.\n");
-		/* fall through */
 	case IPX_FRAME_8022:
 		dlink_type 	= htons(ETH_P_802_2);
 		datalink 	= p8022_datalink;
@@ -998,10 +988,7 @@ static int ipxitf_create(struct ipx_interface_definition *idef)
 			dlink_type 	= htons(ETH_P_IPX);
 			datalink 	= pEII_datalink;
 			break;
-		} else
-			printk(KERN_WARNING "IPX frame type EtherII over "
-					"token-ring is obsolete. Use SNAP "
-					"instead.\n");
+		}
 		/* fall through */
 	case IPX_FRAME_SNAP:
 		dlink_type 	= htons(ETH_P_SNAP);
@@ -1277,7 +1264,6 @@ const char *ipx_frame_name(__be16 frame)
 	case ETH_P_802_2:	rc = "802.2";	break;
 	case ETH_P_SNAP:	rc = "SNAP";	break;
 	case ETH_P_802_3:	rc = "802.3";	break;
-	case ETH_P_TR_802_2:	rc = "802.2TR";	break;
 	}
 
 	return rc;
@@ -1299,7 +1285,7 @@ static int ipx_setsockopt(struct socket *sock, int level, int optname,
 	int opt;
 	int rc = -EINVAL;
 
-	lock_kernel();
+	lock_sock(sk);
 	if (optlen != sizeof(int))
 		goto out;
 
@@ -1314,7 +1300,7 @@ static int ipx_setsockopt(struct socket *sock, int level, int optname,
 	ipx_sk(sk)->type = opt;
 	rc = 0;
 out:
-	unlock_kernel();
+	release_sock(sk);
 	return rc;
 }
 
@@ -1326,7 +1312,7 @@ static int ipx_getsockopt(struct socket *sock, int level, int optname,
 	int len;
 	int rc = -ENOPROTOOPT;
 
-	lock_kernel();
+	lock_sock(sk);
 	if (!(level == SOL_IPX && optname == IPX_TYPE))
 		goto out;
 
@@ -1347,7 +1333,7 @@ static int ipx_getsockopt(struct socket *sock, int level, int optname,
 
 	rc = 0;
 out:
-	unlock_kernel();
+	release_sock(sk);
 	return rc;
 }
 
@@ -1396,7 +1382,7 @@ static int ipx_release(struct socket *sock)
 	if (!sk)
 		goto out;
 
-	lock_kernel();
+	lock_sock(sk);
 	if (!sock_flag(sk, SOCK_DEAD))
 		sk->sk_state_change(sk);
 
@@ -1404,7 +1390,8 @@ static int ipx_release(struct socket *sock)
 	sock->sk = NULL;
 	sk_refcnt_debug_release(sk);
 	ipx_destroy_socket(sk);
-	unlock_kernel();
+	release_sock(sk);
+	sock_put(sk);
 out:
 	return 0;
 }
@@ -1530,11 +1517,12 @@ out:
 
 static int ipx_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 {
+	struct sock *sk = sock->sk;
 	int rc;
 
-	lock_kernel();
+	lock_sock(sk);
 	rc = __ipx_bind(sock, uaddr, addr_len);
-	unlock_kernel();
+	release_sock(sk);
 
 	return rc;
 }
@@ -1551,7 +1539,7 @@ static int ipx_connect(struct socket *sock, struct sockaddr *uaddr,
 	sk->sk_state	= TCP_CLOSE;
 	sock->state 	= SS_UNCONNECTED;
 
-	lock_kernel();
+	lock_sock(sk);
 	if (addr_len != sizeof(*addr))
 		goto out;
 	addr = (struct sockaddr_ipx *)uaddr;
@@ -1598,7 +1586,7 @@ static int ipx_connect(struct socket *sock, struct sockaddr *uaddr,
 		ipxrtr_put(rt);
 	rc = 0;
 out:
-	unlock_kernel();
+	release_sock(sk);
 	return rc;
 }
 
@@ -1614,7 +1602,7 @@ static int ipx_getname(struct socket *sock, struct sockaddr *uaddr,
 
 	*uaddr_len = sizeof(struct sockaddr_ipx);
 
-	lock_kernel();
+	lock_sock(sk);
 	if (peer) {
 		rc = -ENOTCONN;
 		if (sk->sk_state != TCP_ESTABLISHED)
@@ -1649,19 +1637,7 @@ static int ipx_getname(struct socket *sock, struct sockaddr *uaddr,
 
 	rc = 0;
 out:
-	unlock_kernel();
-	return rc;
-}
-
-static unsigned int ipx_datagram_poll(struct file *file, struct socket *sock,
-			   poll_table *wait)
-{
-	int rc;
-
-	lock_kernel();
-	rc = datagram_poll(file, sock, wait);
-	unlock_kernel();
-
+	release_sock(sk);
 	return rc;
 }
 
@@ -1736,7 +1712,7 @@ static int ipx_sendmsg(struct kiocb *iocb, struct socket *sock,
 	int rc = -EINVAL;
 	int flags = msg->msg_flags;
 
-	lock_kernel();
+	lock_sock(sk);
 	/* Socket gets bound below anyway */
 /*	if (sk->sk_zapped)
 		return -EIO; */	/* Socket not bound */
@@ -1788,7 +1764,7 @@ static int ipx_sendmsg(struct kiocb *iocb, struct socket *sock,
 	if (rc >= 0)
 		rc = len;
 out:
-	unlock_kernel();
+	release_sock(sk);
 	return rc;
 }
 
@@ -1803,7 +1779,7 @@ static int ipx_recvmsg(struct kiocb *iocb, struct socket *sock,
 	struct sk_buff *skb;
 	int copied, rc;
 
-	lock_kernel();
+	lock_sock(sk);
 	/* put the autobinding in */
 	if (!ipxs->port) {
 		struct sockaddr_ipx uaddr;
@@ -1862,7 +1838,7 @@ static int ipx_recvmsg(struct kiocb *iocb, struct socket *sock,
 out_free:
 	skb_free_datagram(sk, skb);
 out:
-	unlock_kernel();
+	release_sock(sk);
 	return rc;
 }
 
@@ -1874,7 +1850,7 @@ static int ipx_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 	struct sock *sk = sock->sk;
 	void __user *argp = (void __user *)arg;
 
-	lock_kernel();
+	lock_sock(sk);
 	switch (cmd) {
 	case TIOCOUTQ:
 		amount = sk->sk_sndbuf - sk_wmem_alloc_get(sk);
@@ -1921,9 +1897,7 @@ static int ipx_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 			      (const unsigned short __user *)argp);
 		break;
 	case SIOCGSTAMP:
-		rc = -EINVAL;
-		if (sk)
-			rc = sock_get_timestamp(sk, argp);
+		rc = sock_get_timestamp(sk, argp);
 		break;
 	case SIOCGIFDSTADDR:
 	case SIOCSIFDSTADDR:
@@ -1937,7 +1911,7 @@ static int ipx_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 		rc = -ENOIOCTLCMD;
 		break;
 	}
-	unlock_kernel();
+	release_sock(sk);
 
 	return rc;
 }
@@ -1984,7 +1958,7 @@ static const struct proto_ops ipx_dgram_ops = {
 	.socketpair	= sock_no_socketpair,
 	.accept		= sock_no_accept,
 	.getname	= ipx_getname,
-	.poll		= ipx_datagram_poll,
+	.poll		= datagram_poll,
 	.ioctl		= ipx_ioctl,
 #ifdef CONFIG_COMPAT
 	.compat_ioctl	= ipx_compat_ioctl,

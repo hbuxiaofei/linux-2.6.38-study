@@ -178,7 +178,7 @@ static void parport_cs_release(struct pcmcia_device *link)
 } /* parport_cs_release */
 
 
-static struct pcmcia_device_id parport_ids[] = {
+static const struct pcmcia_device_id parport_ids[] = {
 	PCMCIA_DEVICE_FUNC_ID(3),
 	PCMCIA_MFC_DEVICE_PROD_ID12(1,"Elan","Serial+Parallel Port: SP230",0x3beb8cf2,0xdb9e58bc),
 	PCMCIA_DEVICE_MANF_CARD(0x0137, 0x0003),
@@ -193,16 +193,4 @@ static struct pcmcia_driver parport_cs_driver = {
 	.remove		= parport_detach,
 	.id_table	= parport_ids,
 };
-
-static int __init init_parport_cs(void)
-{
-	return pcmcia_register_driver(&parport_cs_driver);
-}
-
-static void __exit exit_parport_cs(void)
-{
-	pcmcia_unregister_driver(&parport_cs_driver);
-}
-
-module_init(init_parport_cs);
-module_exit(exit_parport_cs);
+module_pcmcia_driver(parport_cs_driver);

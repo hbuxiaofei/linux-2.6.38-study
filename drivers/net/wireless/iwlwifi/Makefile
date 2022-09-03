@@ -1,35 +1,21 @@
-obj-$(CONFIG_IWLWIFI)	+= iwlcore.o
-iwlcore-objs 		:= iwl-core.o iwl-eeprom.o iwl-hcmd.o iwl-power.o
-iwlcore-objs 		+= iwl-rx.o iwl-tx.o iwl-sta.o
-iwlcore-objs 		+= iwl-scan.o iwl-led.o
-iwlcore-$(CONFIG_IWL3945) += iwl-legacy.o
-iwlcore-$(CONFIG_IWL4965) += iwl-legacy.o
-iwlcore-$(CONFIG_IWLWIFI_DEBUGFS) += iwl-debugfs.o
-iwlcore-$(CONFIG_IWLWIFI_DEVICE_TRACING) += iwl-devtrace.o
+# common
+obj-$(CONFIG_IWLWIFI)	+= iwlwifi.o
+iwlwifi-objs		+= iwl-io.o
+iwlwifi-objs		+= iwl-drv.o
+iwlwifi-objs		+= iwl-debug.o
+iwlwifi-objs		+= iwl-notif-wait.o
+iwlwifi-objs		+= iwl-eeprom-read.o iwl-eeprom-parse.o
+iwlwifi-objs		+= iwl-phy-db.o iwl-nvm-parse.o
+iwlwifi-objs		+= pcie/drv.o pcie/rx.o pcie/tx.o pcie/trans.o
+iwlwifi-objs		+= iwl-1000.o iwl-2000.o iwl-5000.o iwl-6000.o iwl-7000.o
 
-# If 3945 is selected only, iwl-legacy.o will be added
-# to iwlcore-m above, but it needs to be built in.
-iwlcore-objs += $(iwlcore-m)
+iwlwifi-$(CONFIG_IWLWIFI_DEVICE_TRACING) += iwl-devtrace.o
+iwlwifi-$(CONFIG_IWLWIFI_DEVICE_TESTMODE) += iwl-test.o
+
+ccflags-y += -D__CHECK_ENDIAN__ -I$(src)
+
+
+obj-$(CONFIG_IWLDVM)	+= dvm/
+obj-$(CONFIG_IWLMVM)	+= mvm/
 
 CFLAGS_iwl-devtrace.o := -I$(src)
-
-# AGN
-obj-$(CONFIG_IWLAGN)	+= iwlagn.o
-iwlagn-objs		:= iwl-agn.o iwl-agn-rs.o iwl-agn-led.o
-iwlagn-objs		+= iwl-agn-ucode.o iwl-agn-tx.o
-iwlagn-objs		+= iwl-agn-lib.o iwl-agn-rx.o iwl-agn-calib.o
-iwlagn-objs		+= iwl-agn-tt.o iwl-agn-sta.o iwl-agn-eeprom.o
-iwlagn-$(CONFIG_IWLWIFI_DEBUGFS) += iwl-agn-debugfs.o
-
-iwlagn-$(CONFIG_IWL4965) += iwl-4965.o
-iwlagn-$(CONFIG_IWL5000) += iwl-agn-rxon.o iwl-agn-hcmd.o iwl-agn-ict.o
-iwlagn-$(CONFIG_IWL5000) += iwl-5000.o
-iwlagn-$(CONFIG_IWL5000) += iwl-6000.o
-iwlagn-$(CONFIG_IWL5000) += iwl-1000.o
-
-# 3945
-obj-$(CONFIG_IWL3945)	+= iwl3945.o
-iwl3945-objs		:= iwl3945-base.o iwl-3945.o iwl-3945-rs.o iwl-3945-led.o
-iwl3945-$(CONFIG_IWLWIFI_DEBUGFS) += iwl-3945-debugfs.o
-
-ccflags-y += -D__CHECK_ENDIAN__

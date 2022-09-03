@@ -11,6 +11,7 @@
 #include "event.h"
 #include "debug.h"
 #include "util.h"
+#include "target.h"
 
 int verbose;
 bool dump_trace = false, quiet = false;
@@ -22,8 +23,8 @@ int eprintf(int level, const char *fmt, ...)
 
 	if (verbose >= level) {
 		va_start(args, fmt);
-		if (use_browser > 0)
-			ret = ui_helpline__show_help(fmt, args);
+		if (use_browser >= 1)
+			ui_helpline__vshow(fmt, args);
 		else
 			ret = vfprintf(stderr, fmt, args);
 		va_end(args);
@@ -46,18 +47,7 @@ int dump_printf(const char *fmt, ...)
 	return ret;
 }
 
-#ifdef NO_NEWT_SUPPORT
-void ui__warning(const char *format, ...)
-{
-	va_list args;
-
-	va_start(args, format);
-	vfprintf(stderr, format, args);
-	va_end(args);
-}
-#endif
-
-void trace_event(event_t *event)
+void trace_event(union perf_event *event)
 {
 	unsigned char *raw_event = (void *)event;
 	const char *color = PERF_COLOR_BLUE;

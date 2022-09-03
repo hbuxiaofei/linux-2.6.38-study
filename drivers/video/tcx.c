@@ -362,8 +362,7 @@ static void tcx_unmap_regs(struct platform_device *op, struct fb_info *info,
 			   info->screen_base, info->fix.smem_len);
 }
 
-static int __devinit tcx_probe(struct platform_device *op,
-			       const struct of_device_id *match)
+static int tcx_probe(struct platform_device *op)
 {
 	struct device_node *dp = op->dev.of_node;
 	struct fb_info *info;
@@ -481,12 +480,13 @@ out_dealloc_cmap:
 
 out_unmap_regs:
 	tcx_unmap_regs(op, info, par);
+	framebuffer_release(info);
 
 out_err:
 	return err;
 }
 
-static int __devexit tcx_remove(struct platform_device *op)
+static int tcx_remove(struct platform_device *op)
 {
 	struct fb_info *info = dev_get_drvdata(&op->dev);
 	struct tcx_par *par = info->par;
@@ -511,14 +511,14 @@ static const struct of_device_id tcx_match[] = {
 };
 MODULE_DEVICE_TABLE(of, tcx_match);
 
-static struct of_platform_driver tcx_driver = {
+static struct platform_driver tcx_driver = {
 	.driver = {
 		.name = "tcx",
 		.owner = THIS_MODULE,
 		.of_match_table = tcx_match,
 	},
 	.probe		= tcx_probe,
-	.remove		= __devexit_p(tcx_remove),
+	.remove		= tcx_remove,
 };
 
 static int __init tcx_init(void)
@@ -526,12 +526,12 @@ static int __init tcx_init(void)
 	if (fb_get_options("tcxfb", NULL))
 		return -ENODEV;
 
-	return of_register_platform_driver(&tcx_driver);
+	return platform_driver_register(&tcx_driver);
 }
 
 static void __exit tcx_exit(void)
 {
-	of_unregister_platform_driver(&tcx_driver);
+	platform_driver_unregister(&tcx_driver);
 }
 
 module_init(tcx_init);

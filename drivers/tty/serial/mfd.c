@@ -16,9 +16,7 @@
  *    2/3 chan to port 1, 4/5 chan to port 3. Even number chans
  *    are used for RX, odd chans for TX
  *
- * 2. In A0 stepping, UART will not support TX half empty flag
- *
- * 3. The RI/DSR/DCD/DTR are not pinned out, DCD & DSR are always
+ * 2. The RI/DSR/DCD/DTR are not pinned out, DCD & DSR are always
  *    asserted, only when the HW is reset the DDCD and DDSR will
  *    be triggered
  */
@@ -38,10 +36,10 @@
 #include <linux/serial_mfd.h>
 #include <linux/dma-mapping.h>
 #include <linux/pci.h>
+#include <linux/nmi.h>
 #include <linux/io.h>
 #include <linux/debugfs.h>
-
-#define  MFD_HSU_A0_STEPPING	1
+#include <linux/pm_runtime.h>
 
 #define HSU_DMA_BUF_SIZE	2048
 
@@ -51,7 +49,10 @@
 #define mfd_readl(obj, offset)		readl(obj->reg + offset)
 #define mfd_writel(obj, offset, val)	writel(val, obj->reg + offset)
 
-#define HSU_DMA_TIMEOUT_CHECK_FREQ	(HZ/10)
+static int hsu_dma_enable;
+module_param(hsu_dma_enable, int, 0);
+MODULE_PARM_DESC(hsu_dma_enable,
+		 "It is a bitmap to set working mode, if bit[x] is 1, then port[x] will work in DMA mode, otherwise in PIO mode.");
 
 struct hsu_dma_buffer {
 	u8		*buf;
@@ -65,7 +66,6 @@ struct hsu_dma_chan {
 	enum dma_data_direction	dirt;
 	struct uart_hsu_port	*uport;
 	void __iomem		*reg;
-	struct timer_list	rx_timer; /* only needed by RX channel */
 };
 
 struct uart_hsu_port {
@@ -128,11 +128,6 @@ static inline void serial_out(struct uart_hsu_port *up, int offset, int value)
 
 #define HSU_REGS_BUFSIZE	1024
 
-static int hsu_show_regs_open(struct inode *inode, struct file *file)
-{
-	file->private_data = inode->i_private;
-	return 0;
-}
 
 static ssize_t port_show_regs(struct file *file, char __user *user_buf,
 				size_t count, loff_t *ppos)
@@ -232,14 +227,14 @@ static ssize_t dma_show_regs(struct file *file, char __user *user_buf,
 
 static const struct file_operations port_regs_ops = {
 	.owner		= THIS_MODULE,
-	.open		= hsu_show_regs_open,
+	.open		= simple_open,
 	.read		= port_show_regs,
 	.llseek		= default_llseek,
 };
 
 static const struct file_operations dma_regs_ops = {
 	.owner		= THIS_MODULE,
-	.open		= hsu_show_regs_open,
+	.open		= simple_open,
 	.read		= dma_show_regs,
 	.llseek		= default_llseek,
 };
@@ -355,8 +350,6 @@ void hsu_dma_start_rx_chan(struct hsu_dma_chan *rxc, struct hsu_dma_buffer *dbuf
 					 | (0x1 << 24)	/* timeout bit, see HSU Errata 1 */
 					 );
 	chan_writel(rxc, HSU_CH_CR, 0x3);
-
-	mod_timer(&rxc->rx_timer, jiffies + HSU_DMA_TIMEOUT_CHECK_FREQ);
 }
 
 /* Protected by spin_lock_irqsave(port->lock) */
@@ -394,11 +387,8 @@ void hsu_dma_rx(struct uart_hsu_port *up, u32 int_sts)
 	struct hsu_dma_buffer *dbuf = &up->rxbuf;
 	struct hsu_dma_chan *chan = up->rxc;
 	struct uart_port *port = &up->port;
-	struct tty_struct *tty = port->state->port.tty;
+	struct tty_port *tport = &port->state->port;
 	int count;
-
-	if (!tty)
-		return;
 
 	/*
 	 * First need to know how many is already transferred,
@@ -420,7 +410,6 @@ void hsu_dma_rx(struct uart_hsu_port *up, u32 int_sts)
 		chan_writel(chan, HSU_CH_CR, 0x3);
 		return;
 	}
-	del_timer(&chan->rx_timer);
 
 	dma_sync_single_for_cpu(port->dev, dbuf->dma_addr,
 			dbuf->dma_size, DMA_FROM_DEVICE);
@@ -431,7 +420,7 @@ void hsu_dma_rx(struct uart_hsu_port *up, u32 int_sts)
 	 * explicitly set tail to 0. So head will
 	 * always be greater than tail.
 	 */
-	tty_insert_flip_string(tty, dbuf->buf, count);
+	tty_insert_flip_string(tport, dbuf->buf, count);
 	port->icount.rx += count;
 
 	dma_sync_single_for_device(up->port.dev, dbuf->dma_addr,
@@ -445,11 +434,9 @@ void hsu_dma_rx(struct uart_hsu_port *up, u32 int_sts)
 					 | (0x1 << 16)
 					 | (0x1 << 24)	/* timeout bit, see HSU Errata 1 */
 					 );
-	tty_flip_buffer_push(tty);
+	tty_flip_buffer_push(tport);
 
 	chan_writel(chan, HSU_CH_CR, 0x3);
-	chan->rx_timer.expires = jiffies + HSU_DMA_TIMEOUT_CHECK_FREQ;
-	add_timer(&chan->rx_timer);
 
 }
 
@@ -470,12 +457,8 @@ static void serial_hsu_stop_rx(struct uart_port *port)
 
 static inline void receive_chars(struct uart_hsu_port *up, int *status)
 {
-	struct tty_struct *tty = up->port.state->port.tty;
 	unsigned int ch, flag;
 	unsigned int max_count = 256;
-
-	if (!tty)
-		return;
 
 	do {
 		ch = serial_in(up, UART_RX);
@@ -532,7 +515,7 @@ static inline void receive_chars(struct uart_hsu_port *up, int *status)
 	ignore_char:
 		*status = serial_in(up, UART_LSR);
 	} while ((*status & UART_LSR_DR) && max_count--);
-	tty_flip_buffer_push(tty);
+	tty_flip_buffer_push(&up->port.state->port);
 }
 
 static void transmit_chars(struct uart_hsu_port *up)
@@ -551,16 +534,9 @@ static void transmit_chars(struct uart_hsu_port *up)
 		return;
 	}
 
-#ifndef MFD_HSU_A0_STEPPING
+	/* The IRQ is for TX FIFO half-empty */
 	count = up->port.fifosize / 2;
-#else
-	/*
-	 * A0 only supports fully empty IRQ, and the first char written
-	 * into it won't clear the EMPT bit, so we may need be cautious
-	 * by useing a shorter buffer
-	 */
-	count = up->port.fifosize - 4;
-#endif
+
 	do {
 		serial_out(up, UART_TX, xmit->buf[xmit->tail]);
 		xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
@@ -769,15 +745,16 @@ static void serial_hsu_break_ctl(struct uart_port *port, int break_state)
 /*
  * What special to do:
  * 1. chose the 64B fifo mode
- * 2. make sure not to select half empty mode for A0 stepping
- * 3. start dma or pio depends on configuration
- * 4. we only allocate dma memory when needed
+ * 2. start dma or pio depends on configuration
+ * 3. we only allocate dma memory when needed
  */
 static int serial_hsu_startup(struct uart_port *port)
 {
 	struct uart_hsu_port *up =
 		container_of(port, struct uart_hsu_port, port);
 	unsigned long flags;
+
+	pm_runtime_get_sync(up->dev);
 
 	/*
 	 * Clear the FIFO buffers and disable them.
@@ -870,8 +847,6 @@ static void serial_hsu_shutdown(struct uart_port *port)
 		container_of(port, struct uart_hsu_port, port);
 	unsigned long flags;
 
-	del_timer_sync(&up->rxc->rx_timer);
-
 	/* Disable interrupts from this port */
 	up->ier = 0;
 	serial_out(up, UART_IER, 0);
@@ -888,6 +863,8 @@ static void serial_hsu_shutdown(struct uart_port *port)
 				  UART_FCR_CLEAR_RCVR |
 				  UART_FCR_CLEAR_XMIT);
 	serial_out(up, UART_FCR, 0);
+
+	pm_runtime_put(up->dev);
 }
 
 static void
@@ -896,7 +873,6 @@ serial_hsu_set_termios(struct uart_port *port, struct ktermios *termios,
 {
 	struct uart_hsu_port *up =
 			container_of(port, struct uart_hsu_port, port);
-	struct tty_struct *tty = port->state->port.tty;
 	unsigned char cval, fcr = 0;
 	unsigned long flags;
 	unsigned int baud, quot;
@@ -919,8 +895,7 @@ serial_hsu_set_termios(struct uart_port *port, struct ktermios *termios,
 	}
 
 	/* CMSPAR isn't supported by this driver */
-	if (tty)
-		tty->termios->c_cflag &= ~CMSPAR;
+	termios->c_cflag &= ~CMSPAR;
 
 	if (termios->c_cflag & CSTOPB)
 		cval |= UART_LCR_STOP;
@@ -977,10 +952,6 @@ serial_hsu_set_termios(struct uart_port *port, struct ktermios *termios,
 		fcr = UART_FCR_ENABLE_FIFO | UART_FCR_HSU_64_32B;
 
 	fcr |= UART_FCR_HSU_64B_FIFO;
-#ifdef MFD_HSU_A0_STEPPING
-	/* A0 doesn't support half empty IRQ */
-	fcr |= UART_FCR_FULL_EMPT_TXI;
-#endif
 
 	/*
 	 * Ok, we're now changing the port state.  Do it with
@@ -1136,6 +1107,8 @@ serial_hsu_console_write(struct console *co, const char *s, unsigned int count)
 	unsigned int ier;
 	int locked = 1;
 
+	touch_nmi_watchdog();
+
 	local_irq_save(flags);
 	if (up->port.sysrq)
 		locked = 0;
@@ -1172,7 +1145,6 @@ serial_hsu_console_setup(struct console *co, char *options)
 	int bits = 8;
 	int parity = 'n';
 	int flow = 'n';
-	int ret;
 
 	if (co->index == -1 || co->index >= serial_hsu_reg.nr)
 		co->index = 0;
@@ -1183,9 +1155,7 @@ serial_hsu_console_setup(struct console *co, char *options)
 	if (options)
 		uart_parse_options(options, &baud, &parity, &bits, &flow);
 
-	ret = uart_set_options(&up->port, co, baud, parity, bits, flow);
-
-	return ret;
+	return uart_set_options(&up->port, co, baud, parity, bits, flow);
 }
 
 static struct console serial_hsu_console = {
@@ -1194,9 +1164,13 @@ static struct console serial_hsu_console = {
 	.device		= uart_console_device,
 	.setup		= serial_hsu_console_setup,
 	.flags		= CON_PRINTBUFFER,
-	.index		= 2,
+	.index		= -1,
 	.data		= &serial_hsu_reg,
 };
+
+#define SERIAL_HSU_CONSOLE	(&serial_hsu_console)
+#else
+#define SERIAL_HSU_CONSOLE	NULL
 #endif
 
 struct uart_ops serial_hsu_pops = {
@@ -1226,6 +1200,7 @@ static struct uart_driver serial_hsu_reg = {
 	.major		= TTY_MAJOR,
 	.minor		= 128,
 	.nr		= 3,
+	.cons		= SERIAL_HSU_CONSOLE,
 };
 
 #ifdef CONFIG_PM
@@ -1269,6 +1244,39 @@ static int serial_hsu_resume(struct pci_dev *pdev)
 #define serial_hsu_suspend	NULL
 #define serial_hsu_resume	NULL
 #endif
+
+#ifdef CONFIG_PM_RUNTIME
+static int serial_hsu_runtime_idle(struct device *dev)
+{
+	int err;
+
+	err = pm_schedule_suspend(dev, 500);
+	if (err)
+		return -EBUSY;
+
+	return 0;
+}
+
+static int serial_hsu_runtime_suspend(struct device *dev)
+{
+	return 0;
+}
+
+static int serial_hsu_runtime_resume(struct device *dev)
+{
+	return 0;
+}
+#else
+#define serial_hsu_runtime_idle		NULL
+#define serial_hsu_runtime_suspend	NULL
+#define serial_hsu_runtime_resume	NULL
+#endif
+
+static const struct dev_pm_ops serial_hsu_pm_ops = {
+	.runtime_suspend = serial_hsu_runtime_suspend,
+	.runtime_resume = serial_hsu_runtime_resume,
+	.runtime_idle = serial_hsu_runtime_idle,
+};
 
 /* temp global pointer before we settle down on using one or four PCI dev */
 static struct hsu_port *phsu;
@@ -1327,42 +1335,17 @@ static int serial_hsu_probe(struct pci_dev *pdev,
 		}
 		uart_add_one_port(&serial_hsu_reg, &uport->port);
 
-#ifdef CONFIG_SERIAL_MFD_HSU_CONSOLE
-		if (index == 2) {
-			register_console(&serial_hsu_console);
-			uport->port.cons = &serial_hsu_console;
-		}
-#endif
 		pci_set_drvdata(pdev, uport);
 	}
+
+	pm_runtime_put_noidle(&pdev->dev);
+	pm_runtime_allow(&pdev->dev);
 
 	return 0;
 
 err_disable:
 	pci_disable_device(pdev);
 	return ret;
-}
-
-static void hsu_dma_rx_timeout(unsigned long data)
-{
-	struct hsu_dma_chan *chan = (void *)data;
-	struct uart_hsu_port *up = chan->uport;
-	struct hsu_dma_buffer *dbuf = &up->rxbuf;
-	int count = 0;
-	unsigned long flags;
-
-	spin_lock_irqsave(&up->port.lock, flags);
-
-	count = chan_readl(chan, HSU_CH_D0SAR) - dbuf->dma_addr;
-
-	if (!count) {
-		mod_timer(&chan->rx_timer, jiffies + HSU_DMA_TIMEOUT_CHECK_FREQ);
-		goto exit;
-	}
-
-	hsu_dma_rx(up, 0);
-exit:
-	spin_unlock_irqrestore(&up->port.lock, flags);
 }
 
 static void hsu_global_init(void)
@@ -1415,6 +1398,12 @@ static void hsu_global_init(void)
 
 		serial_hsu_ports[i] = uport;
 		uport->index = i;
+
+		if (hsu_dma_enable & (1<<i))
+			uport->use_dma = 1;
+		else
+			uport->use_dma = 0;
+
 		uport++;
 	}
 
@@ -1427,12 +1416,6 @@ static void hsu_global_init(void)
 		dchan->reg = hsu->reg + HSU_DMA_CHANS_REG_OFFSET +
 				i * HSU_DMA_CHANS_REG_LENGTH;
 
-		/* Work around for RX */
-		if (dchan->dirt == DMA_FROM_DEVICE) {
-			init_timer(&dchan->rx_timer);
-			dchan->rx_timer.function = hsu_dma_rx_timeout;
-			dchan->rx_timer.data = (unsigned long)dchan;
-		}
 		dchan++;
 	}
 
@@ -1454,6 +1437,9 @@ static void serial_hsu_remove(struct pci_dev *pdev)
 	if (!priv)
 		return;
 
+	pm_runtime_forbid(&pdev->dev);
+	pm_runtime_get_noresume(&pdev->dev);
+
 	/* For port 0/1/2, priv is the address of uart_hsu_port */
 	if (pdev->device != 0x081E) {
 		up = priv;
@@ -1466,7 +1452,7 @@ static void serial_hsu_remove(struct pci_dev *pdev)
 }
 
 /* First 3 are UART ports, and the 4th is the DMA */
-static const struct pci_device_id pci_ids[] __devinitdata = {
+static const struct pci_device_id pci_ids[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, 0x081B) },
 	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, 0x081C) },
 	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, 0x081D) },
@@ -1478,9 +1464,12 @@ static struct pci_driver hsu_pci_driver = {
 	.name =		"HSU serial",
 	.id_table =	pci_ids,
 	.probe =	serial_hsu_probe,
-	.remove =	__devexit_p(serial_hsu_remove),
+	.remove =	serial_hsu_remove,
 	.suspend =	serial_hsu_suspend,
 	.resume	=	serial_hsu_resume,
+	.driver = {
+		.pm = &serial_hsu_pm_ops,
+	},
 };
 
 static int __init hsu_pci_init(void)

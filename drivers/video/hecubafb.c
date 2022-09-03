@@ -47,7 +47,7 @@
 #define DPY_W 600
 #define DPY_H 800
 
-static struct fb_fix_screeninfo hecubafb_fix __devinitdata = {
+static struct fb_fix_screeninfo hecubafb_fix = {
 	.id =		"hecubafb",
 	.type =		FB_TYPE_PACKED_PIXELS,
 	.visual =	FB_VISUAL_MONO01,
@@ -58,7 +58,7 @@ static struct fb_fix_screeninfo hecubafb_fix __devinitdata = {
 	.accel =	FB_ACCEL_NONE,
 };
 
-static struct fb_var_screeninfo hecubafb_var __devinitdata = {
+static struct fb_var_screeninfo hecubafb_var = {
 	.xres		= DPY_W,
 	.yres		= DPY_H,
 	.xres_virtual	= DPY_W,
@@ -211,7 +211,7 @@ static struct fb_deferred_io hecubafb_defio = {
 	.deferred_io	= hecubafb_dpy_deferred_io,
 };
 
-static int __devinit hecubafb_probe(struct platform_device *dev)
+static int hecubafb_probe(struct platform_device *dev)
 {
 	struct fb_info *info;
 	struct hecuba_board *board;
@@ -231,10 +231,9 @@ static int __devinit hecubafb_probe(struct platform_device *dev)
 
 	videomemorysize = (DPY_W*DPY_H)/8;
 
-	if (!(videomemory = vmalloc(videomemorysize)))
-		return retval;
-
-	memset(videomemory, 0, videomemorysize);
+	videomemory = vzalloc(videomemorysize);
+	if (!videomemory)
+		goto err_videomem_alloc;
 
 	info = framebuffer_alloc(sizeof(struct hecubafb_par), &dev->dev);
 	if (!info)
@@ -276,11 +275,12 @@ err_fbreg:
 	framebuffer_release(info);
 err_fballoc:
 	vfree(videomemory);
+err_videomem_alloc:
 	module_put(board->owner);
 	return retval;
 }
 
-static int __devexit hecubafb_remove(struct platform_device *dev)
+static int hecubafb_remove(struct platform_device *dev)
 {
 	struct fb_info *info = platform_get_drvdata(dev);
 

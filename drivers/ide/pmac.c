@@ -28,6 +28,7 @@
 #include <linux/delay.h>
 #include <linux/ide.h>
 #include <linux/notifier.h>
+#include <linux/module.h>
 #include <linux/reboot.h>
 #include <linux/pci.h>
 #include <linux/adb.h>
@@ -1024,8 +1025,7 @@ static const struct ide_port_info pmac_port_info = {
  * Setup, register & probe an IDE channel driven by this driver, this is
  * called by one of the 2 probe functions (macio or PCI).
  */
-static int __devinit pmac_ide_setup_device(pmac_ide_hwif_t *pmif,
-					   struct ide_hw *hw)
+static int pmac_ide_setup_device(pmac_ide_hwif_t *pmif, struct ide_hw *hw)
 {
 	struct device_node *np = pmif->node;
 	const int *bidp;
@@ -1125,7 +1125,7 @@ static int __devinit pmac_ide_setup_device(pmac_ide_hwif_t *pmif,
 	return rc;
 }
 
-static void __devinit pmac_ide_init_ports(struct ide_hw *hw, unsigned long base)
+static void pmac_ide_init_ports(struct ide_hw *hw, unsigned long base)
 {
 	int i;
 
@@ -1138,8 +1138,8 @@ static void __devinit pmac_ide_init_ports(struct ide_hw *hw, unsigned long base)
 /*
  * Attach to a macio probed interface
  */
-static int __devinit
-pmac_ide_macio_attach(struct macio_dev *mdev, const struct of_device_id *match)
+static int pmac_ide_macio_attach(struct macio_dev *mdev,
+				 const struct of_device_id *match)
 {
 	void __iomem *base;
 	unsigned long regbase;
@@ -1261,8 +1261,8 @@ pmac_ide_macio_resume(struct macio_dev *mdev)
 /*
  * Attach to a PCI probed interface
  */
-static int __devinit
-pmac_ide_pci_attach(struct pci_dev *pdev, const struct pci_device_id *id)
+static int pmac_ide_pci_attach(struct pci_dev *pdev,
+			       const struct pci_device_id *id)
 {
 	struct device_node *np;
 	pmac_ide_hwif_t *pmif;
@@ -1334,7 +1334,7 @@ out_free_pmif:
 static int
 pmac_ide_pci_suspend(struct pci_dev *pdev, pm_message_t mesg)
 {
-	pmac_ide_hwif_t *pmif = (pmac_ide_hwif_t *)pci_get_drvdata(pdev);
+	pmac_ide_hwif_t *pmif = pci_get_drvdata(pdev);
 	int rc = 0;
 
 	if (mesg.event != pdev->dev.power.power_state.event
@@ -1350,7 +1350,7 @@ pmac_ide_pci_suspend(struct pci_dev *pdev, pm_message_t mesg)
 static int
 pmac_ide_pci_resume(struct pci_dev *pdev)
 {
-	pmac_ide_hwif_t *pmif = (pmac_ide_hwif_t *)pci_get_drvdata(pdev);
+	pmac_ide_hwif_t *pmif = pci_get_drvdata(pdev);
 	int rc = 0;
 
 	if (pdev->dev.power.power_state.event != PM_EVENT_ON) {
@@ -1691,8 +1691,7 @@ static const struct ide_dma_ops pmac_dma_ops = {
  * Allocate the data structures needed for using DMA with an interface
  * and fill the proper list of functions pointers
  */
-static int __devinit pmac_ide_init_dma(ide_hwif_t *hwif,
-				       const struct ide_port_info *d)
+static int pmac_ide_init_dma(ide_hwif_t *hwif, const struct ide_port_info *d)
 {
 	pmac_ide_hwif_t *pmif =
 		(pmac_ide_hwif_t *)dev_get_drvdata(hwif->gendev.parent);

@@ -58,15 +58,15 @@ nilfs_mdt_insert_new_block(struct inode *inode, unsigned long block,
 
 	set_buffer_mapped(bh);
 
-	kaddr = kmap_atomic(bh->b_page, KM_USER0);
+	kaddr = kmap_atomic(bh->b_page);
 	memset(kaddr + bh_offset(bh), 0, 1 << inode->i_blkbits);
 	if (init_block)
 		init_block(inode, bh, kaddr);
 	flush_dcache_page(bh->b_page);
-	kunmap_atomic(kaddr, KM_USER0);
+	kunmap_atomic(kaddr);
 
 	set_buffer_uptodate(bh);
-	nilfs_mark_buffer_dirty(bh);
+	mark_buffer_dirty(bh);
 	nilfs_mdt_mark_dirty(inode);
 	return 0;
 }
@@ -355,7 +355,7 @@ int nilfs_mdt_mark_block_dirty(struct inode *inode, unsigned long block)
 	err = nilfs_mdt_read_block(inode, block, 0, &bh);
 	if (unlikely(err))
 		return err;
-	nilfs_mark_buffer_dirty(bh);
+	mark_buffer_dirty(bh);
 	nilfs_mdt_mark_dirty(inode);
 	brelse(bh);
 	return 0;
@@ -375,14 +375,25 @@ int nilfs_mdt_fetch_dirty(struct inode *inode)
 static int
 nilfs_mdt_write_page(struct page *page, struct writeback_control *wbc)
 {
-	struct inode *inode;
+	struct inode *inode = page->mapping->host;
 	struct super_block *sb;
 	int err = 0;
+
+	if (inode && (inode->i_sb->s_flags & MS_RDONLY)) {
+		/*
+		 * It means that filesystem was remounted in read-only
+		 * mode because of error or metadata corruption. But we
+		 * have dirty pages that try to be flushed in background.
+		 * So, here we simply discard this dirty page.
+		 */
+		nilfs_clear_dirty_page(page, false);
+		unlock_page(page);
+		return -EROFS;
+	}
 
 	redirty_page_for_writepage(wbc, page);
 	unlock_page(page);
 
-	inode = page->mapping->host;
 	if (!inode)
 		return 0;
 
@@ -399,7 +410,6 @@ nilfs_mdt_write_page(struct page *page, struct writeback_control *wbc)
 
 static const struct address_space_operations def_mdt_aops = {
 	.writepage		= nilfs_mdt_write_page,
-	.sync_page		= block_sync_page,
 };
 
 static const struct inode_operations def_mdt_iops;
@@ -438,10 +448,6 @@ void nilfs_mdt_set_entry_size(struct inode *inode, unsigned entry_size,
 	mi->mi_first_entry_offset = DIV_ROUND_UP(header_size, entry_size);
 }
 
-static const struct address_space_operations shadow_map_aops = {
-	.sync_page		= block_sync_page,
-};
-
 /**
  * nilfs_mdt_setup_shadow_map - setup shadow map and bind it to metadata file
  * @inode: inode of the metadata file
@@ -455,9 +461,9 @@ int nilfs_mdt_setup_shadow_map(struct inode *inode,
 
 	INIT_LIST_HEAD(&shadow->frozen_buffers);
 	address_space_init_once(&shadow->frozen_data);
-	nilfs_mapping_init(&shadow->frozen_data, bdi, &shadow_map_aops);
+	nilfs_mapping_init(&shadow->frozen_data, inode, bdi);
 	address_space_init_once(&shadow->frozen_btnodes);
-	nilfs_mapping_init(&shadow->frozen_btnodes, bdi, &shadow_map_aops);
+	nilfs_mapping_init(&shadow->frozen_btnodes, inode, bdi);
 	mi->mi_shadow = shadow;
 	return 0;
 }
@@ -566,10 +572,10 @@ void nilfs_mdt_restore_from_shadow_map(struct inode *inode)
 	if (mi->mi_palloc_cache)
 		nilfs_palloc_clear_cache(inode);
 
-	nilfs_clear_dirty_pages(inode->i_mapping);
+	nilfs_clear_dirty_pages(inode->i_mapping, true);
 	nilfs_copy_back_pages(inode->i_mapping, &shadow->frozen_data);
 
-	nilfs_clear_dirty_pages(&ii->i_btnode_cache);
+	nilfs_clear_dirty_pages(&ii->i_btnode_cache, true);
 	nilfs_copy_back_pages(&ii->i_btnode_cache, &shadow->frozen_btnodes);
 
 	nilfs_bmap_restore(ii->i_bmap, &shadow->bmap_store);

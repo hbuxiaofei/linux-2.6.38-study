@@ -2,7 +2,7 @@
  * Procedure:    Init boot code/firmware code/data session
  *
  * Description: This routine will initialize firmware. If any error occurs during the initialization
- * 		process, the routine shall terminate immediately and return fail.
+ *		process, the routine shall terminate immediately and return fail.
  *		NIC driver should call NdisOpenFile only from MiniportInitialize.
  *
  * Arguments:   The pointer of the adapter
@@ -19,7 +19,7 @@
 #include <linux/firmware.h>
 void firmware_init_param(struct net_device *dev)
 {
-	struct r8192_priv 	*priv = ieee80211_priv(dev);
+	struct r8192_priv	*priv = ieee80211_priv(dev);
 	rt_firmware		*pfirmware = priv->pFirmware;
 
 	pfirmware->cmdpacket_frag_thresold = GET_COMMAND_PACKET_FRAG_THRESHOLD(MAX_TRANSMIT_BUFFER_SIZE);
@@ -32,7 +32,7 @@ void firmware_init_param(struct net_device *dev)
 bool fw_download_code(struct net_device *dev, u8 *code_virtual_address, u32 buffer_len)
 {
 	struct r8192_priv   *priv = ieee80211_priv(dev);
-	bool 		    rt_status = true;
+	bool		    rt_status = true;
 	u16		    frag_threshold;
 	u16		    frag_length, frag_offset = 0;
 	//u16		    total_size;
@@ -241,24 +241,17 @@ CPUCheckFirmwareReady_Fail:
 
 bool init_firmware(struct net_device *dev)
 {
-	struct r8192_priv 	*priv = ieee80211_priv(dev);
+	struct r8192_priv	*priv = ieee80211_priv(dev);
 	bool			rt_status = TRUE;
 
-	u8			*firmware_img_buf[3] = { &rtl8190_fwboot_array[0],
-							 &rtl8190_fwmain_array[0],
-							 &rtl8190_fwdata_array[0]};
-
-	u32			firmware_img_len[3] = { sizeof(rtl8190_fwboot_array),
-							sizeof(rtl8190_fwmain_array),
-							sizeof(rtl8190_fwdata_array)};
 	u32			file_length = 0;
 	u8			*mapped_file = NULL;
 	u32			init_step = 0;
 	opt_rst_type_e	rst_opt = OPT_SYSTEM_RESET;
-	firmware_init_step_e 	starting_state = FW_INIT_STEP0_BOOT;
+	firmware_init_step_e	starting_state = FW_INIT_STEP0_BOOT;
 
 	rt_firmware		*pfirmware = priv->pFirmware;
-	const struct firmware 	*fw_entry;
+	const struct firmware	*fw_entry;
 	const char *fw_name[3] = { "RTL8192U/boot.img",
 			   "RTL8192U/main.img",
 			   "RTL8192U/data.img"};
@@ -282,61 +275,42 @@ bool init_firmware(struct net_device *dev)
 
 	/*
 	 * Download boot, main, and data image for System reset.
-	 * Download data image for firmware reseta
+	 * Download data image for firmware reset
 	 */
-	priv->firmware_source = FW_SOURCE_IMG_FILE;
 	for(init_step = starting_state; init_step <= FW_INIT_STEP2_DATA; init_step++) {
 		/*
-		 * Open Image file, and map file to contineous memory if open file success.
+		 * Open image file, and map file to continuous memory if open file success.
 		 * or read image file from array. Default load from IMG file
 		 */
 		if(rst_opt == OPT_SYSTEM_RESET) {
-			switch(priv->firmware_source) {
-				case FW_SOURCE_IMG_FILE:
-					rc = request_firmware(&fw_entry, fw_name[init_step],&priv->udev->dev);
-					if(rc < 0 ) {
-						RT_TRACE(COMP_ERR, "request firmware fail!\n");
-						goto download_firmware_fail;
-					}
-
-					if(fw_entry->size > sizeof(pfirmware->firmware_buf)) {
-						RT_TRACE(COMP_ERR, "img file size exceed the container buffer fail!\n");
-						goto download_firmware_fail;
-					}
-
-					if(init_step != FW_INIT_STEP1_MAIN) {
-						memcpy(pfirmware->firmware_buf,fw_entry->data,fw_entry->size);
-						mapped_file = pfirmware->firmware_buf;
-						file_length = fw_entry->size;
-					} else {
-					#ifdef RTL8190P
-						memcpy(pfirmware->firmware_buf,fw_entry->data,fw_entry->size);
-						mapped_file = pfirmware->firmware_buf;
-						file_length = fw_entry->size;
-					#else
-						memset(pfirmware->firmware_buf,0,128);
-						memcpy(&pfirmware->firmware_buf[128],fw_entry->data,fw_entry->size);
-						mapped_file = pfirmware->firmware_buf;
-						file_length = fw_entry->size + 128;
-					#endif
-					}
-					pfirmware->firmware_buf_size = file_length;
-					break;
-
-				case FW_SOURCE_HEADER_FILE:
-					mapped_file =  firmware_img_buf[init_step];
-					file_length  = firmware_img_len[init_step];
-					if(init_step == FW_INIT_STEP2_DATA) {
-						memcpy(pfirmware->firmware_buf, mapped_file, file_length);
-						pfirmware->firmware_buf_size = file_length;
-					}
-					break;
-
-				default:
-					break;
+			rc = request_firmware(&fw_entry, fw_name[init_step],&priv->udev->dev);
+			if(rc < 0 ) {
+				RT_TRACE(COMP_ERR, "request firmware fail!\n");
+				goto download_firmware_fail;
 			}
 
+			if(fw_entry->size > sizeof(pfirmware->firmware_buf)) {
+				RT_TRACE(COMP_ERR, "img file size exceed the container buffer fail!\n");
+				goto download_firmware_fail;
+			}
 
+			if(init_step != FW_INIT_STEP1_MAIN) {
+				memcpy(pfirmware->firmware_buf,fw_entry->data,fw_entry->size);
+				mapped_file = pfirmware->firmware_buf;
+				file_length = fw_entry->size;
+			} else {
+#ifdef RTL8190P
+				memcpy(pfirmware->firmware_buf,fw_entry->data,fw_entry->size);
+				mapped_file = pfirmware->firmware_buf;
+				file_length = fw_entry->size;
+#else
+				memset(pfirmware->firmware_buf,0,128);
+				memcpy(&pfirmware->firmware_buf[128],fw_entry->data,fw_entry->size);
+				mapped_file = pfirmware->firmware_buf;
+				file_length = fw_entry->size + 128;
+#endif
+			}
+			pfirmware->firmware_buf_size = file_length;
 		}else if(rst_opt == OPT_FIRMWARE_RESET ) {
 			/* we only need to download data.img here */
 			mapped_file = pfirmware->firmware_buf;
@@ -360,56 +334,56 @@ bool init_firmware(struct net_device *dev)
 		}
 
 		switch(init_step) {
-			case FW_INIT_STEP0_BOOT:
-				/* Download boot
-				 * initialize command descriptor.
-				 * will set polling bit when firmware code is also configured
-				 */
-				pfirmware->firmware_status = FW_STATUS_1_MOVE_BOOT_CODE;
+		case FW_INIT_STEP0_BOOT:
+			/* Download boot
+			 * initialize command descriptor.
+			 * will set polling bit when firmware code is also configured
+			 */
+			pfirmware->firmware_status = FW_STATUS_1_MOVE_BOOT_CODE;
 #ifdef RTL8190P
-				// To initialize IMEM, CPU move code  from 0x80000080, hence, we send 0x80 byte packet
-				rt_status = fwSendNullPacket(dev, RTL8190_CPU_START_OFFSET);
-				if(rt_status != true)
-				{
-					RT_TRACE(COMP_INIT, "fwSendNullPacket() fail ! \n");
-					goto  download_firmware_fail;
-				}
+			// To initialize IMEM, CPU move code  from 0x80000080, hence, we send 0x80 byte packet
+			rt_status = fwSendNullPacket(dev, RTL8190_CPU_START_OFFSET);
+			if(rt_status != true)
+			{
+				RT_TRACE(COMP_INIT, "fwSendNullPacket() fail ! \n");
+				goto  download_firmware_fail;
+			}
 #endif
-				//mdelay(1000);
-				/*
-				 * To initialize IMEM, CPU move code  from 0x80000080,
-				 * hence, we send 0x80 byte packet
-				 */
-				break;
+			//mdelay(1000);
+			/*
+			 * To initialize IMEM, CPU move code  from 0x80000080,
+			 * hence, we send 0x80 byte packet
+			 */
+			break;
 
-			case FW_INIT_STEP1_MAIN:
-				/* Download firmware code. Wait until Boot Ready and Turn on CPU */
-				pfirmware->firmware_status = FW_STATUS_2_MOVE_MAIN_CODE;
+		case FW_INIT_STEP1_MAIN:
+			/* Download firmware code. Wait until Boot Ready and Turn on CPU */
+			pfirmware->firmware_status = FW_STATUS_2_MOVE_MAIN_CODE;
 
-				/* Check Put Code OK and Turn On CPU */
-				rt_status = CPUcheck_maincodeok_turnonCPU(dev);
-				if(rt_status != TRUE) {
-					RT_TRACE(COMP_ERR, "CPUcheck_maincodeok_turnonCPU fail!\n");
-					goto download_firmware_fail;
-				}
+			/* Check Put Code OK and Turn On CPU */
+			rt_status = CPUcheck_maincodeok_turnonCPU(dev);
+			if(rt_status != TRUE) {
+				RT_TRACE(COMP_ERR, "CPUcheck_maincodeok_turnonCPU fail!\n");
+				goto download_firmware_fail;
+			}
 
-				pfirmware->firmware_status = FW_STATUS_3_TURNON_CPU;
-				break;
+			pfirmware->firmware_status = FW_STATUS_3_TURNON_CPU;
+			break;
 
-			case FW_INIT_STEP2_DATA:
-				/* download initial data code */
-				pfirmware->firmware_status = FW_STATUS_4_MOVE_DATA_CODE;
-				mdelay(1);
+		case FW_INIT_STEP2_DATA:
+			/* download initial data code */
+			pfirmware->firmware_status = FW_STATUS_4_MOVE_DATA_CODE;
+			mdelay(1);
 
-				rt_status = CPUcheck_firmware_ready(dev);
-				if(rt_status != TRUE) {
-					RT_TRACE(COMP_ERR, "CPUcheck_firmware_ready fail(%d)!\n",rt_status);
-					goto download_firmware_fail;
-				}
+			rt_status = CPUcheck_firmware_ready(dev);
+			if(rt_status != TRUE) {
+				RT_TRACE(COMP_ERR, "CPUcheck_firmware_ready fail(%d)!\n",rt_status);
+				goto download_firmware_fail;
+			}
 
-				/* wait until data code is initialized ready.*/
-				pfirmware->firmware_status = FW_STATUS_5_READY;
-				break;
+			/* wait until data code is initialized ready.*/
+			pfirmware->firmware_status = FW_STATUS_5_READY;
+			break;
 		}
 	}
 
@@ -425,10 +399,6 @@ download_firmware_fail:
 
 }
 
-
-
-
-
-
-
-
+MODULE_FIRMWARE("RTL8192U/boot.img");
+MODULE_FIRMWARE("RTL8192U/main.img");
+MODULE_FIRMWARE("RTL8192U/data.img");

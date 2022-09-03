@@ -45,7 +45,7 @@ MODULE_LICENSE("GPL");
 
 static void pcmcia_check_driver(struct pcmcia_driver *p_drv)
 {
-	struct pcmcia_device_id *did = p_drv->id_table;
+	const struct pcmcia_device_id *did = p_drv->id_table;
 	unsigned int i;
 	u32 hash;
 
@@ -127,10 +127,7 @@ pcmcia_store_new_id(struct device_driver *driver, const char *buf, size_t count)
 	list_add_tail(&dynid->node, &pdrv->dynids.list);
 	mutex_unlock(&pdrv->dynids.lock);
 
-	if (get_driver(&pdrv->drv)) {
-		retval = driver_attach(&pdrv->drv);
-		put_driver(&pdrv->drv);
-	}
+	retval = driver_attach(&pdrv->drv);
 
 	if (retval)
 		return retval;
@@ -160,6 +157,11 @@ pcmcia_create_newid_file(struct pcmcia_driver *drv)
 	return error;
 }
 
+static void
+pcmcia_remove_newid_file(struct pcmcia_driver *drv)
+{
+	driver_remove_file(&drv->drv, &driver_attr_new_id);
+}
 
 /**
  * pcmcia_register_driver - register a PCMCIA driver with the bus core
@@ -204,6 +206,7 @@ EXPORT_SYMBOL(pcmcia_register_driver);
 void pcmcia_unregister_driver(struct pcmcia_driver *driver)
 {
 	pr_debug("unregistering driver %s\n", driver->name);
+	pcmcia_remove_newid_file(driver);
 	driver_unregister(&driver->drv);
 	pcmcia_free_dynids(driver);
 }
@@ -784,7 +787,7 @@ static inline int pcmcia_load_firmware(struct pcmcia_device *dev, char * filenam
 
 
 static inline int pcmcia_devmatch(struct pcmcia_device *dev,
-				  struct pcmcia_device_id *did)
+				  const struct pcmcia_device_id *did)
 {
 	if (did->match_flags & PCMCIA_DEV_ID_MATCH_MANF_ID) {
 		if ((!dev->has_manf_id) || (dev->manf_id != did->manf_id))
@@ -890,7 +893,7 @@ static int pcmcia_bus_match(struct device *dev, struct device_driver *drv)
 {
 	struct pcmcia_device *p_dev = to_pcmcia_dev(dev);
 	struct pcmcia_driver *p_drv = to_pcmcia_drv(drv);
-	struct pcmcia_device_id *did = p_drv->id_table;
+	const struct pcmcia_device_id *did = p_drv->id_table;
 	struct pcmcia_dynid *dynid;
 
 	/* match dynamic devices first */
@@ -916,8 +919,6 @@ static int pcmcia_bus_match(struct device *dev, struct device_driver *drv)
 
 	return 0;
 }
-
-#ifdef CONFIG_HOTPLUG
 
 static int pcmcia_bus_uevent(struct device *dev, struct kobj_uevent_env *env)
 {
@@ -958,15 +959,6 @@ static int pcmcia_bus_uevent(struct device *dev, struct kobj_uevent_env *env)
 
 	return 0;
 }
-
-#else
-
-static int pcmcia_bus_uevent(struct device *dev, struct kobj_uevent_env *env)
-{
-	return -ENODEV;
-}
-
-#endif
 
 /************************ runtime PM support ***************************/
 
@@ -1269,10 +1261,8 @@ static int pcmcia_bus_add(struct pcmcia_socket *skt)
 
 static int pcmcia_bus_early_resume(struct pcmcia_socket *skt)
 {
-	if (!verify_cis_cache(skt)) {
-		pcmcia_put_socket(skt);
+	if (!verify_cis_cache(skt))
 		return 0;
-	}
 
 	dev_dbg(&skt->dev, "cis mismatch - different card\n");
 
@@ -1328,7 +1318,7 @@ static struct pcmcia_callback pcmcia_bus_callback = {
 	.resume = pcmcia_bus_resume,
 };
 
-static int __devinit pcmcia_bus_add_socket(struct device *dev,
+static int pcmcia_bus_add_socket(struct device *dev,
 					   struct class_interface *class_intf)
 {
 	struct pcmcia_socket *socket = dev_get_drvdata(dev);

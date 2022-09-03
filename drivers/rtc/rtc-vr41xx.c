@@ -207,36 +207,6 @@ static int vr41xx_rtc_set_alarm(struct device *dev, struct rtc_wkalrm *wkalrm)
 	return 0;
 }
 
-static int vr41xx_rtc_irq_set_freq(struct device *dev, int freq)
-{
-	u64 count;
-
-	if (!is_power_of_2(freq))
-		return -EINVAL;
-	count = RTC_FREQUENCY;
-	do_div(count, freq);
-
-	spin_lock_irq(&rtc_lock);
-
-	periodic_count = count;
-	rtc1_write(RTCL1LREG, periodic_count);
-	rtc1_write(RTCL1HREG, periodic_count >> 16);
-
-	spin_unlock_irq(&rtc_lock);
-
-	return 0;
-}
-
-static int vr41xx_rtc_irq_set_state(struct device *dev, int enabled)
-{
-	if (enabled)
-		enable_irq(pie_irq);
-	else
-		disable_irq(pie_irq);
-
-	return 0;
-}
-
 static int vr41xx_rtc_ioctl(struct device *dev, unsigned int cmd, unsigned long arg)
 {
 	switch (cmd) {
@@ -308,11 +278,9 @@ static const struct rtc_class_ops vr41xx_rtc_ops = {
 	.set_time	= vr41xx_rtc_set_time,
 	.read_alarm	= vr41xx_rtc_read_alarm,
 	.set_alarm	= vr41xx_rtc_set_alarm,
-	.irq_set_freq	= vr41xx_rtc_irq_set_freq,
-	.irq_set_state	= vr41xx_rtc_irq_set_state,
 };
 
-static int __devinit rtc_probe(struct platform_device *pdev)
+static int rtc_probe(struct platform_device *pdev)
 {
 	struct resource *res;
 	struct rtc_device *rtc;
@@ -365,7 +333,7 @@ static int __devinit rtc_probe(struct platform_device *pdev)
 		goto err_device_unregister;
 	}
 
-	retval = request_irq(aie_irq, elapsedtime_interrupt, IRQF_DISABLED,
+	retval = request_irq(aie_irq, elapsedtime_interrupt, 0,
 	                     "elapsed_time", pdev);
 	if (retval < 0)
 		goto err_device_unregister;
@@ -374,7 +342,7 @@ static int __devinit rtc_probe(struct platform_device *pdev)
 	if (pie_irq <= 0)
 		goto err_free_irq;
 
-	retval = request_irq(pie_irq, rtclong1_interrupt, IRQF_DISABLED,
+	retval = request_irq(pie_irq, rtclong1_interrupt, 0,
 		             "rtclong1", pdev);
 	if (retval < 0)
 		goto err_free_irq;
@@ -384,7 +352,7 @@ static int __devinit rtc_probe(struct platform_device *pdev)
 	disable_irq(aie_irq);
 	disable_irq(pie_irq);
 
-	printk(KERN_INFO "rtc: Real Time Clock of NEC VR4100 series\n");
+	dev_info(&pdev->dev, "Real Time Clock of NEC VR4100 series\n");
 
 	return 0;
 
@@ -405,7 +373,7 @@ err_rtc1_iounmap:
 	return retval;
 }
 
-static int __devexit rtc_remove(struct platform_device *pdev)
+static int rtc_remove(struct platform_device *pdev)
 {
 	struct rtc_device *rtc;
 
@@ -430,22 +398,11 @@ MODULE_ALIAS("platform:RTC");
 
 static struct platform_driver rtc_platform_driver = {
 	.probe		= rtc_probe,
-	.remove		= __devexit_p(rtc_remove),
+	.remove		= rtc_remove,
 	.driver		= {
 		.name	= rtc_name,
 		.owner	= THIS_MODULE,
 	},
 };
 
-static int __init vr41xx_rtc_init(void)
-{
-	return platform_driver_register(&rtc_platform_driver);
-}
-
-static void __exit vr41xx_rtc_exit(void)
-{
-	platform_driver_unregister(&rtc_platform_driver);
-}
-
-module_init(vr41xx_rtc_init);
-module_exit(vr41xx_rtc_exit);
+module_platform_driver(rtc_platform_driver);

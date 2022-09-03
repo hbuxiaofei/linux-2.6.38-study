@@ -22,6 +22,7 @@
 
 #include <linux/delay.h>
 #include <linux/types.h>
+#include <linux/bug.h>
 #include <linux/interrupt.h>
 #include <linux/mtd/flashchip.h>
 #include <linux/mtd/map.h>
@@ -308,7 +309,7 @@ static inline uint32_t cfi_build_cmd_addr(uint32_t cmd_ofs,
 	
 	addr = (cmd_ofs * type) * interleave;
 
-	/* Modify the unlock address if we are in compatiblity mode.
+	/* Modify the unlock address if we are in compatibility mode.
 	 * For 16bit devices on 8 bit busses
 	 * and 32bit devices on 16 bit busses
 	 * set the low bit of the alternating bit sequence of the address.
@@ -354,10 +355,10 @@ static inline map_word cfi_build_cmd(u_long cmd, struct map_info *map, struct cf
 		onecmd = cmd;
 		break;
 	case 2:
-		onecmd = cpu_to_cfi16(cmd);
+		onecmd = cpu_to_cfi16(map, cmd);
 		break;
 	case 4:
-		onecmd = cpu_to_cfi32(cmd);
+		onecmd = cpu_to_cfi32(map, cmd);
 		break;
 	}
 
@@ -437,10 +438,10 @@ static inline unsigned long cfi_merge_status(map_word val, struct map_info *map,
 	case 1:
 		break;
 	case 2:
-		res = cfi16_to_cpu(res);
+		res = cfi16_to_cpu(map, res);
 		break;
 	case 4:
-		res = cfi32_to_cpu(res);
+		res = cfi32_to_cpu(map, res);
 		break;
 	default: BUG();
 	}
@@ -480,12 +481,12 @@ static inline uint8_t cfi_read_query(struct map_info *map, uint32_t addr)
 	if (map_bankwidth_is_1(map)) {
 		return val.x[0];
 	} else if (map_bankwidth_is_2(map)) {
-		return cfi16_to_cpu(val.x[0]);
+		return cfi16_to_cpu(map, val.x[0]);
 	} else {
 		/* No point in a 64-bit byteswap since that would just be
 		   swapping the responses from different chips, and we are
 		   only interested in one chip (a representative sample) */
-		return cfi32_to_cpu(val.x[0]);
+		return cfi32_to_cpu(map, val.x[0]);
 	}
 }
 
@@ -496,12 +497,12 @@ static inline uint16_t cfi_read_query16(struct map_info *map, uint32_t addr)
 	if (map_bankwidth_is_1(map)) {
 		return val.x[0] & 0xff;
 	} else if (map_bankwidth_is_2(map)) {
-		return cfi16_to_cpu(val.x[0]);
+		return cfi16_to_cpu(map, val.x[0]);
 	} else {
 		/* No point in a 64-bit byteswap since that would just be
 		   swapping the responses from different chips, and we are
 		   only interested in one chip (a representative sample) */
-		return cfi32_to_cpu(val.x[0]);
+		return cfi32_to_cpu(map, val.x[0]);
 	}
 }
 
@@ -535,6 +536,7 @@ struct cfi_fixup {
 #define CFI_MFR_CONTINUATION	0x007F
 
 #define CFI_MFR_AMD		0x0001
+#define CFI_MFR_AMIC		0x0037
 #define CFI_MFR_ATMEL		0x001F
 #define CFI_MFR_EON		0x001C
 #define CFI_MFR_FUJITSU		0x0004

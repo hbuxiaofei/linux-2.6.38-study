@@ -19,6 +19,7 @@
 #include <linux/errno.h>
 #include <linux/skbuff.h>
 #include <net/netlink.h>
+#include <net/sch_generic.h>
 #include <net/pkt_sched.h>
 
 
@@ -97,28 +98,25 @@
 	changed the limit is not effective anymore.
 */
 
-struct tbf_sched_data
-{
+struct tbf_sched_data {
 /* Parameters */
 	u32		limit;		/* Maximal length of backlog: bytes */
-	u32		buffer;		/* Token bucket depth/rate: MUST BE >= MTU/B */
-	u32		mtu;
+	s64		buffer;		/* Token bucket depth/rate: MUST BE >= MTU/B */
+	s64		mtu;
 	u32		max_size;
-	struct qdisc_rate_table	*R_tab;
-	struct qdisc_rate_table	*P_tab;
+	struct psched_ratecfg rate;
+	struct psched_ratecfg peak;
+	bool peak_present;
 
 /* Variables */
-	long	tokens;			/* Current number of B tokens */
-	long	ptokens;		/* Current number of P tokens */
-	psched_time_t	t_c;		/* Time check-point */
+	s64	tokens;			/* Current number of B tokens */
+	s64	ptokens;		/* Current number of P tokens */
+	s64	t_c;			/* Time check-point */
 	struct Qdisc	*qdisc;		/* Inner qdisc, default - bfifo queue */
 	struct qdisc_watchdog watchdog;	/* Watchdog timer */
 };
 
-#define L2T(q,L)   qdisc_l2t((q)->R_tab,L)
-#define L2T_P(q,L) qdisc_l2t((q)->P_tab,L)
-
-static int tbf_enqueue(struct sk_buff *skb, struct Qdisc* sch)
+static int tbf_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 {
 	struct tbf_sched_data *q = qdisc_priv(sch);
 	int ret;
@@ -137,7 +135,7 @@ static int tbf_enqueue(struct sk_buff *skb, struct Qdisc* sch)
 	return NET_XMIT_SUCCESS;
 }
 
-static unsigned int tbf_drop(struct Qdisc* sch)
+static unsigned int tbf_drop(struct Qdisc *sch)
 {
 	struct tbf_sched_data *q = qdisc_priv(sch);
 	unsigned int len = 0;
@@ -149,7 +147,7 @@ static unsigned int tbf_drop(struct Qdisc* sch)
 	return len;
 }
 
-static struct sk_buff *tbf_dequeue(struct Qdisc* sch)
+static struct sk_buff *tbf_dequeue(struct Qdisc *sch)
 {
 	struct tbf_sched_data *q = qdisc_priv(sch);
 	struct sk_buff *skb;
@@ -157,24 +155,24 @@ static struct sk_buff *tbf_dequeue(struct Qdisc* sch)
 	skb = q->qdisc->ops->peek(q->qdisc);
 
 	if (skb) {
-		psched_time_t now;
-		long toks;
-		long ptoks = 0;
+		s64 now;
+		s64 toks;
+		s64 ptoks = 0;
 		unsigned int len = qdisc_pkt_len(skb);
 
-		now = psched_get_time();
-		toks = psched_tdiff_bounded(now, q->t_c, q->buffer);
+		now = ktime_to_ns(ktime_get());
+		toks = min_t(s64, now - q->t_c, q->buffer);
 
-		if (q->P_tab) {
+		if (q->peak_present) {
 			ptoks = toks + q->ptokens;
-			if (ptoks > (long)q->mtu)
+			if (ptoks > q->mtu)
 				ptoks = q->mtu;
-			ptoks -= L2T_P(q, len);
+			ptoks -= (s64) psched_l2t_ns(&q->peak, len);
 		}
 		toks += q->tokens;
-		if (toks > (long)q->buffer)
+		if (toks > q->buffer)
 			toks = q->buffer;
-		toks -= L2T(q, len);
+		toks -= (s64) psched_l2t_ns(&q->rate, len);
 
 		if ((toks|ptoks) >= 0) {
 			skb = qdisc_dequeue_peeked(q->qdisc);
@@ -185,13 +183,13 @@ static struct sk_buff *tbf_dequeue(struct Qdisc* sch)
 			q->tokens = toks;
 			q->ptokens = ptoks;
 			sch->q.qlen--;
-			sch->flags &= ~TCQ_F_THROTTLED;
+			qdisc_unthrottled(sch);
 			qdisc_bstats_update(sch, skb);
 			return skb;
 		}
 
-		qdisc_watchdog_schedule(&q->watchdog,
-					now + max_t(long, -toks, -ptoks));
+		qdisc_watchdog_schedule_ns(&q->watchdog,
+					   now + max_t(long, -toks, -ptoks));
 
 		/* Maybe we have a shorter packet in the queue,
 		   which can be sent now. It sounds cool,
@@ -209,13 +207,13 @@ static struct sk_buff *tbf_dequeue(struct Qdisc* sch)
 	return NULL;
 }
 
-static void tbf_reset(struct Qdisc* sch)
+static void tbf_reset(struct Qdisc *sch)
 {
 	struct tbf_sched_data *q = qdisc_priv(sch);
 
 	qdisc_reset(q->qdisc);
 	sch->q.qlen = 0;
-	q->t_c = psched_get_time();
+	q->t_c = ktime_to_ns(ktime_get());
 	q->tokens = q->buffer;
 	q->ptokens = q->mtu;
 	qdisc_watchdog_cancel(&q->watchdog);
@@ -227,7 +225,7 @@ static const struct nla_policy tbf_policy[TCA_TBF_MAX + 1] = {
 	[TCA_TBF_PTAB]	= { .type = NLA_BINARY, .len = TC_RTAB_SIZE },
 };
 
-static int tbf_change(struct Qdisc* sch, struct nlattr *opt)
+static int tbf_change(struct Qdisc *sch, struct nlattr *opt)
 {
 	int err;
 	struct tbf_sched_data *q = qdisc_priv(sch);
@@ -236,7 +234,7 @@ static int tbf_change(struct Qdisc* sch, struct nlattr *opt)
 	struct qdisc_rate_table *rtab = NULL;
 	struct qdisc_rate_table *ptab = NULL;
 	struct Qdisc *child = NULL;
-	int max_size,n;
+	int max_size, n;
 
 	err = nla_parse_nested(tb, TCA_TBF_PTAB, opt, tbf_policy);
 	if (err < 0)
@@ -259,15 +257,18 @@ static int tbf_change(struct Qdisc* sch, struct nlattr *opt)
 	}
 
 	for (n = 0; n < 256; n++)
-		if (rtab->data[n] > qopt->buffer) break;
-	max_size = (n << qopt->rate.cell_log)-1;
+		if (rtab->data[n] > qopt->buffer)
+			break;
+	max_size = (n << qopt->rate.cell_log) - 1;
 	if (ptab) {
 		int size;
 
 		for (n = 0; n < 256; n++)
-			if (ptab->data[n] > qopt->mtu) break;
-		size = (n << qopt->peakrate.cell_log)-1;
-		if (size < max_size) max_size = size;
+			if (ptab->data[n] > qopt->mtu)
+				break;
+		size = (n << qopt->peakrate.cell_log) - 1;
+		if (size < max_size)
+			max_size = size;
 	}
 	if (max_size < 0)
 		goto done;
@@ -291,14 +292,19 @@ static int tbf_change(struct Qdisc* sch, struct nlattr *opt)
 		q->qdisc = child;
 	}
 	q->limit = qopt->limit;
-	q->mtu = qopt->mtu;
+	q->mtu = PSCHED_TICKS2NS(qopt->mtu);
 	q->max_size = max_size;
-	q->buffer = qopt->buffer;
+	q->buffer = PSCHED_TICKS2NS(qopt->buffer);
 	q->tokens = q->buffer;
 	q->ptokens = q->mtu;
 
-	swap(q->R_tab, rtab);
-	swap(q->P_tab, ptab);
+	psched_ratecfg_precompute(&q->rate, &rtab->rate);
+	if (ptab) {
+		psched_ratecfg_precompute(&q->peak, &ptab->rate);
+		q->peak_present = true;
+	} else {
+		q->peak_present = false;
+	}
 
 	sch_tree_unlock(sch);
 	err = 0;
@@ -310,14 +316,14 @@ done:
 	return err;
 }
 
-static int tbf_init(struct Qdisc* sch, struct nlattr *opt)
+static int tbf_init(struct Qdisc *sch, struct nlattr *opt)
 {
 	struct tbf_sched_data *q = qdisc_priv(sch);
 
 	if (opt == NULL)
 		return -EINVAL;
 
-	q->t_c = psched_get_time();
+	q->t_c = ktime_to_ns(ktime_get());
 	qdisc_watchdog_init(&q->watchdog, sch);
 	q->qdisc = &noop_qdisc;
 
@@ -329,12 +335,6 @@ static void tbf_destroy(struct Qdisc *sch)
 	struct tbf_sched_data *q = qdisc_priv(sch);
 
 	qdisc_watchdog_cancel(&q->watchdog);
-
-	if (q->P_tab)
-		qdisc_put_rtab(q->P_tab);
-	if (q->R_tab)
-		qdisc_put_rtab(q->R_tab);
-
 	qdisc_destroy(q->qdisc);
 }
 
@@ -344,19 +344,21 @@ static int tbf_dump(struct Qdisc *sch, struct sk_buff *skb)
 	struct nlattr *nest;
 	struct tc_tbf_qopt opt;
 
+	sch->qstats.backlog = q->qdisc->qstats.backlog;
 	nest = nla_nest_start(skb, TCA_OPTIONS);
 	if (nest == NULL)
 		goto nla_put_failure;
 
 	opt.limit = q->limit;
-	opt.rate = q->R_tab->rate;
-	if (q->P_tab)
-		opt.peakrate = q->P_tab->rate;
+	psched_ratecfg_getrate(&opt.rate, &q->rate);
+	if (q->peak_present)
+		psched_ratecfg_getrate(&opt.peakrate, &q->peak);
 	else
 		memset(&opt.peakrate, 0, sizeof(opt.peakrate));
-	opt.mtu = q->mtu;
-	opt.buffer = q->buffer;
-	NLA_PUT(skb, TCA_TBF_PARMS, sizeof(opt), &opt);
+	opt.mtu = PSCHED_NS2TICKS(q->mtu);
+	opt.buffer = PSCHED_NS2TICKS(q->buffer);
+	if (nla_put(skb, TCA_TBF_PARMS, sizeof(opt), &opt))
+		goto nla_put_failure;
 
 	nla_nest_end(skb, nest);
 	return skb->len;
@@ -422,8 +424,7 @@ static void tbf_walk(struct Qdisc *sch, struct qdisc_walker *walker)
 	}
 }
 
-static const struct Qdisc_class_ops tbf_class_ops =
-{
+static const struct Qdisc_class_ops tbf_class_ops = {
 	.graft		=	tbf_graft,
 	.leaf		=	tbf_leaf,
 	.get		=	tbf_get,

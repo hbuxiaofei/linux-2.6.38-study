@@ -1,8 +1,7 @@
-obj-y	:= clock.o
-ifneq ($(CONFIG_ARCH_INTEGRATOR),y)
-obj-y	+= sched-clock.o
-endif
-ifeq ($(CONFIG_LEDS_CLASS),y)
-obj-$(CONFIG_ARCH_REALVIEW) += leds.o
-obj-$(CONFIG_ARCH_VERSATILE) += leds.o
-endif
+ccflags-$(CONFIG_ARCH_MULTIPLATFORM) := -I$(srctree)/$(src)/include
+
+obj-$(CONFIG_PLAT_VERSATILE_CLOCK) += clock.o
+obj-$(CONFIG_PLAT_VERSATILE_CLCD) += clcd.o
+obj-$(CONFIG_PLAT_VERSATILE_LEDS) += leds.o
+obj-$(CONFIG_PLAT_VERSATILE_SCHED_CLOCK) += sched-clock.o
+obj-$(CONFIG_SMP) += headsmp.o platsmp.o

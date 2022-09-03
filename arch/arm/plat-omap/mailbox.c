@@ -29,10 +29,10 @@
 #include <linux/kfifo.h>
 #include <linux/err.h>
 #include <linux/notifier.h>
+#include <linux/module.h>
 
 #include <plat/mailbox.h>
 
-static struct workqueue_struct *mboxd;
 static struct omap_mbox **mboxes;
 
 static int mbox_configured;
@@ -197,7 +197,7 @@ static void __mbox_rx_interrupt(struct omap_mbox *mbox)
 	/* no more messages in the fifo. clear IRQ source. */
 	ack_mbox_irq(mbox, IRQ_RX);
 nomem:
-	queue_work(mboxd, &mbox->rxq->work);
+	schedule_work(&mbox->rxq->work);
 }
 
 static irqreturn_t mbox_interrupt(int irq, void *p)
@@ -282,6 +282,8 @@ static int omap_mbox_startup(struct omap_mbox *mbox)
 		}
 		mbox->rxq = mq;
 		mq->mbox = mbox;
+
+		omap_mbox_enable_irq(mbox, IRQ_RX);
 	}
 	mutex_unlock(&mbox_configured_lock);
 	return 0;
@@ -305,6 +307,7 @@ static void omap_mbox_fini(struct omap_mbox *mbox)
 	mutex_lock(&mbox_configured_lock);
 
 	if (!--mbox->use_count) {
+		omap_mbox_disable_irq(mbox, IRQ_RX);
 		free_irq(mbox->irq, mbox);
 		tasklet_kill(&mbox->txq->tasklet);
 		flush_work(&mbox->rxq->work);
@@ -338,12 +341,14 @@ struct omap_mbox *omap_mbox_get(const char *name, struct notifier_block *nb)
 	if (!mbox)
 		return ERR_PTR(-ENOENT);
 
-	ret = omap_mbox_startup(mbox);
-	if (ret)
-		return ERR_PTR(-ENODEV);
-
 	if (nb)
 		blocking_notifier_chain_register(&mbox->notifier, nb);
+
+	ret = omap_mbox_startup(mbox);
+	if (ret) {
+		blocking_notifier_chain_unregister(&mbox->notifier, nb);
+		return ERR_PTR(-ENODEV);
+	}
 
 	return mbox;
 }
@@ -409,10 +414,6 @@ static int __init omap_mbox_init(void)
 	if (err)
 		return err;
 
-	mboxd = create_workqueue("mboxd");
-	if (!mboxd)
-		return -ENOMEM;
-
 	/* kfifo size sanity check: alignment and minimal size */
 	mbox_kfifo_size = ALIGN(mbox_kfifo_size, sizeof(mbox_msg_t));
 	mbox_kfifo_size = max_t(unsigned int, mbox_kfifo_size,
@@ -424,7 +425,6 @@ subsys_initcall(omap_mbox_init);
 
 static void __exit omap_mbox_exit(void)
 {
-	destroy_workqueue(mboxd);
 	class_unregister(&omap_mbox_class);
 }
 module_exit(omap_mbox_exit);

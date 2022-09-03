@@ -82,7 +82,7 @@ static void amd76xrom_cleanup(struct amd76xrom_window *window)
 		if (map->rsrc.parent) {
 			release_resource(&map->rsrc);
 		}
-		del_mtd_device(map->mtd);
+		mtd_device_unregister(map->mtd);
 		map_destroy(map->mtd);
 		list_del(&map->list);
 		kfree(map);
@@ -100,8 +100,8 @@ static void amd76xrom_cleanup(struct amd76xrom_window *window)
 }
 
 
-static int __devinit amd76xrom_init_one (struct pci_dev *pdev,
-	const struct pci_device_id *ent)
+static int amd76xrom_init_one(struct pci_dev *pdev,
+			      const struct pci_device_id *ent)
 {
 	static char *rom_probe_types[] = { "cfi_probe", "jedec_probe", NULL };
 	u8 byte;
@@ -262,7 +262,7 @@ static int __devinit amd76xrom_init_one (struct pci_dev *pdev,
 
 		/* Now that the mtd devices is complete claim and export it */
 		map->mtd->owner = THIS_MODULE;
-		if (add_mtd_device(map->mtd)) {
+		if (mtd_device_register(map->mtd, NULL, 0)) {
 			map_destroy(map->mtd);
 			map->mtd = NULL;
 			goto out;
@@ -289,7 +289,7 @@ static int __devinit amd76xrom_init_one (struct pci_dev *pdev,
 }
 
 
-static void __devexit amd76xrom_remove_one (struct pci_dev *pdev)
+static void amd76xrom_remove_one(struct pci_dev *pdev)
 {
 	struct amd76xrom_window *window = &amd76xrom_window;
 
@@ -347,4 +347,3 @@ module_exit(cleanup_amd76xrom);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Eric Biederman <ebiederman@lnxi.com>");
 MODULE_DESCRIPTION("MTD map driver for BIOS chips on the AMD76X southbridge");
-

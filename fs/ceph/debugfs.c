@@ -102,7 +102,7 @@ static int mdsc_show(struct seq_file *s, void *p)
 				path = NULL;
 			spin_lock(&req->r_old_dentry->d_lock);
 			seq_printf(s, " #%llx/%.*s (%s)",
-			   ceph_ino(req->r_old_dentry->d_parent->d_inode),
+			   ceph_ino(req->r_old_dentry_dir),
 				   req->r_old_dentry->d_name.len,
 				   req->r_old_dentry->d_name.name,
 				   path ? path : "");
@@ -201,6 +201,7 @@ int ceph_fs_debugfs_init(struct ceph_fs_client *fsc)
 	int err = -ENOMEM;
 
 	dout("ceph_fs_debugfs_init\n");
+	BUG_ON(!fsc->client->debugfs_dir);
 	fsc->debugfs_congestion_kb =
 		debugfs_create_file("writeback_congestion_kb",
 				    0600,
@@ -209,8 +210,6 @@ int ceph_fs_debugfs_init(struct ceph_fs_client *fsc)
 				    &congestion_kb_fops);
 	if (!fsc->debugfs_congestion_kb)
 		goto out;
-
-	dout("a\n");
 
 	snprintf(name, sizeof(name), "../../bdi/%s",
 		 dev_name(fsc->backing_dev_info.dev));
@@ -221,7 +220,6 @@ int ceph_fs_debugfs_init(struct ceph_fs_client *fsc)
 	if (!fsc->debugfs_bdi)
 		goto out;
 
-	dout("b\n");
 	fsc->debugfs_mdsmap = debugfs_create_file("mdsmap",
 					0600,
 					fsc->client->debugfs_dir,
@@ -230,7 +228,6 @@ int ceph_fs_debugfs_init(struct ceph_fs_client *fsc)
 	if (!fsc->debugfs_mdsmap)
 		goto out;
 
-	dout("ca\n");
 	fsc->debugfs_mdsc = debugfs_create_file("mdsc",
 						0600,
 						fsc->client->debugfs_dir,
@@ -239,7 +236,6 @@ int ceph_fs_debugfs_init(struct ceph_fs_client *fsc)
 	if (!fsc->debugfs_mdsc)
 		goto out;
 
-	dout("da\n");
 	fsc->debugfs_caps = debugfs_create_file("caps",
 						   0400,
 						   fsc->client->debugfs_dir,
@@ -248,7 +244,6 @@ int ceph_fs_debugfs_init(struct ceph_fs_client *fsc)
 	if (!fsc->debugfs_caps)
 		goto out;
 
-	dout("ea\n");
 	fsc->debugfs_dentry_lru = debugfs_create_file("dentry_lru",
 					0600,
 					fsc->client->debugfs_dir,

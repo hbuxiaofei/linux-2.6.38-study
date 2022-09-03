@@ -143,7 +143,7 @@ static int get_mixer_levels(void __user * arg)
 
 static ssize_t sound_read(struct file *file, char __user *buf, size_t count, loff_t *ppos)
 {
-	int dev = iminor(file->f_path.dentry->d_inode);
+	int dev = iminor(file_inode(file));
 	int ret = -EINVAL;
 
 	/*
@@ -176,7 +176,7 @@ static ssize_t sound_read(struct file *file, char __user *buf, size_t count, lof
 
 static ssize_t sound_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
 {
-	int dev = iminor(file->f_path.dentry->d_inode);
+	int dev = iminor(file_inode(file));
 	int ret = -EINVAL;
 	
 	mutex_lock(&soundcard_mutex);
@@ -333,7 +333,7 @@ static int sound_mixer_ioctl(int mixdev, unsigned int cmd, void __user *arg)
 static long sound_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	int len = 0, dtype;
-	int dev = iminor(file->f_dentry->d_inode);
+	int dev = iminor(file_inode(file));
 	long ret = -EINVAL;
 	void __user *p = (void __user *)arg;
 
@@ -406,7 +406,7 @@ static long sound_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 
 static unsigned int sound_poll(struct file *file, poll_table * wait)
 {
-	struct inode *inode = file->f_path.dentry->d_inode;
+	struct inode *inode = file_inode(file);
 	int dev = iminor(inode);
 
 	DEB(printk("sound_poll(dev=%d)\n", dev));
@@ -431,7 +431,7 @@ static int sound_mmap(struct file *file, struct vm_area_struct *vma)
 	int dev_class;
 	unsigned long size;
 	struct dma_buffparms *dmap = NULL;
-	int dev = iminor(file->f_path.dentry->d_inode);
+	int dev = iminor(file_inode(file));
 
 	dev_class = dev & 0x0f;
 	dev >>= 4;
@@ -526,30 +526,20 @@ bad:
 }
 
 
-/* These device names follow the official Linux device list,
- * Documentation/devices.txt.  Let us know if there are other
- * common names we should support for compatibility.
- * Only those devices not created by the generic code in sound_core.c are
- * registered here.
- */
-static const struct {
-	unsigned short minor;
-	char *name;
-	umode_t mode;
-	int *num;
-} dev_list[] = { /* list of minor devices */
-/* seems to be some confusion here -- this device is not in the device list */
-	{SND_DEV_DSP16,     "dspW",	 S_IWUGO | S_IRUSR | S_IRGRP,
-	 &num_audiodevs},
-	{SND_DEV_AUDIO,     "audio",	 S_IWUGO | S_IRUSR | S_IRGRP,
-	 &num_audiodevs},
-};
-
 static int dmabuf;
 static int dmabug;
 
 module_param(dmabuf, int, 0444);
 module_param(dmabug, int, 0444);
+
+/* additional minors for compatibility */
+struct oss_minor_dev {
+	unsigned short minor;
+	unsigned int enabled;
+} dev_list[] = {
+	{ SND_DEV_DSP16 },
+	{ SND_DEV_AUDIO },
+};
 
 static int __init oss_init(void)
 {
@@ -571,18 +561,12 @@ static int __init oss_init(void)
 	sound_dmap_flag = (dmabuf > 0 ? 1 : 0);
 
 	for (i = 0; i < ARRAY_SIZE(dev_list); i++) {
-		device_create(sound_class, NULL,
-			      MKDEV(SOUND_MAJOR, dev_list[i].minor), NULL,
-			      "%s", dev_list[i].name);
-
-		if (!dev_list[i].num)
-			continue;
-
-		for (j = 1; j < *dev_list[i].num; j++)
-			device_create(sound_class, NULL,
-				      MKDEV(SOUND_MAJOR,
-					    dev_list[i].minor + (j*0x10)),
-				      NULL, "%s%d", dev_list[i].name, j);
+		j = 0;
+		do {
+			unsigned short minor = dev_list[i].minor + j * 0x10;
+			if (!register_sound_special(&oss_sound_fops, minor))
+				dev_list[i].enabled = (1 << j);
+		} while (++j < num_audiodevs);
 	}
 
 	if (sound_nblocks >= MAX_MEM_BLOCKS - 1)
@@ -596,11 +580,11 @@ static void __exit oss_cleanup(void)
 	int i, j;
 
 	for (i = 0; i < ARRAY_SIZE(dev_list); i++) {
-		device_destroy(sound_class, MKDEV(SOUND_MAJOR, dev_list[i].minor));
-		if (!dev_list[i].num)
-			continue;
-		for (j = 1; j < *dev_list[i].num; j++)
-			device_destroy(sound_class, MKDEV(SOUND_MAJOR, dev_list[i].minor + (j*0x10)));
+		j = 0;
+		do {
+			if (dev_list[i].enabled & (1 << j))
+				unregister_sound_special(dev_list[i].minor);
+		} while (++j < num_audiodevs);
 	}
 	
 	unregister_sound_special(1);

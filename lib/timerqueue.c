@@ -5,7 +5,7 @@
  *  Uses rbtrees for quick list adds and expiration.
  *
  *  NOTE: All of the following functions need to be serialized
- *  to avoid races. No locking is done by this libary code.
+ *  to avoid races. No locking is done by this library code.
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -22,9 +22,10 @@
  *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
+#include <linux/bug.h>
 #include <linux/timerqueue.h>
 #include <linux/rbtree.h>
-#include <linux/module.h>
+#include <linux/export.h>
 
 /**
  * timerqueue_add - Adds timer to timerqueue.

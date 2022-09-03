@@ -1,10 +1,9 @@
 /*
- * File...........: linux/drivers/s390/block/dasd_diag.c
  * Author(s)......: Holger Smolinski <Holger.Smolinski@de.ibm.com>
  * Based on.......: linux/drivers/s390/block/mdisk.c
  * ...............: by Hartmunt Penner <hpenner@de.ibm.com>
  * Bugreports.to..: <Linux390@de.ibm.com>
- * (C) IBM Corporation, IBM Deutschland Entwicklung GmbH, 1999,2000
+ * Copyright IBM Corp. 1999, 2000
  *
  */
 
@@ -24,7 +23,7 @@
 #include <asm/debug.h>
 #include <asm/ebcdic.h>
 #include <asm/io.h>
-#include <asm/s390_ext.h>
+#include <asm/irq.h>
 #include <asm/vtoc.h>
 #include <asm/diag.h>
 
@@ -185,14 +184,14 @@ dasd_start_diag(struct dasd_ccw_req * cqr)
 	private->iob.bio_list = dreq->bio;
 	private->iob.flaga = DASD_DIAG_FLAGA_DEFAULT;
 
-	cqr->startclk = get_clock();
+	cqr->startclk = get_tod_clock();
 	cqr->starttime = jiffies;
 	cqr->retries--;
 
 	rc = dia250(&private->iob, RW_BIO);
 	switch (rc) {
 	case 0: /* Synchronous I/O finished successfully */
-		cqr->stopclk = get_clock();
+		cqr->stopclk = get_tod_clock();
 		cqr->status = DASD_CQR_SUCCESS;
 		/* Indicate to calling function that only a dasd_schedule_bh()
 		   and no timer is needed */
@@ -223,13 +222,13 @@ dasd_diag_term_IO(struct dasd_ccw_req * cqr)
 	mdsk_term_io(device);
 	mdsk_init_io(device, device->block->bp_block, 0, NULL);
 	cqr->status = DASD_CQR_CLEAR_PENDING;
-	cqr->stopclk = get_clock();
+	cqr->stopclk = get_tod_clock();
 	dasd_schedule_device_bh(device);
 	return 0;
 }
 
 /* Handle external interruption. */
-static void dasd_ext_handler(unsigned int ext_int_code,
+static void dasd_ext_handler(struct ext_code ext_code,
 			     unsigned int param32, unsigned long param64)
 {
 	struct dasd_ccw_req *cqr, *next;
@@ -239,8 +238,7 @@ static void dasd_ext_handler(unsigned int ext_int_code,
 	addr_t ip;
 	int rc;
 
-	kstat_cpu(smp_processor_id()).irqs[EXTINT_DSD]++;
-	switch (ext_int_code >> 24) {
+	switch (ext_code.subcode >> 8) {
 	case DASD_DIAG_CODE_31BIT:
 		ip = (addr_t) param32;
 		break;
@@ -250,6 +248,7 @@ static void dasd_ext_handler(unsigned int ext_int_code,
 	default:
 		return;
 	}
+	inc_irq_stat(IRQEXT_DSD);
 	if (!ip) {		/* no intparm: unsolicited interrupt */
 		DBF_EVENT(DBF_NOTICE, "%s", "caught unsolicited "
 			      "interrupt");
@@ -277,10 +276,10 @@ static void dasd_ext_handler(unsigned int ext_int_code,
 		return;
 	}
 
-	cqr->stopclk = get_clock();
+	cqr->stopclk = get_tod_clock();
 
 	expires = 0;
-	if ((ext_int_code & 0xff0000) == 0) {
+	if ((ext_code.subcode & 0xff) == 0) {
 		cqr->status = DASD_CQR_SUCCESS;
 		/* Start first request on queue if possible -> fast_io. */
 		if (!list_empty(&device->ccw_queue)) {
@@ -296,7 +295,7 @@ static void dasd_ext_handler(unsigned int ext_int_code,
 		cqr->status = DASD_CQR_QUEUED;
 		DBF_DEV_EVENT(DBF_DEBUG, device, "interrupt status for "
 			      "request %p was %d (%d retries left)", cqr,
-			      (ext_int_code >> 16) & 0xff, cqr->retries);
+			      ext_code.subcode & 0xff, cqr->retries);
 		dasd_diag_erp(device);
 	}
 
@@ -557,7 +556,7 @@ static struct dasd_ccw_req *dasd_diag_build_cp(struct dasd_device *memdev,
 		}
 	}
 	cqr->retries = DIAG_MAX_RETRIES;
-	cqr->buildclk = get_clock();
+	cqr->buildclk = get_tod_clock();
 	if (blk_noretry_request(req) ||
 	    block->base->features & DASD_FEATURE_FAILFAST)
 		set_bit(DASD_CQR_FLAGS_FAILFAST, &cqr->flags);
@@ -642,7 +641,7 @@ dasd_diag_init(void)
 	}
 	ASCEBC(dasd_diag_discipline.ebcname, 4);
 
-	ctl_set_bit(0, 9);
+	service_subclass_irq_register();
 	register_external_interrupt(0x2603, dasd_ext_handler);
 	dasd_diag_discipline_pointer = &dasd_diag_discipline;
 	return 0;
@@ -652,7 +651,7 @@ static void __exit
 dasd_diag_cleanup(void)
 {
 	unregister_external_interrupt(0x2603, dasd_ext_handler);
-	ctl_clear_bit(0, 9);
+	service_subclass_irq_unregister();
 	dasd_diag_discipline_pointer = NULL;
 }
 

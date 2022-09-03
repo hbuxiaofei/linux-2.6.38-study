@@ -2,6 +2,7 @@
  *
  * (C) 1999-2001 Paul `Rusty' Russell
  * (C) 2002-2006 Netfilter Core Team <coreteam@netfilter.org>
+ * (C) 2006-2010 Patrick McHardy <kaber@trash.net>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -20,6 +21,8 @@
 #include <net/netfilter/nf_conntrack_l4proto.h>
 #include <net/netfilter/nf_conntrack_expect.h>
 #include <net/netfilter/nf_conntrack_acct.h>
+#include <linux/rculist_nulls.h>
+#include <linux/export.h>
 
 struct ct_iter_state {
 	struct seq_net_private p;
@@ -35,7 +38,8 @@ static struct hlist_nulls_node *ct_get_first(struct seq_file *seq)
 	for (st->bucket = 0;
 	     st->bucket < net->ct.htable_size;
 	     st->bucket++) {
-		n = rcu_dereference(net->ct.hash[st->bucket].first);
+		n = rcu_dereference(
+			hlist_nulls_first_rcu(&net->ct.hash[st->bucket]));
 		if (!is_a_nulls(n))
 			return n;
 	}
@@ -48,13 +52,14 @@ static struct hlist_nulls_node *ct_get_next(struct seq_file *seq,
 	struct net *net = seq_file_net(seq);
 	struct ct_iter_state *st = seq->private;
 
-	head = rcu_dereference(head->next);
+	head = rcu_dereference(hlist_nulls_next_rcu(head));
 	while (is_a_nulls(head)) {
 		if (likely(get_nulls_value(head) == st->bucket)) {
 			if (++st->bucket >= net->ct.htable_size)
 				return NULL;
 		}
-		head = rcu_dereference(net->ct.hash[st->bucket].first);
+		head = rcu_dereference(
+			hlist_nulls_first_rcu(&net->ct.hash[st->bucket]));
 	}
 	return head;
 }
@@ -217,7 +222,8 @@ static struct hlist_node *ct_expect_get_first(struct seq_file *seq)
 	struct hlist_node *n;
 
 	for (st->bucket = 0; st->bucket < nf_ct_expect_hsize; st->bucket++) {
-		n = rcu_dereference(net->ct.expect_hash[st->bucket].first);
+		n = rcu_dereference(
+			hlist_first_rcu(&net->ct.expect_hash[st->bucket]));
 		if (n)
 			return n;
 	}
@@ -230,11 +236,12 @@ static struct hlist_node *ct_expect_get_next(struct seq_file *seq,
 	struct net *net = seq_file_net(seq);
 	struct ct_expect_iter_state *st = seq->private;
 
-	head = rcu_dereference(head->next);
+	head = rcu_dereference(hlist_next_rcu(head));
 	while (head == NULL) {
 		if (++st->bucket >= nf_ct_expect_hsize)
 			return NULL;
-		head = rcu_dereference(net->ct.expect_hash[st->bucket].first);
+		head = rcu_dereference(
+			hlist_first_rcu(&net->ct.expect_hash[st->bucket]));
 	}
 	return head;
 }
@@ -411,12 +418,12 @@ static int __net_init ip_conntrack_net_init(struct net *net)
 {
 	struct proc_dir_entry *proc, *proc_exp, *proc_stat;
 
-	proc = proc_net_fops_create(net, "ip_conntrack", 0440, &ct_file_ops);
+	proc = proc_create("ip_conntrack", 0440, net->proc_net, &ct_file_ops);
 	if (!proc)
 		goto err1;
 
-	proc_exp = proc_net_fops_create(net, "ip_conntrack_expect", 0440,
-					&ip_exp_file_ops);
+	proc_exp = proc_create("ip_conntrack_expect", 0440, net->proc_net,
+			       &ip_exp_file_ops);
 	if (!proc_exp)
 		goto err2;
 
@@ -427,9 +434,9 @@ static int __net_init ip_conntrack_net_init(struct net *net)
 	return 0;
 
 err3:
-	proc_net_remove(net, "ip_conntrack_expect");
+	remove_proc_entry("ip_conntrack_expect", net->proc_net);
 err2:
-	proc_net_remove(net, "ip_conntrack");
+	remove_proc_entry("ip_conntrack", net->proc_net);
 err1:
 	return -ENOMEM;
 }
@@ -437,8 +444,8 @@ err1:
 static void __net_exit ip_conntrack_net_exit(struct net *net)
 {
 	remove_proc_entry("ip_conntrack", net->proc_net_stat);
-	proc_net_remove(net, "ip_conntrack_expect");
-	proc_net_remove(net, "ip_conntrack");
+	remove_proc_entry("ip_conntrack_expect", net->proc_net);
+	remove_proc_entry("ip_conntrack", net->proc_net);
 }
 
 static struct pernet_operations ip_conntrack_net_ops = {

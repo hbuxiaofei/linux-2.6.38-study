@@ -12,7 +12,7 @@
 
 #undef DEBUG
 
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/string.h>
 #include <linux/sched.h>
 #include <linux/init.h>
@@ -35,6 +35,8 @@
 #include <linux/pci.h>
 #include <linux/lockdep.h>
 #include <linux/memblock.h>
+#include <linux/hugetlb.h>
+
 #include <asm/io.h>
 #include <asm/kdump.h>
 #include <asm/prom.h>
@@ -50,7 +52,6 @@
 #include <asm/btext.h>
 #include <asm/nvram.h>
 #include <asm/setup.h>
-#include <asm/system.h>
 #include <asm/rtas.h>
 #include <asm/iommu.h>
 #include <asm/serial.h>
@@ -62,6 +63,9 @@
 #include <asm/udbg.h>
 #include <asm/kexec.h>
 #include <asm/mmu_context.h>
+#include <asm/code-patching.h>
+#include <asm/kvm_ppc.h>
+#include <asm/hugetlb.h>
 
 #include "setup.h"
 
@@ -72,6 +76,7 @@
 #endif
 
 int boot_cpuid = 0;
+int __initdata spinning_secondaries;
 u64 ppc64_pft_size;
 
 /* Pick defaults since we might want to patch instructions
@@ -151,6 +156,15 @@ early_param("smt-enabled", early_smt_enabled);
 #define check_smt_enabled()
 #endif /* CONFIG_SMP */
 
+/** Fix up paca fields required for the boot cpu */
+static void fixup_boot_paca(void)
+{
+	/* The boot cpu is started */
+	get_paca()->cpu_start = 1;
+	/* Allow percpu accesses to work until we setup percpu data */
+	get_paca()->data_offset = 0;
+}
+
 /*
  * Early initialization entry point. This is called by head.S
  * with MMU translation disabled. We rely on the "feature" of
@@ -172,6 +186,8 @@ early_param("smt-enabled", early_smt_enabled);
 
 void __init early_setup(unsigned long dt_ptr)
 {
+	static __initdata struct paca_struct boot_paca;
+
 	/* -------- printk is _NOT_ safe to use here ! ------- */
 
 	/* Identify CPU type */
@@ -180,6 +196,7 @@ void __init early_setup(unsigned long dt_ptr)
 	/* Assume we're on cpu 0 for now. Don't write to the paca yet! */
 	initialise_paca(&boot_paca, 0);
 	setup_paca(&boot_paca);
+	fixup_boot_paca();
 
 	/* Initialize lockdep early or else spinlocks will blow */
 	lockdep_init();
@@ -200,9 +217,7 @@ void __init early_setup(unsigned long dt_ptr)
 
 	/* Now we know the logical id of our boot cpu, setup the paca. */
 	setup_paca(&paca[boot_cpuid]);
-
-	/* Fix up paca fields required for the boot cpu */
-	get_paca()->cpu_start = 1;
+	fixup_boot_paca();
 
 	/* Probe the machine type */
 	probe_machine();
@@ -213,6 +228,13 @@ void __init early_setup(unsigned long dt_ptr)
 
 	/* Initialize the hash table or TLB handling */
 	early_init_mmu();
+
+	/*
+	 * Reserve any gigantic pages requested on the command line.
+	 * memblock needs to have been initialized by the time this is
+	 * called since this will reserve memory.
+	 */
+	reserve_hugetlb_gpages();
 
 	DBG(" <- early_setup()\n");
 }
@@ -233,6 +255,7 @@ void early_setup_secondary(void)
 void smp_release_cpus(void)
 {
 	unsigned long *ptr;
+	int i;
 
 	DBG(" -> smp_release_cpus()\n");
 
@@ -245,7 +268,16 @@ void smp_release_cpus(void)
 	ptr  = (unsigned long *)((unsigned long)&__secondary_hold_spinloop
 			- PHYSICAL_START);
 	*ptr = __pa(generic_secondary_smp_init);
-	mb();
+
+	/* And wait a bit for them to catch up */
+	for (i = 0; i < 100000; i++) {
+		mb();
+		HMT_low();
+		if (spinning_secondaries == 0)
+			break;
+		udelay(1);
+	}
+	DBG("spinning_secondaries = %d\n", spinning_secondaries);
 
 	DBG(" <- smp_release_cpus()\n");
 }
@@ -265,14 +297,14 @@ static void __init initialize_cache_info(void)
 
 	DBG(" -> initialize_cache_info()\n");
 
-	for (np = NULL; (np = of_find_node_by_type(np, "cpu"));) {
+	for_each_node_by_type(np, "cpu") {
 		num_cpus += 1;
 
-		/* We're assuming *all* of the CPUs have the same
+		/*
+		 * We're assuming *all* of the CPUs have the same
 		 * d-cache and i-cache sizes... -Peter
 		 */
-
-		if ( num_cpus == 1 ) {
+		if (num_cpus == 1) {
 			const u32 *sizep, *lsizep;
 			u32 size, lsize;
 
@@ -281,10 +313,13 @@ static void __init initialize_cache_info(void)
 			sizep = of_get_property(np, "d-cache-size", NULL);
 			if (sizep != NULL)
 				size = *sizep;
-			lsizep = of_get_property(np, "d-cache-block-size", NULL);
+			lsizep = of_get_property(np, "d-cache-block-size",
+						 NULL);
 			/* fallback if block size missing */
 			if (lsizep == NULL)
-				lsizep = of_get_property(np, "d-cache-line-size", NULL);
+				lsizep = of_get_property(np,
+							 "d-cache-line-size",
+							 NULL);
 			if (lsizep != NULL)
 				lsize = *lsizep;
 			if (sizep == 0 || lsizep == 0)
@@ -301,9 +336,12 @@ static void __init initialize_cache_info(void)
 			sizep = of_get_property(np, "i-cache-size", NULL);
 			if (sizep != NULL)
 				size = *sizep;
-			lsizep = of_get_property(np, "i-cache-block-size", NULL);
+			lsizep = of_get_property(np, "i-cache-block-size",
+						 NULL);
 			if (lsizep == NULL)
-				lsizep = of_get_property(np, "i-cache-line-size", NULL);
+				lsizep = of_get_property(np,
+							 "i-cache-line-size",
+							 NULL);
 			if (lsizep != NULL)
 				lsize = *lsizep;
 			if (sizep == 0 || lsizep == 0)
@@ -340,6 +378,7 @@ void __init setup_system(void)
 			  &__start___fw_ftr_fixup, &__stop___fw_ftr_fixup);
 	do_lwsync_fixups(cur_cpu_spec->cpu_features,
 			 &__start___lwsync_fixup, &__stop___lwsync_fixup);
+	do_final_fixups();
 
 	/*
 	 * Unflatten the device-tree passed by prom_init or kexec
@@ -423,17 +462,30 @@ void __init setup_system(void)
 	DBG(" <- setup_system()\n");
 }
 
-static u64 slb0_limit(void)
+/* This returns the limit below which memory accesses to the linear
+ * mapping are guarnateed not to cause a TLB or SLB miss. This is
+ * used to allocate interrupt or emergency stacks for which our
+ * exception entry path doesn't deal with being interrupted.
+ */
+static u64 safe_stack_limit(void)
 {
-	if (cpu_has_feature(CPU_FTR_1T_SEGMENT)) {
+#ifdef CONFIG_PPC_BOOK3E
+	/* Freescale BookE bolts the entire linear mapping */
+	if (mmu_has_feature(MMU_FTR_TYPE_FSL_E))
+		return linear_map_top;
+	/* Other BookE, we assume the first GB is bolted */
+	return 1ul << 30;
+#else
+	/* BookS, the first segment is bolted */
+	if (mmu_has_feature(MMU_FTR_1T_SEGMENT))
 		return 1UL << SID_SHIFT_1T;
-	}
 	return 1UL << SID_SHIFT;
+#endif
 }
 
 static void __init irqstack_early_init(void)
 {
-	u64 limit = slb0_limit();
+	u64 limit = safe_stack_limit();
 	unsigned int i;
 
 	/*
@@ -453,6 +505,9 @@ static void __init irqstack_early_init(void)
 #ifdef CONFIG_PPC_BOOK3E
 static void __init exc_lvl_early_init(void)
 {
+	extern unsigned int interrupt_base_book3e;
+	extern unsigned int exc_debug_debug_book3e;
+
 	unsigned int i;
 
 	for_each_possible_cpu(i) {
@@ -463,6 +518,10 @@ static void __init exc_lvl_early_init(void)
 		mcheckirq_ctx[i] = (struct thread_info *)
 			__va(memblock_alloc(THREAD_SIZE, THREAD_SIZE));
 	}
+
+	if (cpu_has_feature(CPU_FTR_DEBUG_LVL_EXC))
+		patch_branch(&interrupt_base_book3e + (0x040 / 4) + 1,
+			     (unsigned long)&exc_debug_debug_book3e, 0);
 }
 #else
 #define exc_lvl_early_init()
@@ -486,7 +545,7 @@ static void __init emergency_stack_init(void)
 	 * bringup, we need to get at them in real mode. This means they
 	 * must also be within the RMO region.
 	 */
-	limit = min(slb0_limit(), ppc64_rma_size);
+	limit = min(safe_stack_limit(), ppc64_rma_size);
 
 	for_each_possible_cpu(i) {
 		unsigned long sp;
@@ -524,7 +583,9 @@ void __init setup_arch(char **cmdline_p)
 	init_mm.end_code = (unsigned long) _etext;
 	init_mm.end_data = (unsigned long) _edata;
 	init_mm.brk = klimit;
-	
+#ifdef CONFIG_PPC_64K_PAGES
+	init_mm.context.pte_frag = NULL;
+#endif
 	irqstack_early_init();
 	exc_lvl_early_init();
 	emergency_stack_init();
@@ -547,6 +608,13 @@ void __init setup_arch(char **cmdline_p)
 
 	/* Initialize the MMU context management stuff */
 	mmu_context_init();
+
+	kvm_linear_init();
+
+	/* Interrupt code needs to be 64K-aligned */
+	if ((unsigned long)_stext & 0xffff)
+		panic("Kernelbase not 64K-aligned (0x%lx)!\n",
+		      (unsigned long)_stext);
 
 	ppc64_boot_msg(0x15, "Setup Done");
 }

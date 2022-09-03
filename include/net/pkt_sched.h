@@ -32,7 +32,7 @@ static inline void *qdisc_priv(struct Qdisc *q)
    
    The result: [34]86 is not good choice for QoS router :-(
 
-   The things are not so bad, because we may use artifical
+   The things are not so bad, because we may use artificial
    clock evaluated by integration of network data flow
    in the most critical places.
  */
@@ -65,8 +65,14 @@ struct qdisc_watchdog {
 };
 
 extern void qdisc_watchdog_init(struct qdisc_watchdog *wd, struct Qdisc *qdisc);
-extern void qdisc_watchdog_schedule(struct qdisc_watchdog *wd,
-				    psched_time_t expires);
+extern void qdisc_watchdog_schedule_ns(struct qdisc_watchdog *wd, u64 expires);
+
+static inline void qdisc_watchdog_schedule(struct qdisc_watchdog *wd,
+					   psched_time_t expires)
+{
+	qdisc_watchdog_schedule_ns(wd, PSCHED_TICKS2NS(expires));
+}
+
 extern void qdisc_watchdog_cancel(struct qdisc_watchdog *wd);
 
 extern struct Qdisc_ops pfifo_qdisc_ops;
@@ -99,15 +105,15 @@ static inline void qdisc_run(struct Qdisc *q)
 		__qdisc_run(q);
 }
 
-extern int tc_classify_compat(struct sk_buff *skb, struct tcf_proto *tp,
+extern int tc_classify_compat(struct sk_buff *skb, const struct tcf_proto *tp,
 			      struct tcf_result *res);
-extern int tc_classify(struct sk_buff *skb, struct tcf_proto *tp,
+extern int tc_classify(struct sk_buff *skb, const struct tcf_proto *tp,
 		       struct tcf_result *res);
 
 /* Calculate maximal size of packet seen by hard_start_xmit
    routine of this device.
  */
-static inline unsigned psched_mtu(const struct net_device *dev)
+static inline unsigned int psched_mtu(const struct net_device *dev)
 {
 	return dev->mtu + dev->hard_header_len;
 }

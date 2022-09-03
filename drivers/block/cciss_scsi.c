@@ -33,7 +33,7 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 
 #include <scsi/scsi_cmnd.h>
 #include <scsi/scsi_device.h>
@@ -54,13 +54,11 @@ static CommandList_struct *cmd_special_alloc(ctlr_info_t *h);
 static void cmd_free(ctlr_info_t *h, CommandList_struct *c);
 static void cmd_special_free(ctlr_info_t *h, CommandList_struct *c);
 
-static int cciss_scsi_proc_info(
-		struct Scsi_Host *sh,
+static int cciss_scsi_write_info(struct Scsi_Host *sh,
 		char *buffer, /* data buffer */
-		char **start, 	   /* where data in buffer starts */
-		off_t offset,	   /* offset from start of imaginary file */
-		int length, 	   /* length of data in buffer */
-		int func);	   /* 0 == read, 1 == write */
+		int length); 	   /* length of data in buffer */
+static int cciss_scsi_show_info(struct seq_file *m,
+				struct Scsi_Host *sh);
 
 static int cciss_scsi_queue_command (struct Scsi_Host *h,
 				     struct scsi_cmnd *cmd);
@@ -82,9 +80,9 @@ static struct scsi_host_template cciss_driver_template = {
 	.module			= THIS_MODULE,
 	.name			= "cciss",
 	.proc_name		= "cciss",
-	.proc_info		= cciss_scsi_proc_info,
+	.write_info		= cciss_scsi_write_info,
+	.show_info		= cciss_scsi_show_info,
 	.queuecommand		= cciss_scsi_queue_command,
-	.can_queue		= SCSI_CCISS_CAN_QUEUE,
 	.this_id		= 7,
 	.cmd_per_lun		= 1,
 	.use_clustering		= DISABLE_CLUSTERING,
@@ -108,16 +106,13 @@ struct cciss_scsi_cmd_stack_elem_t {
 
 #pragma pack()
 
-#define CMD_STACK_SIZE (SCSI_CCISS_CAN_QUEUE * \
-		CCISS_MAX_SCSI_DEVS_PER_HBA + 2)
-			// plus two for init time usage
-
 #pragma pack(1)
 struct cciss_scsi_cmd_stack_t {
 	struct cciss_scsi_cmd_stack_elem_t *pool;
-	struct cciss_scsi_cmd_stack_elem_t *elem[CMD_STACK_SIZE];
+	struct cciss_scsi_cmd_stack_elem_t **elem;
 	dma_addr_t cmd_pool_handle;
 	int top;
+	int nelems;
 };
 #pragma pack()
 
@@ -191,7 +186,7 @@ scsi_cmd_free(ctlr_info_t *h, CommandList_struct *c)
 	sa = h->scsi_ctlr;
 	stk = &sa->cmd_stack; 
 	stk->top++;
-	if (stk->top >= CMD_STACK_SIZE) {
+	if (stk->top >= stk->nelems) {
 		dev_err(&h->pdev->dev,
 			"scsi_cmd_free called too many times.\n");
 		BUG();
@@ -206,13 +201,14 @@ scsi_cmd_stack_setup(ctlr_info_t *h, struct cciss_scsi_adapter_data_t *sa)
 	struct cciss_scsi_cmd_stack_t *stk;
 	size_t size;
 
+	stk = &sa->cmd_stack;
+	stk->nelems = cciss_tape_cmds + 2;
 	sa->cmd_sg_list = cciss_allocate_sg_chain_blocks(h,
-		h->chainsize, CMD_STACK_SIZE);
+		h->chainsize, stk->nelems);
 	if (!sa->cmd_sg_list && h->chainsize > 0)
 		return -ENOMEM;
 
-	stk = &sa->cmd_stack; 
-	size = sizeof(struct cciss_scsi_cmd_stack_elem_t) * CMD_STACK_SIZE;
+	size = sizeof(struct cciss_scsi_cmd_stack_elem_t) * stk->nelems;
 
 	/* Check alignment, see cciss_cmd.h near CommandList_struct def. */
 	BUILD_BUG_ON((sizeof(*stk->pool) % COMMANDLIST_ALIGNMENT) != 0);
@@ -221,18 +217,23 @@ scsi_cmd_stack_setup(ctlr_info_t *h, struct cciss_scsi_adapter_data_t *sa)
 		pci_alloc_consistent(h->pdev, size, &stk->cmd_pool_handle);
 
 	if (stk->pool == NULL) {
-		cciss_free_sg_chain_blocks(sa->cmd_sg_list, CMD_STACK_SIZE);
+		cciss_free_sg_chain_blocks(sa->cmd_sg_list, stk->nelems);
 		sa->cmd_sg_list = NULL;
 		return -ENOMEM;
 	}
-
-	for (i=0; i<CMD_STACK_SIZE; i++) {
+	stk->elem = kmalloc(sizeof(stk->elem[0]) * stk->nelems, GFP_KERNEL);
+	if (!stk->elem) {
+		pci_free_consistent(h->pdev, size, stk->pool,
+		stk->cmd_pool_handle);
+		return -1;
+	}
+	for (i = 0; i < stk->nelems; i++) {
 		stk->elem[i] = &stk->pool[i];
 		stk->elem[i]->busaddr = (__u32) (stk->cmd_pool_handle + 
 			(sizeof(struct cciss_scsi_cmd_stack_elem_t) * i));
 		stk->elem[i]->cmdindex = i;
 	}
-	stk->top = CMD_STACK_SIZE-1;
+	stk->top = stk->nelems-1;
 	return 0;
 }
 
@@ -245,16 +246,18 @@ scsi_cmd_stack_free(ctlr_info_t *h)
 
 	sa = h->scsi_ctlr;
 	stk = &sa->cmd_stack; 
-	if (stk->top != CMD_STACK_SIZE-1) {
+	if (stk->top != stk->nelems-1) {
 		dev_warn(&h->pdev->dev,
 			"bug: %d scsi commands are still outstanding.\n",
-			CMD_STACK_SIZE - stk->top);
+			stk->nelems - stk->top);
 	}
-	size = sizeof(struct cciss_scsi_cmd_stack_elem_t) * CMD_STACK_SIZE;
+	size = sizeof(struct cciss_scsi_cmd_stack_elem_t) * stk->nelems;
 
 	pci_free_consistent(h->pdev, size, stk->pool, stk->cmd_pool_handle);
 	stk->pool = NULL;
-	cciss_free_sg_chain_blocks(sa->cmd_sg_list, CMD_STACK_SIZE);
+	cciss_free_sg_chain_blocks(sa->cmd_sg_list, stk->nelems);
+	kfree(stk->elem);
+	stk->elem = NULL;
 }
 
 #if 0
@@ -759,16 +762,7 @@ static void complete_scsi_command(CommandList_struct *c, int timeout,
 		{
 			case CMD_TARGET_STATUS:
 				/* Pass it up to the upper layers... */
-				if( ei->ScsiStatus)
-                		{
-#if 0
-                    			printk(KERN_WARNING "cciss: cmd %p "
-						"has SCSI Status = %x\n",
-						c, ei->ScsiStatus);
-#endif
-					cmd->result |= (ei->ScsiStatus << 1);
-                		}
-				else {  /* scsi status is zero??? How??? */
+				if (!ei->ScsiStatus) {
 					
 	/* Ordinarily, this case should never happen, but there is a bug
 	   in some released firmware revisions that allows it to happen
@@ -800,6 +794,7 @@ static void complete_scsi_command(CommandList_struct *c, int timeout,
 				}
 			break;
 			case CMD_PROTOCOL_ERR:
+				cmd->result = DID_ERROR << 16;
 				dev_warn(&h->pdev->dev,
 					"%p has protocol error\n", c);
                         break;
@@ -824,12 +819,17 @@ static void complete_scsi_command(CommandList_struct *c, int timeout,
 			break;
 			case CMD_UNSOLICITED_ABORT:
 				cmd->result = DID_ABORT << 16;
-				dev_warn(&h->pdev->dev, "%p aborted do to an "
+				dev_warn(&h->pdev->dev, "%p aborted due to an "
 					"unsolicited abort\n", c);
 			break;
 			case CMD_TIMEOUT:
 				cmd->result = DID_TIME_OUT << 16;
 				dev_warn(&h->pdev->dev, "%p timedout\n", c);
+			break;
+			case CMD_UNABORTABLE:
+				cmd->result = DID_ERROR << 16;
+				dev_warn(&h->pdev->dev, "c %p command "
+					"unabortable\n", c);
 			break;
 			default:
 				cmd->result = DID_ERROR << 16;
@@ -854,8 +854,10 @@ cciss_scsi_detect(ctlr_info_t *h)
 	sh->io_port = 0;	// good enough?  FIXME, 
 	sh->n_io_port = 0;	// I don't think we use these two...
 	sh->this_id = SELF_SCSI_ID;  
+	sh->can_queue = cciss_tape_cmds;
 	sh->sg_tablesize = h->maxsgentries;
 	sh->max_cmd_len = MAX_COMMAND_SIZE;
+	sh->max_sectors = h->cciss_max_sectors;
 
 	((struct cciss_scsi_adapter_data_t *) 
 		h->scsi_ctlr)->scsi_host = sh;
@@ -1007,10 +1009,14 @@ cciss_scsi_interpret_error(ctlr_info_t *h, CommandList_struct *c)
 		break;
 		case CMD_UNSOLICITED_ABORT:
 			dev_warn(&h->pdev->dev,
-				"%p aborted do to an unsolicited abort\n", c);
+				"%p aborted due to an unsolicited abort\n", c);
 		break;
 		case CMD_TIMEOUT:
 			dev_warn(&h->pdev->dev, "%p timedout\n", c);
+		break;
+		case CMD_UNABORTABLE:
+			dev_warn(&h->pdev->dev,
+				"%p unabortable\n", c);
 		break;
 		default:
 			dev_warn(&h->pdev->dev,
@@ -1295,59 +1301,54 @@ cciss_scsi_user_command(ctlr_info_t *h, int hostno, char *buffer, int length)
 	return length;
 }
 
-
 static int
-cciss_scsi_proc_info(struct Scsi_Host *sh,
+cciss_scsi_write_info(struct Scsi_Host *sh,
 		char *buffer, /* data buffer */
-		char **start, 	   /* where data in buffer starts */
-		off_t offset,	   /* offset from start of imaginary file */
-		int length, 	   /* length of data in buffer */
-		int func)	   /* 0 == read, 1 == write */
+		int length) 	   /* length of data in buffer */
 {
-
-	int buflen, datalen;
-	ctlr_info_t *h;
-	int i;
-
-	h = (ctlr_info_t *) sh->hostdata[0];
+	ctlr_info_t *h = (ctlr_info_t *) sh->hostdata[0];
 	if (h == NULL)  /* This really shouldn't ever happen. */
 		return -EINVAL;
 
-	if (func == 0) {	/* User is reading from /proc/scsi/ciss*?/?*  */
-		buflen = sprintf(buffer, "cciss%d: SCSI host: %d\n",
-				h->ctlr, sh->host_no);
-
-		/* this information is needed by apps to know which cciss
-		   device corresponds to which scsi host number without
-		   having to open a scsi target device node.  The device
-		   information is not a duplicate of /proc/scsi/scsi because
-		   the two may be out of sync due to scsi hotplug, rather
-		   this info is for an app to be able to use to know how to
-		   get them back in sync. */
-
-		for (i = 0; i < ccissscsi[h->ctlr].ndevices; i++) {
-			struct cciss_scsi_dev_t *sd =
-				&ccissscsi[h->ctlr].dev[i];
-			buflen += sprintf(&buffer[buflen], "c%db%dt%dl%d %02d "
-				"0x%02x%02x%02x%02x%02x%02x%02x%02x\n",
-				sh->host_no, sd->bus, sd->target, sd->lun,
-				sd->devtype,
-				sd->scsi3addr[0], sd->scsi3addr[1],
-				sd->scsi3addr[2], sd->scsi3addr[3],
-				sd->scsi3addr[4], sd->scsi3addr[5],
-				sd->scsi3addr[6], sd->scsi3addr[7]);
-		}
-		datalen = buflen - offset;
-		if (datalen < 0) { 	/* they're reading past EOF. */
-			datalen = 0;
-			*start = buffer+buflen;	
-		} else
-			*start = buffer + offset;
-		return(datalen);
-	} else 	/* User is writing to /proc/scsi/cciss*?/?*  ... */
-		return cciss_scsi_user_command(h, sh->host_no,
+	return cciss_scsi_user_command(h, sh->host_no,
 			buffer, length);	
 } 
+
+static int
+cciss_scsi_show_info(struct seq_file *m, struct Scsi_Host *sh)
+{
+
+	ctlr_info_t *h = (ctlr_info_t *) sh->hostdata[0];
+	int i;
+
+	if (h == NULL)  /* This really shouldn't ever happen. */
+		return -EINVAL;
+
+	seq_printf(m, "cciss%d: SCSI host: %d\n",
+			h->ctlr, sh->host_no);
+
+	/* this information is needed by apps to know which cciss
+	   device corresponds to which scsi host number without
+	   having to open a scsi target device node.  The device
+	   information is not a duplicate of /proc/scsi/scsi because
+	   the two may be out of sync due to scsi hotplug, rather
+	   this info is for an app to be able to use to know how to
+	   get them back in sync. */
+
+	for (i = 0; i < ccissscsi[h->ctlr].ndevices; i++) {
+		struct cciss_scsi_dev_t *sd =
+			&ccissscsi[h->ctlr].dev[i];
+		seq_printf(m, "c%db%dt%dl%d %02d "
+			"0x%02x%02x%02x%02x%02x%02x%02x%02x\n",
+			sh->host_no, sd->bus, sd->target, sd->lun,
+			sd->devtype,
+			sd->scsi3addr[0], sd->scsi3addr[1],
+			sd->scsi3addr[2], sd->scsi3addr[3],
+			sd->scsi3addr[4], sd->scsi3addr[5],
+			sd->scsi3addr[6], sd->scsi3addr[7]);
+	}
+	return 0;
+}
 
 /* cciss_scatter_gather takes a struct scsi_cmnd, (cmd), and does the pci 
    dma mapping  and fills in the scatter gather entries of the 
@@ -1396,7 +1397,7 @@ static void cciss_scatter_gather(ctlr_info_t *h, CommandList_struct *c,
 	/* track how many SG entries we are using */
 	if (request_nsgs > h->maxSG)
 		h->maxSG = request_nsgs;
-	c->Header.SGTotal = (__u8) request_nsgs + chained;
+	c->Header.SGTotal = (u16) request_nsgs + chained;
 	if (request_nsgs > h->max_cmd_sgentries)
 		c->Header.SGList = h->max_cmd_sgentries;
 	else
@@ -1706,5 +1707,6 @@ static int  cciss_eh_abort_handler(struct scsi_cmnd *scsicmd)
 /* If no tape support, then these become defined out of existence */
 
 #define cciss_scsi_setup(cntl_num)
+#define cciss_engage_scsi(h)
 
 #endif /* CONFIG_CISS_SCSI_TAPE */

@@ -18,7 +18,7 @@ export CPU_VER CPU_MAJOR CPU_MINOR CPU_REV
 # rather than bools y/n
 
 # Work out HW multipler support. This is tricky.
-# 1. Spartan2 has no HW multiplers.
+# 1. Spartan2 has no HW multipliers.
 # 2. MicroBlaze v3.x always uses them, except in Spartan 2
 # 3. All other FPGa/CPU ver combos, we can trust the CONFIG_ settings
 ifeq (,$(findstring spartan2,$(CONFIG_XILINX_MICROBLAZE0_FAMILY)))
@@ -57,7 +57,7 @@ boot := arch/microblaze/boot
 DTB:=$(subst simpleImage.,,$(filter simpleImage.%, $(MAKECMDGOALS)))
 
 ifneq ($(DTB),)
-	core-y	+= $(boot)/
+	core-y	+= $(boot)/dts/
 endif
 
 # defines filename extension depending memory management type
@@ -69,16 +69,13 @@ export MMU DTB
 
 all: linux.bin
 
-# With make 3.82 we cannot mix normal and wildcard targets
-BOOT_TARGETS1 = linux.bin linux.bin.gz
-BOOT_TARGETS2 = simpleImage.%
-
 archclean:
 	$(Q)$(MAKE) $(clean)=$(boot)
 
-$(BOOT_TARGETS1): vmlinux
+linux.bin linux.bin.gz: vmlinux
 	$(Q)$(MAKE) $(build)=$(boot) $(boot)/$@
-$(BOOT_TARGETS2): vmlinux
+
+simpleImage.%: vmlinux
 	$(Q)$(MAKE) $(build)=$(boot) $(boot)/$@
 
 define archhelp

@@ -1,6 +1,7 @@
 #ifndef HOSTAP_WLAN_H
 #define HOSTAP_WLAN_H
 
+#include <linux/interrupt.h>
 #include <linux/wireless.h>
 #include <linux/netdevice.h>
 #include <linux/mutex.h>
@@ -595,8 +596,7 @@ struct prism2_helper_functions {
 			struct prism2_download_param *param);
 	int (*tx)(struct sk_buff *skb, struct net_device *dev);
 	int (*set_tim)(struct net_device *dev, int aid, int set);
-	int (*read_aux)(struct net_device *dev, unsigned addr, int len,
-			u8 *buf);
+	const struct file_operations *read_aux_fops;
 
 	int need_tx_headroom; /* number of bytes of headroom needed before
 			       * IEEE 802.11 header */
@@ -853,7 +853,7 @@ struct local_info {
 	struct work_struct comms_qual_update;
 
 	/* RSSI to dBm adjustment (for RX descriptor fields) */
-	int rssi_to_dBm; /* substract from RSSI to get approximate dBm value */
+	int rssi_to_dBm; /* subtract from RSSI to get approximate dBm value */
 
 	/* BSS list / protected by local->lock */
 	struct list_head bss_list;

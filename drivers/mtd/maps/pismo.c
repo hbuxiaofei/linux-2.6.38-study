@@ -50,41 +50,15 @@ struct pismo_data {
 	struct platform_device	*dev[PISMO_NUM_CS];
 };
 
-/* FIXME: set_vpp could do with a better calling convention */
-static struct pismo_data *vpp_pismo;
-static DEFINE_MUTEX(pismo_mutex);
-
-static int pismo_setvpp_probe_fix(struct pismo_data *pismo)
+static void pismo_set_vpp(struct platform_device *pdev, int on)
 {
-	mutex_lock(&pismo_mutex);
-	if (vpp_pismo) {
-		mutex_unlock(&pismo_mutex);
-		kfree(pismo);
-		return -EBUSY;
-	}
-	vpp_pismo = pismo;
-	mutex_unlock(&pismo_mutex);
-	return 0;
-}
-
-static void pismo_setvpp_remove_fix(struct pismo_data *pismo)
-{
-	mutex_lock(&pismo_mutex);
-	if (vpp_pismo == pismo)
-		vpp_pismo = NULL;
-	mutex_unlock(&pismo_mutex);
-}
-
-static void pismo_set_vpp(struct map_info *map, int on)
-{
-	struct pismo_data *pismo = vpp_pismo;
+	struct i2c_client *client = to_i2c_client(pdev->dev.parent);
+	struct pismo_data *pismo = i2c_get_clientdata(client);
 
 	pismo->vpp(pismo->vpp_data, on);
 }
-/* end of hack */
 
-
-static unsigned int __devinit pismo_width_to_bytes(unsigned int width)
+static unsigned int pismo_width_to_bytes(unsigned int width)
 {
 	width &= 15;
 	if (width > 2)
@@ -92,8 +66,8 @@ static unsigned int __devinit pismo_width_to_bytes(unsigned int width)
 	return 1 << width;
 }
 
-static int __devinit pismo_eeprom_read(struct i2c_client *client, void *buf,
-	u8 addr, size_t size)
+static int pismo_eeprom_read(struct i2c_client *client, void *buf, u8 addr,
+			     size_t size)
 {
 	int ret;
 	struct i2c_msg msg[] = {
@@ -114,8 +88,9 @@ static int __devinit pismo_eeprom_read(struct i2c_client *client, void *buf,
 	return ret == ARRAY_SIZE(msg) ? size : -EIO;
 }
 
-static int __devinit pismo_add_device(struct pismo_data *pismo, int i,
-	struct pismo_mem *region, const char *name, void *pdata, size_t psize)
+static int pismo_add_device(struct pismo_data *pismo, int i,
+			    struct pismo_mem *region, const char *name,
+			    void *pdata, size_t psize)
 {
 	struct platform_device *dev;
 	struct resource res = { };
@@ -155,8 +130,8 @@ static int __devinit pismo_add_device(struct pismo_data *pismo, int i,
 	return ret;
 }
 
-static int __devinit pismo_add_nor(struct pismo_data *pismo, int i,
-	struct pismo_mem *region)
+static int pismo_add_nor(struct pismo_data *pismo, int i,
+			 struct pismo_mem *region)
 {
 	struct physmap_flash_data data = {
 		.width = region->width,
@@ -169,8 +144,8 @@ static int __devinit pismo_add_nor(struct pismo_data *pismo, int i,
 		&data, sizeof(data));
 }
 
-static int __devinit pismo_add_sram(struct pismo_data *pismo, int i,
-	struct pismo_mem *region)
+static int pismo_add_sram(struct pismo_data *pismo, int i,
+			  struct pismo_mem *region)
 {
 	struct platdata_mtd_ram data = {
 		.bankwidth = region->width,
@@ -180,8 +155,8 @@ static int __devinit pismo_add_sram(struct pismo_data *pismo, int i,
 		&data, sizeof(data));
 }
 
-static void __devinit pismo_add_one(struct pismo_data *pismo, int i,
-	const struct pismo_cs_block *cs, phys_addr_t base)
+static void pismo_add_one(struct pismo_data *pismo, int i,
+			  const struct pismo_cs_block *cs, phys_addr_t base)
 {
 	struct device *dev = &pismo->client->dev;
 	struct pismo_mem region;
@@ -223,7 +198,7 @@ static void __devinit pismo_add_one(struct pismo_data *pismo, int i,
 	}
 }
 
-static int __devexit pismo_remove(struct i2c_client *client)
+static int pismo_remove(struct i2c_client *client)
 {
 	struct pismo_data *pismo = i2c_get_clientdata(client);
 	int i;
@@ -231,16 +206,13 @@ static int __devexit pismo_remove(struct i2c_client *client)
 	for (i = 0; i < ARRAY_SIZE(pismo->dev); i++)
 		platform_device_unregister(pismo->dev[i]);
 
-	/* FIXME: set_vpp needs saner arguments */
-	pismo_setvpp_remove_fix(pismo);
-
 	kfree(pismo);
 
 	return 0;
 }
 
-static int __devinit pismo_probe(struct i2c_client *client,
-				 const struct i2c_device_id *id)
+static int pismo_probe(struct i2c_client *client,
+		       const struct i2c_device_id *id)
 {
 	struct i2c_adapter *adapter = to_i2c_adapter(client->dev.parent);
 	struct pismo_pdata *pdata = client->dev.platform_data;
@@ -256,11 +228,6 @@ static int __devinit pismo_probe(struct i2c_client *client,
 	pismo = kzalloc(sizeof(*pismo), GFP_KERNEL);
 	if (!pismo)
 		return -ENOMEM;
-
-	/* FIXME: set_vpp needs saner arguments */
-	ret = pismo_setvpp_probe_fix(pismo);
-	if (ret)
-		return ret;
 
 	pismo->client = client;
 	if (pdata) {
@@ -301,7 +268,7 @@ static struct i2c_driver pismo_driver = {
 		.owner	= THIS_MODULE,
 	},
 	.probe		= pismo_probe,
-	.remove		= __devexit_p(pismo_remove),
+	.remove		= pismo_remove,
 	.id_table	= pismo_id,
 };
 

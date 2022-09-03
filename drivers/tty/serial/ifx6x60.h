@@ -29,8 +29,6 @@
 #define DRVNAME				"ifx6x60"
 #define TTYNAME				"ttyIFX"
 
-/* #define IFX_THROTTLE_CODE */
-
 #define IFX_SPI_MAX_MINORS		1
 #define IFX_SPI_TRANSFER_SIZE		2048
 #define IFX_SPI_FIFO_SIZE		4096
@@ -43,6 +41,7 @@
 #define IFX_SPI_STATE_IO_IN_PROGRESS	1
 #define IFX_SPI_STATE_IO_READY		2
 #define IFX_SPI_STATE_TIMER_PENDING	3
+#define IFX_SPI_STATE_IO_AVAILABLE	4
 
 /* flow control bitfields */
 #define IFX_SPI_DCD			0
@@ -88,7 +87,9 @@ struct ifx_spi_device {
 	dma_addr_t rx_dma;
 	dma_addr_t tx_dma;
 
-	int is_6160;				/* Modem type */
+	int modem;		/* Modem type */
+	int use_dma;		/* provide dma-able addrs in SPI msg */
+	long max_hz;		/* max SPI frequency */
 
 	spinlock_t write_lock;
 	int write_pending;
@@ -124,6 +125,7 @@ struct ifx_spi_device {
 #define MR_INPROGRESS	1
 #define MR_COMPLETE	2
 	wait_queue_head_t mdm_reset_wait;
+	void (*swap_buf)(unsigned char *buf, int len, void *end);
 };
 
 #endif /* _IFX6X60_H */

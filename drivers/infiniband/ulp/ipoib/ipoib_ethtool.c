@@ -39,33 +39,24 @@
 static void ipoib_get_drvinfo(struct net_device *netdev,
 			      struct ethtool_drvinfo *drvinfo)
 {
-	strncpy(drvinfo->driver, "ipoib", sizeof(drvinfo->driver) - 1);
-}
+	struct ipoib_dev_priv *priv = netdev_priv(netdev);
+	struct ib_device_attr *attr;
 
-static u32 ipoib_get_rx_csum(struct net_device *dev)
-{
-	struct ipoib_dev_priv *priv = netdev_priv(dev);
-	return test_bit(IPOIB_FLAG_CSUM, &priv->flags) &&
-		!test_bit(IPOIB_FLAG_ADMIN_CM, &priv->flags);
-}
+	attr = kmalloc(sizeof(*attr), GFP_KERNEL);
+	if (attr && !ib_query_device(priv->ca, attr))
+		snprintf(drvinfo->fw_version, sizeof(drvinfo->fw_version),
+			 "%d.%d.%d", (int)(attr->fw_ver >> 32),
+			 (int)(attr->fw_ver >> 16) & 0xffff,
+			 (int)attr->fw_ver & 0xffff);
+	kfree(attr);
 
-static int ipoib_set_tso(struct net_device *dev, u32 data)
-{
-	struct ipoib_dev_priv *priv = netdev_priv(dev);
+	strlcpy(drvinfo->bus_info, dev_name(priv->ca->dma_device),
+		sizeof(drvinfo->bus_info));
 
-	if (data) {
-		if (!test_bit(IPOIB_FLAG_ADMIN_CM, &priv->flags) &&
-		    (dev->features & NETIF_F_SG) &&
-		    (priv->hca_caps & IB_DEVICE_UD_TSO)) {
-			dev->features |= NETIF_F_TSO;
-		} else {
-			ipoib_warn(priv, "can't set TSO on\n");
-			return -EOPNOTSUPP;
-		}
-	} else
-		dev->features &= ~NETIF_F_TSO;
+	strlcpy(drvinfo->version, ipoib_driver_version,
+		sizeof(drvinfo->version));
 
-	return 0;
+	strlcpy(drvinfo->driver, "ib_ipoib", sizeof(drvinfo->driver));
 }
 
 static int ipoib_get_coalesce(struct net_device *dev,
@@ -108,8 +99,6 @@ static int ipoib_set_coalesce(struct net_device *dev,
 
 static const struct ethtool_ops ipoib_ethtool_ops = {
 	.get_drvinfo		= ipoib_get_drvinfo,
-	.get_rx_csum		= ipoib_get_rx_csum,
-	.set_tso		= ipoib_set_tso,
 	.get_coalesce		= ipoib_get_coalesce,
 	.set_coalesce		= ipoib_set_coalesce,
 };

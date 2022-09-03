@@ -44,7 +44,7 @@ SECTIONS {
 	__fdt_blob : AT(ADDR(__fdt_blob) - LOAD_OFFSET) {
 		_fdt_start = . ;		/* place for fdt blob */
 		*(__fdt_blob) ;			/* Any link-placed DTB */
-	        . = _fdt_start + 0x4000;	/* Pad up to 16kbyte */
+	        . = _fdt_start + 0x8000;	/* Pad up to 32kbyte */
 		_fdt_end = . ;
 	}
 
@@ -69,11 +69,6 @@ SECTIONS {
 	_sdata = . ;
 	RW_DATA_SECTION(32, PAGE_SIZE, THREAD_SIZE)
 	_edata = . ;
-
-	/* Reserve some low RAM for r0 based memory references */
-	. = ALIGN(0x4) ;
-	r0_ram = . ;
-	. = . +  PAGE_SIZE;	/* a page should be enough */
 
 	/* Under the microblaze ABI, .sdata and .sbss must be contiguous */
 	. = ALIGN(8);
@@ -136,7 +131,6 @@ SECTIONS {
 			*(COMMON)
 		. = ALIGN (4) ;
 		__bss_stop = . ;
-		_ebss = . ;
 	}
 	. = ALIGN(PAGE_SIZE);
 	_end = .;

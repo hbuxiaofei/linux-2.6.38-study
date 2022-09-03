@@ -1,5 +1,5 @@
 /*
- * spidev.c -- simple synchronous userspace interface to SPI devices
+ * Simple synchronous userspace interface to SPI devices
  *
  * Copyright (C) 2006 SWAPP
  *	Andrea Paterniani <a.paterniani@swapp-eng.it>
@@ -30,6 +30,9 @@
 #include <linux/errno.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
+#include <linux/compat.h>
+#include <linux/of.h>
+#include <linux/of_device.h>
 
 #include <linux/spi/spi.h>
 #include <linux/spi/spidev.h>
@@ -471,6 +474,16 @@ spidev_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	return retval;
 }
 
+#ifdef CONFIG_COMPAT
+static long
+spidev_compat_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+{
+	return spidev_ioctl(filp, cmd, (unsigned long)compat_ptr(arg));
+}
+#else
+#define spidev_compat_ioctl NULL
+#endif /* CONFIG_COMPAT */
+
 static int spidev_open(struct inode *inode, struct file *filp)
 {
 	struct spidev_data	*spidev;
@@ -543,6 +556,7 @@ static const struct file_operations spidev_fops = {
 	.write =	spidev_write,
 	.read =		spidev_read,
 	.unlocked_ioctl = spidev_ioctl,
+	.compat_ioctl = spidev_compat_ioctl,
 	.open =		spidev_open,
 	.release =	spidev_release,
 	.llseek =	no_llseek,
@@ -559,7 +573,7 @@ static struct class *spidev_class;
 
 /*-------------------------------------------------------------------------*/
 
-static int __devinit spidev_probe(struct spi_device *spi)
+static int spidev_probe(struct spi_device *spi)
 {
 	struct spidev_data	*spidev;
 	int			status;
@@ -589,7 +603,7 @@ static int __devinit spidev_probe(struct spi_device *spi)
 		dev = device_create(spidev_class, &spi->dev, spidev->devt,
 				    spidev, "spidev%d.%d",
 				    spi->master->bus_num, spi->chip_select);
-		status = IS_ERR(dev) ? PTR_ERR(dev) : 0;
+		status = PTR_RET(dev);
 	} else {
 		dev_dbg(&spi->dev, "no minor number available!\n");
 		status = -ENODEV;
@@ -608,7 +622,7 @@ static int __devinit spidev_probe(struct spi_device *spi)
 	return status;
 }
 
-static int __devexit spidev_remove(struct spi_device *spi)
+static int spidev_remove(struct spi_device *spi)
 {
 	struct spidev_data	*spidev = spi_get_drvdata(spi);
 
@@ -630,13 +644,21 @@ static int __devexit spidev_remove(struct spi_device *spi)
 	return 0;
 }
 
+static const struct of_device_id spidev_dt_ids[] = {
+	{ .compatible = "rohm,dh2228fv" },
+	{},
+};
+
+MODULE_DEVICE_TABLE(of, spidev_dt_ids);
+
 static struct spi_driver spidev_spi_driver = {
 	.driver = {
 		.name =		"spidev",
 		.owner =	THIS_MODULE,
+		.of_match_table = of_match_ptr(spidev_dt_ids),
 	},
 	.probe =	spidev_probe,
-	.remove =	__devexit_p(spidev_remove),
+	.remove =	spidev_remove,
 
 	/* NOTE:  suspend/resume methods are not necessary here.
 	 * We don't do anything except pass the requests to/from

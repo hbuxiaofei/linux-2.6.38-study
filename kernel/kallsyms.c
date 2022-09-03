@@ -64,14 +64,14 @@ static inline int is_kernel_text(unsigned long addr)
 	if ((addr >= (unsigned long)_stext && addr <= (unsigned long)_etext) ||
 	    arch_is_kernel_text(addr))
 		return 1;
-	return in_gate_area_no_task(addr);
+	return in_gate_area_no_mm(addr);
 }
 
 static inline int is_kernel(unsigned long addr)
 {
 	if (addr >= (unsigned long)_stext && addr <= (unsigned long)_end)
 		return 1;
-	return in_gate_area_no_task(addr);
+	return in_gate_area_no_mm(addr);
 }
 
 static int is_ksym_addr(unsigned long addr)
@@ -84,9 +84,11 @@ static int is_ksym_addr(unsigned long addr)
 
 /*
  * Expand a compressed symbol data into the resulting uncompressed string,
+ * if uncompressed string is too long (>= maxlen), it will be truncated,
  * given the offset to where the symbol is in the compressed stream.
  */
-static unsigned int kallsyms_expand_symbol(unsigned int off, char *result)
+static unsigned int kallsyms_expand_symbol(unsigned int off,
+					   char *result, size_t maxlen)
 {
 	int len, skipped_first = 0;
 	const u8 *tptr, *data;
@@ -113,15 +115,20 @@ static unsigned int kallsyms_expand_symbol(unsigned int off, char *result)
 
 		while (*tptr) {
 			if (skipped_first) {
+				if (maxlen <= 1)
+					goto tail;
 				*result = *tptr;
 				result++;
+				maxlen--;
 			} else
 				skipped_first = 1;
 			tptr++;
 		}
 	}
 
-	*result = '\0';
+tail:
+	if (maxlen)
+		*result = '\0';
 
 	/* Return to offset to the next symbol. */
 	return off;
@@ -176,7 +183,7 @@ unsigned long kallsyms_lookup_name(const char *name)
 	unsigned int off;
 
 	for (i = 0, off = 0; i < kallsyms_num_syms; i++) {
-		off = kallsyms_expand_symbol(off, namebuf);
+		off = kallsyms_expand_symbol(off, namebuf, ARRAY_SIZE(namebuf));
 
 		if (strcmp(namebuf, name) == 0)
 			return kallsyms_addresses[i];
@@ -195,7 +202,7 @@ int kallsyms_on_each_symbol(int (*fn)(void *, const char *, struct module *,
 	int ret;
 
 	for (i = 0, off = 0; i < kallsyms_num_syms; i++) {
-		off = kallsyms_expand_symbol(off, namebuf);
+		off = kallsyms_expand_symbol(off, namebuf, ARRAY_SIZE(namebuf));
 		ret = fn(data, namebuf, NULL, kallsyms_addresses[i]);
 		if (ret != 0)
 			return ret;
@@ -294,7 +301,8 @@ const char *kallsyms_lookup(unsigned long addr,
 
 		pos = get_symbol_pos(addr, symbolsize, offset);
 		/* Grab name */
-		kallsyms_expand_symbol(get_symbol_offset(pos), namebuf);
+		kallsyms_expand_symbol(get_symbol_offset(pos),
+				       namebuf, KSYM_NAME_LEN);
 		if (modname)
 			*modname = NULL;
 		return namebuf;
@@ -315,7 +323,8 @@ int lookup_symbol_name(unsigned long addr, char *symname)
 
 		pos = get_symbol_pos(addr, NULL, NULL);
 		/* Grab name */
-		kallsyms_expand_symbol(get_symbol_offset(pos), symname);
+		kallsyms_expand_symbol(get_symbol_offset(pos),
+				       symname, KSYM_NAME_LEN);
 		return 0;
 	}
 	/* See if it's in a module. */
@@ -333,7 +342,8 @@ int lookup_symbol_attrs(unsigned long addr, unsigned long *size,
 
 		pos = get_symbol_pos(addr, size, offset);
 		/* Grab name */
-		kallsyms_expand_symbol(get_symbol_offset(pos), name);
+		kallsyms_expand_symbol(get_symbol_offset(pos),
+				       name, KSYM_NAME_LEN);
 		modname[0] = '\0';
 		return 0;
 	}
@@ -342,13 +352,15 @@ int lookup_symbol_attrs(unsigned long addr, unsigned long *size,
 }
 
 /* Look up a kernel symbol and return it in a text buffer. */
-int sprint_symbol(char *buffer, unsigned long address)
+static int __sprint_symbol(char *buffer, unsigned long address,
+			   int symbol_offset, int add_offset)
 {
 	char *modname;
 	const char *name;
 	unsigned long offset, size;
 	int len;
 
+	address += symbol_offset;
 	name = kallsyms_lookup(address, &size, &offset, &modname, buffer);
 	if (!name)
 		return sprintf(buffer, "0x%lx", address);
@@ -356,17 +368,69 @@ int sprint_symbol(char *buffer, unsigned long address)
 	if (name != buffer)
 		strcpy(buffer, name);
 	len = strlen(buffer);
-	buffer += len;
+	offset -= symbol_offset;
+
+	if (add_offset)
+		len += sprintf(buffer + len, "+%#lx/%#lx", offset, size);
 
 	if (modname)
-		len += sprintf(buffer, "+%#lx/%#lx [%s]",
-						offset, size, modname);
-	else
-		len += sprintf(buffer, "+%#lx/%#lx", offset, size);
+		len += sprintf(buffer + len, " [%s]", modname);
 
 	return len;
 }
+
+/**
+ * sprint_symbol - Look up a kernel symbol and return it in a text buffer
+ * @buffer: buffer to be stored
+ * @address: address to lookup
+ *
+ * This function looks up a kernel symbol with @address and stores its name,
+ * offset, size and module name to @buffer if possible. If no symbol was found,
+ * just saves its @address as is.
+ *
+ * This function returns the number of bytes stored in @buffer.
+ */
+int sprint_symbol(char *buffer, unsigned long address)
+{
+	return __sprint_symbol(buffer, address, 0, 1);
+}
 EXPORT_SYMBOL_GPL(sprint_symbol);
+
+/**
+ * sprint_symbol_no_offset - Look up a kernel symbol and return it in a text buffer
+ * @buffer: buffer to be stored
+ * @address: address to lookup
+ *
+ * This function looks up a kernel symbol with @address and stores its name
+ * and module name to @buffer if possible. If no symbol was found, just saves
+ * its @address as is.
+ *
+ * This function returns the number of bytes stored in @buffer.
+ */
+int sprint_symbol_no_offset(char *buffer, unsigned long address)
+{
+	return __sprint_symbol(buffer, address, 0, 0);
+}
+EXPORT_SYMBOL_GPL(sprint_symbol_no_offset);
+
+/**
+ * sprint_backtrace - Look up a backtrace symbol and return it in a text buffer
+ * @buffer: buffer to be stored
+ * @address: address to lookup
+ *
+ * This function is for stack backtrace and does the same thing as
+ * sprint_symbol() but with modified/decreased @address. If there is a
+ * tail-call to the function marked "noreturn", gcc optimized out code after
+ * the call so that the stack-saved return address could point outside of the
+ * caller. This function ensures that kallsyms will find the original caller
+ * by decreasing @address.
+ *
+ * This function returns the number of bytes stored in @buffer.
+ */
+int sprint_backtrace(char *buffer, unsigned long address)
+{
+	return __sprint_symbol(buffer, address, -1, 1);
+}
 
 /* Look up a kernel symbol and print it to the kernel messages. */
 void __print_symbol(const char *fmt, unsigned long address)
@@ -409,7 +473,7 @@ static unsigned long get_ksymbol_core(struct kallsym_iter *iter)
 
 	iter->type = kallsyms_get_symbol_type(off);
 
-	off = kallsyms_expand_symbol(off, iter->name);
+	off = kallsyms_expand_symbol(off, iter->name, ARRAY_SIZE(iter->name));
 
 	return off - iter->nameoff;
 }
@@ -477,13 +541,11 @@ static int s_show(struct seq_file *m, void *p)
 		 */
 		type = iter->exported ? toupper(iter->type) :
 					tolower(iter->type);
-		seq_printf(m, "%0*lx %c %s\t[%s]\n",
-			   (int)(2 * sizeof(void *)),
-			   iter->value, type, iter->name, iter->module_name);
+		seq_printf(m, "%pK %c %s\t[%s]\n", (void *)iter->value,
+			   type, iter->name, iter->module_name);
 	} else
-		seq_printf(m, "%0*lx %c %s\n",
-			   (int)(2 * sizeof(void *)),
-			   iter->value, iter->type, iter->name);
+		seq_printf(m, "%pK %c %s\n", (void *)iter->value,
+			   iter->type, iter->name);
 	return 0;
 }
 

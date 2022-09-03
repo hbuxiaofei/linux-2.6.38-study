@@ -22,6 +22,7 @@
 #include <linux/mutex.h>
 #include <linux/platform_device.h>
 #include <linux/delay.h>
+#include <linux/module.h>
 
 #define BH1780_REG_CONTROL	0x80
 #define BH1780_REG_PARTID	0x8A
@@ -49,8 +50,8 @@ static int bh1780_write(struct bh1780_data *ddata, u8 reg, u8 val, char *msg)
 	int ret = i2c_smbus_write_byte_data(ddata->client, reg, val);
 	if (ret < 0)
 		dev_err(&ddata->client->dev,
-			"i2c_smbus_write_byte_data failed error %d\
-			Register (%s)\n", ret, msg);
+			"i2c_smbus_write_byte_data failed error %d Register (%s)\n",
+			ret, msg);
 	return ret;
 }
 
@@ -59,8 +60,8 @@ static int bh1780_read(struct bh1780_data *ddata, u8 reg, char *msg)
 	int ret = i2c_smbus_read_byte_data(ddata->client, reg);
 	if (ret < 0)
 		dev_err(&ddata->client->dev,
-			"i2c_smbus_read_byte_data failed error %d\
-			 Register (%s)\n", ret, msg);
+			"i2c_smbus_read_byte_data failed error %d Register (%s)\n",
+			ret, msg);
 	return ret;
 }
 
@@ -143,7 +144,7 @@ static const struct attribute_group bh1780_attr_group = {
 	.attrs = bh1780_attributes,
 };
 
-static int __devinit bh1780_probe(struct i2c_client *client,
+static int bh1780_probe(struct i2c_client *client,
 						const struct i2c_device_id *id)
 {
 	int ret;
@@ -184,7 +185,7 @@ err_op_failed:
 	return ret;
 }
 
-static int __devexit bh1780_remove(struct i2c_client *client)
+static int bh1780_remove(struct i2c_client *client)
 {
 	struct bh1780_data *ddata;
 
@@ -195,11 +196,12 @@ static int __devexit bh1780_remove(struct i2c_client *client)
 	return 0;
 }
 
-#ifdef CONFIG_PM
-static int bh1780_suspend(struct i2c_client *client, pm_message_t mesg)
+#ifdef CONFIG_PM_SLEEP
+static int bh1780_suspend(struct device *dev)
 {
 	struct bh1780_data *ddata;
 	int state, ret;
+	struct i2c_client *client = to_i2c_client(dev);
 
 	ddata = i2c_get_clientdata(client);
 	state = bh1780_read(ddata, BH1780_REG_CONTROL, "CONTROL");
@@ -217,14 +219,14 @@ static int bh1780_suspend(struct i2c_client *client, pm_message_t mesg)
 	return 0;
 }
 
-static int bh1780_resume(struct i2c_client *client)
+static int bh1780_resume(struct device *dev)
 {
 	struct bh1780_data *ddata;
 	int state, ret;
+	struct i2c_client *client = to_i2c_client(dev);
 
 	ddata = i2c_get_clientdata(client);
 	state = ddata->power_state;
-
 	ret = bh1780_write(ddata, BH1780_REG_CONTROL, state,
 				"CONTROL");
 
@@ -233,10 +235,9 @@ static int bh1780_resume(struct i2c_client *client)
 
 	return 0;
 }
-#else
-#define bh1780_suspend NULL
-#define bh1780_resume NULL
-#endif /* CONFIG_PM */
+#endif /* CONFIG_PM_SLEEP */
+
+static SIMPLE_DEV_PM_OPS(bh1780_pm, bh1780_suspend, bh1780_resume);
 
 static const struct i2c_device_id bh1780_id[] = {
 	{ "bh1780", 0 },
@@ -247,25 +248,13 @@ static struct i2c_driver bh1780_driver = {
 	.probe		= bh1780_probe,
 	.remove		= bh1780_remove,
 	.id_table	= bh1780_id,
-	.suspend	= bh1780_suspend,
-	.resume		= bh1780_resume,
 	.driver = {
-		.name = "bh1780"
+		.name = "bh1780",
+		.pm	= &bh1780_pm,
 	},
 };
 
-static int __init bh1780_init(void)
-{
-	return i2c_add_driver(&bh1780_driver);
-}
-
-static void __exit bh1780_exit(void)
-{
-	i2c_del_driver(&bh1780_driver);
-}
-
-module_init(bh1780_init)
-module_exit(bh1780_exit)
+module_i2c_driver(bh1780_driver);
 
 MODULE_DESCRIPTION("BH1780GLI Ambient Light Sensor Driver");
 MODULE_LICENSE("GPL");

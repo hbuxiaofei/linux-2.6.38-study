@@ -15,6 +15,7 @@
 
 #include <linux/input.h>
 #include <linux/input/sparse-keymap.h>
+#include <linux/module.h>
 #include <linux/slab.h>
 
 MODULE_AUTHOR("Dmitry Torokhov <dtor@mail.ru>");
@@ -179,11 +180,11 @@ int sparse_keymap_setup(struct input_dev *dev,
 	for (e = keymap; e->type != KE_END; e++)
 		map_size++;
 
-	map = kcalloc(map_size, sizeof (struct key_entry), GFP_KERNEL);
+	map = kcalloc(map_size, sizeof(struct key_entry), GFP_KERNEL);
 	if (!map)
 		return -ENOMEM;
 
-	memcpy(map, keymap, map_size * sizeof (struct key_entry));
+	memcpy(map, keymap, map_size * sizeof(struct key_entry));
 
 	for (i = 0; i < map_size; i++) {
 		entry = &map[i];
@@ -208,10 +209,16 @@ int sparse_keymap_setup(struct input_dev *dev,
 		}
 	}
 
+	if (test_bit(EV_KEY, dev->evbit)) {
+		__set_bit(KEY_UNKNOWN, dev->keybit);
+		__set_bit(EV_MSC, dev->evbit);
+		__set_bit(MSC_SCAN, dev->mscbit);
+	}
+
 	dev->keycode = map;
 	dev->keycodemax = map_size;
-	dev->getkeycode_new = sparse_keymap_getkeycode;
-	dev->setkeycode_new = sparse_keymap_setkeycode;
+	dev->getkeycode = sparse_keymap_getkeycode;
+	dev->setkeycode = sparse_keymap_setkeycode;
 
 	return 0;
 
@@ -268,6 +275,7 @@ void sparse_keymap_report_entry(struct input_dev *dev, const struct key_entry *k
 {
 	switch (ke->type) {
 	case KE_KEY:
+		input_event(dev, EV_MSC, MSC_SCAN, ke->code);
 		input_report_key(dev, ke->keycode, value);
 		input_sync(dev);
 		if (value && autorelease) {
@@ -305,11 +313,18 @@ bool sparse_keymap_report_event(struct input_dev *dev, unsigned int code,
 {
 	const struct key_entry *ke =
 		sparse_keymap_entry_from_scancode(dev, code);
+	struct key_entry unknown_ke;
 
 	if (ke) {
 		sparse_keymap_report_entry(dev, ke, value, autorelease);
 		return true;
 	}
+
+	/* Report an unknown key event as a debugging aid */
+	unknown_ke.type = KE_KEY;
+	unknown_ke.code = code;
+	unknown_ke.keycode = KEY_UNKNOWN;
+	sparse_keymap_report_entry(dev, &unknown_ke, value, true);
 
 	return false;
 }

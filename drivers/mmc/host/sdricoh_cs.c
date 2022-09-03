@@ -26,6 +26,7 @@
 */
 #include <linux/delay.h>
 #include <linux/highmem.h>
+#include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/ioport.h>
 #include <linux/scatterlist.h>
@@ -76,7 +77,7 @@ static unsigned int switchlocked;
 #define BUSY_TIMEOUT      32767
 
 /* list of supported pcmcia devices */
-static struct pcmcia_device_id pcmcia_ids[] = {
+static const struct pcmcia_device_id pcmcia_ids[] = {
 	/* vendor and device strings followed by their crc32 hashes */
 	PCMCIA_DEVICE_PROD_ID12("RICOH", "Bay1Controller", 0xd9f522ed,
 				0xc3901202),
@@ -542,25 +543,7 @@ static struct pcmcia_driver sdricoh_driver = {
 	.suspend = sdricoh_pcmcia_suspend,
 	.resume = sdricoh_pcmcia_resume,
 };
-
-/*****************************************************************************\
- *                                                                           *
- * Driver init/exit                                                          *
- *                                                                           *
-\*****************************************************************************/
-
-static int __init sdricoh_drv_init(void)
-{
-	return pcmcia_register_driver(&sdricoh_driver);
-}
-
-static void __exit sdricoh_drv_exit(void)
-{
-	pcmcia_unregister_driver(&sdricoh_driver);
-}
-
-module_init(sdricoh_drv_init);
-module_exit(sdricoh_drv_exit);
+module_pcmcia_driver(sdricoh_driver);
 
 module_param(switchlocked, uint, 0444);
 

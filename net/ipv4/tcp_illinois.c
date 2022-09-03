@@ -313,16 +313,18 @@ static void tcp_illinois_info(struct sock *sk, u32 ext,
 			.tcpv_rttcnt = ca->cnt_rtt,
 			.tcpv_minrtt = ca->base_rtt,
 		};
-		u64 t = ca->sum_rtt;
 
-		do_div(t, ca->cnt_rtt);
-		info.tcpv_rtt = t;
+		if (info.tcpv_rttcnt > 0) {
+			u64 t = ca->sum_rtt;
 
+			do_div(t, info.tcpv_rttcnt);
+			info.tcpv_rtt = t;
+		}
 		nla_put(skb, INET_DIAG_VEGASINFO, sizeof(info), &info);
 	}
 }
 
-static struct tcp_congestion_ops tcp_illinois = {
+static struct tcp_congestion_ops tcp_illinois __read_mostly = {
 	.flags		= TCP_CONG_RTT_STAMP,
 	.init		= tcp_illinois_init,
 	.ssthresh	= tcp_illinois_ssthresh,

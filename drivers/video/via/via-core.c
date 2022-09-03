@@ -35,7 +35,7 @@ static struct via_port_cfg adap_configs[] = {
  * The OLPC XO-1.5 puts the camera power and reset lines onto
  * GPIO 2C.
  */
-static const struct via_port_cfg olpc_adap_configs[] = {
+static struct via_port_cfg olpc_adap_configs[] = {
 	[VIA_PORT_26]	= { VIA_PORT_I2C,  VIA_MODE_I2C, VIASR, 0x26 },
 	[VIA_PORT_31]	= { VIA_PORT_I2C,  VIA_MODE_I2C, VIASR, 0x31 },
 	[VIA_PORT_25]	= { VIA_PORT_GPIO, VIA_MODE_GPIO, VIASR, 0x25 },
@@ -80,7 +80,7 @@ static inline int viafb_mmio_read(int reg)
  */
 static u32 viafb_enabled_ints;
 
-static void __devinit viafb_int_init(void)
+static void viafb_int_init(void)
 {
 	viafb_enabled_ints = 0;
 
@@ -475,7 +475,7 @@ static int viafb_get_fb_size_from_pci(int chip_type)
 /*
  * Figure out and map our MMIO regions.
  */
-static int __devinit via_pci_setup_mmio(struct viafb_dev *vdev)
+static int via_pci_setup_mmio(struct viafb_dev *vdev)
 {
 	int ret;
 	/*
@@ -505,7 +505,14 @@ static int __devinit via_pci_setup_mmio(struct viafb_dev *vdev)
 	ret = vdev->fbmem_len = viafb_get_fb_size_from_pci(vdev->chip_type);
 	if (ret < 0)
 		goto out_unmap;
-	vdev->fbmem = ioremap_nocache(vdev->fbmem_start, vdev->fbmem_len);
+
+	/* try to map less memory on failure, 8 MB should be still enough */
+	for (; vdev->fbmem_len >= 8 << 20; vdev->fbmem_len /= 2) {
+		vdev->fbmem = ioremap_wc(vdev->fbmem_start, vdev->fbmem_len);
+		if (vdev->fbmem)
+			break;
+	}
+
 	if (vdev->fbmem == NULL) {
 		ret = -ENOMEM;
 		goto out_unmap;
@@ -543,8 +550,8 @@ static struct viafb_subdev_info {
 };
 #define N_SUBDEVS ARRAY_SIZE(viafb_subdevs)
 
-static int __devinit via_create_subdev(struct viafb_dev *vdev,
-		struct viafb_subdev_info *info)
+static int via_create_subdev(struct viafb_dev *vdev,
+			     struct viafb_subdev_info *info)
 {
 	int ret;
 
@@ -566,7 +573,7 @@ static int __devinit via_create_subdev(struct viafb_dev *vdev,
 	return ret;
 }
 
-static int __devinit via_setup_subdevs(struct viafb_dev *vdev)
+static int via_setup_subdevs(struct viafb_dev *vdev)
 {
 	int i;
 
@@ -664,8 +671,7 @@ static int via_resume(struct pci_dev *pdev)
 }
 #endif /* CONFIG_PM */
 
-static int __devinit via_pci_probe(struct pci_dev *pdev,
-		const struct pci_device_id *ent)
+static int via_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
 	int ret;
 
@@ -709,7 +715,7 @@ out_disable:
 	return ret;
 }
 
-static void __devexit via_pci_remove(struct pci_dev *pdev)
+static void via_pci_remove(struct pci_dev *pdev)
 {
 	via_teardown_subdevs();
 	via_fb_pci_remove(pdev);
@@ -718,7 +724,7 @@ static void __devexit via_pci_remove(struct pci_dev *pdev)
 }
 
 
-static struct pci_device_id via_pci_table[] __devinitdata = {
+static struct pci_device_id via_pci_table[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_VIA, UNICHROME_CLE266_DID),
 	  .driver_data = UNICHROME_CLE266 },
 	{ PCI_DEVICE(PCI_VENDOR_ID_VIA, UNICHROME_K400_DID),
@@ -753,7 +759,7 @@ static struct pci_driver via_driver = {
 	.name		= "viafb",
 	.id_table	= via_pci_table,
 	.probe		= via_pci_probe,
-	.remove		= __devexit_p(via_pci_remove),
+	.remove		= via_pci_remove,
 #ifdef CONFIG_PM
 	.suspend	= via_suspend,
 	.resume		= via_resume,

@@ -1,5 +1,5 @@
 /*
- * Copyright IBM Corp. 1999, 2009
+ * Copyright IBM Corp. 1999,2012
  *
  * Author(s): Martin Peschke <mpeschke@de.ibm.com>
  *	      Martin Schwidefsky <schwidefsky@de.ibm.com>
@@ -28,6 +28,7 @@
 #define EVTYP_CONFMGMDATA	0x04
 #define EVTYP_SDIAS		0x1C
 #define EVTYP_ASYNC		0x0A
+#define EVTYP_OCF		0x1E
 
 #define EVTYP_OPCMD_MASK	0x80000000
 #define EVTYP_MSG_MASK		0x40000000
@@ -40,6 +41,7 @@
 #define EVTYP_CONFMGMDATA_MASK	0x10000000
 #define EVTYP_SDIAS_MASK	0x00000010
 #define EVTYP_ASYNC_MASK	0x00400000
+#define EVTYP_OCF_MASK		0x00000004
 
 #define GNRLMSGFLGS_DOM		0x8000
 #define GNRLMSGFLGS_SNDALRM	0x4000
@@ -86,11 +88,22 @@ struct sccb_header {
 	u16	response_code;
 } __attribute__((packed));
 
+struct init_sccb {
+	struct sccb_header header;
+	u16 _reserved;
+	u16 mask_length;
+	sccb_mask_t receive_mask;
+	sccb_mask_t send_mask;
+	sccb_mask_t sclp_receive_mask;
+	sccb_mask_t sclp_send_mask;
+} __attribute__((packed));
+
 extern u64 sclp_facilities;
 #define SCLP_HAS_CHP_INFO	(sclp_facilities & 0x8000000000000000ULL)
 #define SCLP_HAS_CHP_RECONFIG	(sclp_facilities & 0x2000000000000000ULL)
 #define SCLP_HAS_CPU_INFO	(sclp_facilities & 0x0800000000000000ULL)
 #define SCLP_HAS_CPU_RECONFIG	(sclp_facilities & 0x0400000000000000ULL)
+#define SCLP_HAS_PCI_RECONFIG	(sclp_facilities & 0x0000000040000000ULL)
 
 
 struct gds_subvector {
@@ -184,6 +197,28 @@ static inline void
 sclp_ascebc_str(unsigned char *str, int nr)
 {
 	(MACHINE_IS_VM) ? ASCEBC(str, nr) : ASCEBC_500(str, nr);
+}
+
+static inline struct gds_vector *
+sclp_find_gds_vector(void *start, void *end, u16 id)
+{
+	struct gds_vector *v;
+
+	for (v = start; (void *) v < end; v = (void *) v + v->length)
+		if (v->gds_id == id)
+			return v;
+	return NULL;
+}
+
+static inline struct gds_subvector *
+sclp_find_gds_subvector(void *start, void *end, u8 key)
+{
+	struct gds_subvector *sv;
+
+	for (sv = start; (void *) sv < end; sv = (void *) sv + sv->length)
+		if (sv->key == key)
+			return sv;
+	return NULL;
 }
 
 #endif	 /* __SCLP_H__ */

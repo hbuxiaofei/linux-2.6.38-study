@@ -2,7 +2,7 @@
  * net/tipc/net.c: TIPC network routing code
  *
  * Copyright (c) 1995-2006, Ericsson AB
- * Copyright (c) 2005, Wind River Systems
+ * Copyright (c) 2005, 2010-2011, Wind River Systems
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -39,6 +39,7 @@
 #include "name_distr.h"
 #include "subscr.h"
 #include "port.h"
+#include "node.h"
 #include "config.h"
 
 /*
@@ -108,26 +109,6 @@
 */
 
 DEFINE_RWLOCK(tipc_net_lock);
-struct network tipc_net;
-
-static int net_start(void)
-{
-	tipc_net.nodes = kcalloc(tipc_max_nodes + 1,
-				 sizeof(*tipc_net.nodes), GFP_ATOMIC);
-	tipc_net.highest_node = 0;
-
-	return tipc_net.nodes ? 0 : -ENOMEM;
-}
-
-static void net_stop(void)
-{
-	u32 n_num;
-
-	for (n_num = 1; n_num <= tipc_net.highest_node; n_num++)
-		tipc_node_delete(tipc_net.nodes[n_num]);
-	kfree(tipc_net.nodes);
-	tipc_net.nodes = NULL;
-}
 
 static void net_route_named_msg(struct sk_buff *buf)
 {
@@ -136,7 +117,7 @@ static void net_route_named_msg(struct sk_buff *buf)
 	u32 dport;
 
 	if (!msg_named(msg)) {
-		buf_discard(buf);
+		kfree_skb(buf);
 		return;
 	}
 
@@ -160,17 +141,6 @@ void tipc_net_route_msg(struct sk_buff *buf)
 		return;
 	msg = buf_msg(buf);
 
-	msg_incr_reroute_cnt(msg);
-	if (msg_reroute_cnt(msg) > 6) {
-		if (msg_errcode(msg)) {
-			buf_discard(buf);
-		} else {
-			tipc_reject_msg(buf, msg_destport(msg) ?
-					TIPC_ERR_NO_PORT : TIPC_ERR_NO_NAME);
-		}
-		return;
-	}
-
 	/* Handle message for this node */
 	dnode = msg_short(msg) ? tipc_own_addr : msg_destnode(msg);
 	if (tipc_in_scope(dnode, tipc_own_addr)) {
@@ -191,7 +161,7 @@ void tipc_net_route_msg(struct sk_buff *buf)
 			tipc_port_recv_proto_msg(buf);
 			break;
 		default:
-			buf_discard(buf);
+			kfree_skb(buf);
 		}
 		return;
 	}
@@ -201,48 +171,35 @@ void tipc_net_route_msg(struct sk_buff *buf)
 	tipc_link_send(buf, dnode, msg_link_selector(msg));
 }
 
-int tipc_net_start(u32 addr)
+void tipc_net_start(u32 addr)
 {
 	char addr_string[16];
-	int res;
 
-	if (tipc_mode != TIPC_NODE_MODE)
-		return -ENOPROTOOPT;
-
-	tipc_subscr_stop();
-	tipc_cfg_stop();
-
+	write_lock_bh(&tipc_net_lock);
 	tipc_own_addr = addr;
-	tipc_mode = TIPC_NET_MODE;
 	tipc_named_reinit();
 	tipc_port_reinit();
+	tipc_bclink_init();
+	write_unlock_bh(&tipc_net_lock);
 
-	res = net_start();
-	if (res)
-		return res;
-	res = tipc_bclink_init();
-	if (res)
-		return res;
+	tipc_cfg_reinit();
 
-	tipc_k_signal((Handler)tipc_subscr_start, 0);
-	tipc_k_signal((Handler)tipc_cfg_init, 0);
-
-	info("Started in network mode\n");
-	info("Own node address %s, network identity %u\n",
-	     tipc_addr_string_fill(addr_string, tipc_own_addr), tipc_net_id);
-	return 0;
+	pr_info("Started in network mode\n");
+	pr_info("Own node address %s, network identity %u\n",
+		tipc_addr_string_fill(addr_string, tipc_own_addr), tipc_net_id);
 }
 
 void tipc_net_stop(void)
 {
-	if (tipc_mode != TIPC_NET_MODE)
+	struct tipc_node *node, *t_node;
+
+	if (!tipc_own_addr)
 		return;
 	write_lock_bh(&tipc_net_lock);
 	tipc_bearer_stop();
-	tipc_mode = TIPC_NODE_MODE;
 	tipc_bclink_stop();
-	net_stop();
+	list_for_each_entry_safe(node, t_node, &tipc_node_list, list)
+		tipc_node_delete(node);
 	write_unlock_bh(&tipc_net_lock);
-	info("Left network mode\n");
+	pr_info("Left network mode\n");
 }
-

@@ -166,7 +166,7 @@ static void tca6416_keys_close(struct input_dev *dev)
 		disable_irq(chip->irqnum);
 }
 
-static int __devinit tca6416_setup_registers(struct tca6416_keypad_chip *chip)
+static int tca6416_setup_registers(struct tca6416_keypad_chip *chip)
 {
 	int error;
 
@@ -197,7 +197,7 @@ static int __devinit tca6416_setup_registers(struct tca6416_keypad_chip *chip)
 	return 0;
 }
 
-static int __devinit tca6416_keypad_probe(struct i2c_client *client,
+static int tca6416_keypad_probe(struct i2c_client *client,
 				   const struct i2c_device_id *id)
 {
 	struct tca6416_keys_platform_data *pdata;
@@ -278,7 +278,8 @@ static int __devinit tca6416_keypad_probe(struct i2c_client *client,
 
 		error = request_threaded_irq(chip->irqnum, NULL,
 					     tca6416_keys_isr,
-					     IRQF_TRIGGER_FALLING,
+					     IRQF_TRIGGER_FALLING |
+						IRQF_ONESHOT,
 					     "tca6416-keypad", chip);
 		if (error) {
 			dev_dbg(&client->dev,
@@ -297,6 +298,7 @@ static int __devinit tca6416_keypad_probe(struct i2c_client *client,
 	}
 
 	i2c_set_clientdata(client, chip);
+	device_init_wakeup(&client->dev, 1);
 
 	return 0;
 
@@ -311,7 +313,7 @@ fail1:
 	return error;
 }
 
-static int __devexit tca6416_keypad_remove(struct i2c_client *client)
+static int tca6416_keypad_remove(struct i2c_client *client)
 {
 	struct tca6416_keypad_chip *chip = i2c_get_clientdata(client);
 
@@ -326,13 +328,40 @@ static int __devexit tca6416_keypad_remove(struct i2c_client *client)
 	return 0;
 }
 
+#ifdef CONFIG_PM_SLEEP
+static int tca6416_keypad_suspend(struct device *dev)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct tca6416_keypad_chip *chip = i2c_get_clientdata(client);
+
+	if (device_may_wakeup(dev))
+		enable_irq_wake(chip->irqnum);
+
+	return 0;
+}
+
+static int tca6416_keypad_resume(struct device *dev)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct tca6416_keypad_chip *chip = i2c_get_clientdata(client);
+
+	if (device_may_wakeup(dev))
+		disable_irq_wake(chip->irqnum);
+
+	return 0;
+}
+#endif
+
+static SIMPLE_DEV_PM_OPS(tca6416_keypad_dev_pm_ops,
+			 tca6416_keypad_suspend, tca6416_keypad_resume);
 
 static struct i2c_driver tca6416_keypad_driver = {
 	.driver = {
 		.name	= "tca6416-keypad",
+		.pm	= &tca6416_keypad_dev_pm_ops,
 	},
 	.probe		= tca6416_keypad_probe,
-	.remove		= __devexit_p(tca6416_keypad_remove),
+	.remove		= tca6416_keypad_remove,
 	.id_table	= tca6416_id,
 };
 

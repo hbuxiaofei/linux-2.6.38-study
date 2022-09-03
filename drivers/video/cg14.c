@@ -352,8 +352,8 @@ static int cg14_ioctl(struct fb_info *info, unsigned int cmd, unsigned long arg)
  *  Initialisation
  */
 
-static void __devinit cg14_init_fix(struct fb_info *info, int linebytes,
-				    struct device_node *dp)
+static void cg14_init_fix(struct fb_info *info, int linebytes,
+			  struct device_node *dp)
 {
 	const char *name = dp->name;
 
@@ -367,7 +367,7 @@ static void __devinit cg14_init_fix(struct fb_info *info, int linebytes,
 	info->fix.accel = FB_ACCEL_SUN_CG14;
 }
 
-static struct sbus_mmap_map __cg14_mmap_map[CG14_MMAP_ENTRIES] __devinitdata = {
+static struct sbus_mmap_map __cg14_mmap_map[CG14_MMAP_ENTRIES] = {
 	{
 		.voff	= CG14_REGS,
 		.poff	= 0x80000000,
@@ -463,7 +463,7 @@ static void cg14_unmap_regs(struct platform_device *op, struct fb_info *info,
 			   info->screen_base, info->fix.smem_len);
 }
 
-static int __devinit cg14_probe(struct platform_device *op, const struct of_device_id *match)
+static int cg14_probe(struct platform_device *op)
 {
 	struct device_node *dp = op->dev.of_node;
 	struct fb_info *info;
@@ -565,12 +565,13 @@ out_dealloc_cmap:
 
 out_unmap_regs:
 	cg14_unmap_regs(op, info, par);
+	framebuffer_release(info);
 
 out_err:
 	return err;
 }
 
-static int __devexit cg14_remove(struct platform_device *op)
+static int cg14_remove(struct platform_device *op)
 {
 	struct fb_info *info = dev_get_drvdata(&op->dev);
 	struct cg14_par *par = info->par;
@@ -595,14 +596,14 @@ static const struct of_device_id cg14_match[] = {
 };
 MODULE_DEVICE_TABLE(of, cg14_match);
 
-static struct of_platform_driver cg14_driver = {
+static struct platform_driver cg14_driver = {
 	.driver = {
 		.name = "cg14",
 		.owner = THIS_MODULE,
 		.of_match_table = cg14_match,
 	},
 	.probe		= cg14_probe,
-	.remove		= __devexit_p(cg14_remove),
+	.remove		= cg14_remove,
 };
 
 static int __init cg14_init(void)
@@ -610,12 +611,12 @@ static int __init cg14_init(void)
 	if (fb_get_options("cg14fb", NULL))
 		return -ENODEV;
 
-	return of_register_platform_driver(&cg14_driver);
+	return platform_driver_register(&cg14_driver);
 }
 
 static void __exit cg14_exit(void)
 {
-	of_unregister_platform_driver(&cg14_driver);
+	platform_driver_unregister(&cg14_driver);
 }
 
 module_init(cg14_init);

@@ -1,5 +1,5 @@
 /*
- * board-sdp-flash.c
+ * board-flash.c
  * Modified from mach-omap2/board-3430sdp-flash.c
  *
  * Copyright (C) 2009 Nokia Corporation
@@ -17,12 +17,14 @@
 #include <linux/mtd/physmap.h>
 #include <linux/io.h>
 
-#include <plat/gpmc.h>
-#include <plat/nand.h>
-#include <plat/onenand.h>
-#include <plat/tc.h>
+#include <linux/platform_data/mtd-nand-omap2.h>
+#include <linux/platform_data/mtd-onenand-omap2.h>
 
+#include "soc.h"
+#include "common.h"
 #include "board-flash.h"
+#include "gpmc-onenand.h"
+#include "gpmc-nand.h"
 
 #define REG_FPGA_REV			0x10
 #define REG_FPGA_DIP_SWITCH_INPUT2	0x60
@@ -73,11 +75,11 @@ __init board_nor_init(struct mtd_partition *nor_parts, u8 nr_parts, u8 cs)
 					+ FLASH_SIZE_SDPV1 - 1;
 	}
 	if (err < 0) {
-		printk(KERN_ERR "NOR: Can't request GPMC CS\n");
+		pr_err("NOR: Can't request GPMC CS\n");
 		return;
 	}
 	if (platform_device_register(&board_nor_device) < 0)
-		printk(KERN_ERR	"Unable to register NOR device\n");
+		pr_err("Unable to register NOR device\n");
 }
 
 #if defined(CONFIG_MTD_ONENAND_OMAP2) || \
@@ -86,7 +88,7 @@ static struct omap_onenand_platform_data board_onenand_data = {
 	.dma_channel	= -1,   /* disable DMA in OMAP OneNAND driver */
 };
 
-static void
+void
 __init board_onenand_init(struct mtd_partition *onenand_parts,
 				u8 nr_parts, u8 cs)
 {
@@ -96,61 +98,49 @@ __init board_onenand_init(struct mtd_partition *onenand_parts,
 
 	gpmc_onenand_init(&board_onenand_data);
 }
-#else
-static void
-__init board_onenand_init(struct mtd_partition *nor_parts, u8 nr_parts, u8 cs)
-{
-}
 #endif /* CONFIG_MTD_ONENAND_OMAP2 || CONFIG_MTD_ONENAND_OMAP2_MODULE */
 
 #if defined(CONFIG_MTD_NAND_OMAP2) || \
 		defined(CONFIG_MTD_NAND_OMAP2_MODULE)
 
 /* Note that all values in this struct are in nanoseconds */
-static struct gpmc_timings nand_timings = {
+struct gpmc_timings nand_default_timings[1] = {
+	{
+		.sync_clk = 0,
 
-	.sync_clk = 0,
+		.cs_on = 0,
+		.cs_rd_off = 36,
+		.cs_wr_off = 36,
 
-	.cs_on = 0,
-	.cs_rd_off = 36,
-	.cs_wr_off = 36,
+		.adv_on = 6,
+		.adv_rd_off = 24,
+		.adv_wr_off = 36,
 
-	.adv_on = 6,
-	.adv_rd_off = 24,
-	.adv_wr_off = 36,
+		.we_off = 30,
+		.oe_off = 48,
 
-	.we_off = 30,
-	.oe_off = 48,
+		.access = 54,
+		.rd_cycle = 72,
+		.wr_cycle = 72,
 
-	.access = 54,
-	.rd_cycle = 72,
-	.wr_cycle = 72,
-
-	.wr_access = 30,
-	.wr_data_mux_bus = 0,
+		.wr_access = 30,
+		.wr_data_mux_bus = 0,
+	},
 };
 
-static struct omap_nand_platform_data board_nand_data = {
-	.nand_setup	= NULL,
-	.gpmc_t		= &nand_timings,
-	.dma_channel	= -1,		/* disable DMA in OMAP NAND driver */
-	.dev_ready	= NULL,
-	.devsize	= 0,	/* '0' for 8-bit, '1' for 16-bit device */
-};
+static struct omap_nand_platform_data board_nand_data;
 
 void
-__init board_nand_init(struct mtd_partition *nand_parts, u8 nr_parts, u8 cs)
+__init board_nand_init(struct mtd_partition *nand_parts, u8 nr_parts, u8 cs,
+				int nand_type, struct gpmc_timings *gpmc_t)
 {
 	board_nand_data.cs		= cs;
 	board_nand_data.parts		= nand_parts;
-	board_nand_data.nr_parts		= nr_parts;
+	board_nand_data.nr_parts	= nr_parts;
+	board_nand_data.devsize		= nand_type;
 
-	gpmc_nand_init(&board_nand_data);
-}
-#else
-void
-__init board_nand_init(struct mtd_partition *nand_parts, u8 nr_parts, u8 cs)
-{
+	board_nand_data.ecc_opt = OMAP_ECC_HAMMING_CODE_DEFAULT;
+	gpmc_nand_init(&board_nand_data, gpmc_t);
 }
 #endif /* CONFIG_MTD_NAND_OMAP2 || CONFIG_MTD_NAND_OMAP2_MODULE */
 
@@ -189,12 +179,12 @@ unmap:
 }
 
 /**
- * sdp3430_flash_init - Identify devices connected to GPMC and register.
+ * board_flash_init - Identify devices connected to GPMC and register.
  *
  * @return - void.
  */
-void board_flash_init(struct flash_partitions partition_info[],
-					char chip_sel_board[][GPMC_CS_NUM])
+void __init board_flash_init(struct flash_partitions partition_info[],
+			char chip_sel_board[][GPMC_CS_NUM], int nand_type)
 {
 	u8		cs = 0;
 	u8		norcs = GPMC_CS_NUM + 1;
@@ -208,7 +198,7 @@ void board_flash_init(struct flash_partitions partition_info[],
 	 */
 	idx = get_gpmc0_type();
 	if (idx >= MAX_SUPPORTED_GPMC_CONFIG) {
-		printk(KERN_ERR "%s: Invalid chip select: %d\n", __func__, cs);
+		pr_err("%s: Invalid chip select: %d\n", __func__, cs);
 		return;
 	}
 	config_sel = (unsigned char *)(chip_sel_board[idx]);
@@ -227,28 +217,26 @@ void board_flash_init(struct flash_partitions partition_info[],
 			if (onenandcs > GPMC_CS_NUM)
 				onenandcs = cs;
 			break;
-		};
+		}
 		cs++;
 	}
 
 	if (norcs > GPMC_CS_NUM)
-		printk(KERN_INFO "NOR: Unable to find configuration "
-				"in GPMC\n");
+		pr_err("NOR: Unable to find configuration in GPMC\n");
 	else
 		board_nor_init(partition_info[0].parts,
 				partition_info[0].nr_parts, norcs);
 
 	if (onenandcs > GPMC_CS_NUM)
-		printk(KERN_INFO "OneNAND: Unable to find configuration "
-				"in GPMC\n");
+		pr_err("OneNAND: Unable to find configuration in GPMC\n");
 	else
 		board_onenand_init(partition_info[1].parts,
 					partition_info[1].nr_parts, onenandcs);
 
 	if (nandcs > GPMC_CS_NUM)
-		printk(KERN_INFO "NAND: Unable to find configuration "
-				"in GPMC\n");
+		pr_err("NAND: Unable to find configuration in GPMC\n");
 	else
 		board_nand_init(partition_info[2].parts,
-				partition_info[2].nr_parts, nandcs);
+			partition_info[2].nr_parts, nandcs,
+			nand_type, nand_default_timings);
 }

@@ -26,8 +26,6 @@
 
 #include "xen-ops.h"
 
-#define XEN_SHIFT 22
-
 /* Xen may fire a timer up to this many ns early */
 #define TIMER_SLOP	100000
 #define NS_PER_TICK	(1000000000LL / HZ)
@@ -170,9 +168,10 @@ cycle_t xen_clocksource_read(void)
         struct pvclock_vcpu_time_info *src;
 	cycle_t ret;
 
-	src = &get_cpu_var(xen_vcpu)->time;
+	preempt_disable_notrace();
+	src = &__get_cpu_var(xen_vcpu)->time;
 	ret = pvclock_clocksource_read(src);
-	put_cpu_var(xen_vcpu);
+	preempt_enable_notrace();
 	return ret;
 }
 
@@ -202,8 +201,22 @@ static unsigned long xen_get_wallclock(void)
 
 static int xen_set_wallclock(unsigned long now)
 {
+	struct xen_platform_op op;
+	int rc;
+
 	/* do nothing for domU */
-	return -1;
+	if (!xen_initial_domain())
+		return -1;
+
+	op.cmd = XENPF_settime;
+	op.u.settime.secs = now;
+	op.u.settime.nsecs = 0;
+	op.u.settime.system_time = xen_clocksource_read();
+
+	rc = HYPERVISOR_dom0_op(&op);
+	WARN(rc != 0, "XENPF_settime failed: now=%ld\n", now);
+
+	return rc;
 }
 
 static struct clocksource xen_clocksource __read_mostly = {
@@ -211,8 +224,6 @@ static struct clocksource xen_clocksource __read_mostly = {
 	.rating = 400,
 	.read = xen_clocksource_get_cycles,
 	.mask = ~0,
-	.mult = 1<<XEN_SHIFT,		/* time directly in nanoseconds */
-	.shift = XEN_SHIFT,
 	.flags = CLOCK_SOURCE_IS_CONTINUOUS,
 };
 
@@ -366,7 +377,7 @@ static const struct clock_event_device xen_vcpuop_clockevent = {
 
 static const struct clock_event_device *xen_clockevent =
 	&xen_timerop_clockevent;
-static DEFINE_PER_CPU(struct clock_event_device, xen_clock_events);
+static DEFINE_PER_CPU(struct clock_event_device, xen_clock_events) = { .irq = -1 };
 
 static irqreturn_t xen_timer_interrupt(int irq, void *dev_id)
 {
@@ -390,6 +401,9 @@ void xen_setup_timer(int cpu)
 	struct clock_event_device *evt;
 	int irq;
 
+	evt = &per_cpu(xen_clock_events, cpu);
+	WARN(evt->irq >= 0, "IRQ%d for CPU%d is already allocated\n", evt->irq, cpu);
+
 	printk(KERN_INFO "installing Xen timer for CPU %d\n", cpu);
 
 	name = kasprintf(GFP_KERNEL, "timer%d", cpu);
@@ -397,10 +411,11 @@ void xen_setup_timer(int cpu)
 		name = "<timer kasprintf failed>";
 
 	irq = bind_virq_to_irqhandler(VIRQ_TIMER, cpu, xen_timer_interrupt,
-				      IRQF_DISABLED|IRQF_PERCPU|IRQF_NOBALANCING|IRQF_TIMER,
+				      IRQF_DISABLED|IRQF_PERCPU|
+				      IRQF_NOBALANCING|IRQF_TIMER|
+				      IRQF_FORCE_RESUME,
 				      name, NULL);
 
-	evt = &per_cpu(xen_clock_events, cpu);
 	memcpy(evt, xen_clockevent, sizeof(*evt));
 
 	evt->cpumask = cpumask_of(cpu);
@@ -413,6 +428,7 @@ void xen_teardown_timer(int cpu)
 	BUG_ON(cpu == 0);
 	evt = &per_cpu(xen_clock_events, cpu);
 	unbind_from_irqhandler(evt->irq, NULL);
+	evt->irq = -1;
 }
 
 void xen_setup_cpu_clockevents(void)
@@ -437,16 +453,16 @@ void xen_timer_resume(void)
 	}
 }
 
-static const struct pv_time_ops xen_time_ops __initdata = {
+static const struct pv_time_ops xen_time_ops __initconst = {
 	.sched_clock = xen_clocksource_read,
 };
 
-static __init void xen_time_init(void)
+static void __init xen_time_init(void)
 {
 	int cpu = smp_processor_id();
 	struct timespec tp;
 
-	clocksource_register(&xen_clocksource);
+	clocksource_register_hz(&xen_clocksource, NSEC_PER_SEC);
 
 	if (HYPERVISOR_vcpu_op(VCPUOP_stop_periodic_timer, cpu, NULL) == 0) {
 		/* Successfully turned off 100Hz tick, so we have the
@@ -466,7 +482,7 @@ static __init void xen_time_init(void)
 	xen_setup_cpu_clockevents();
 }
 
-__init void xen_init_time_ops(void)
+void __init xen_init_time_ops(void)
 {
 	pv_time_ops = xen_time_ops;
 
@@ -484,11 +500,15 @@ static void xen_hvm_setup_cpu_clockevents(void)
 {
 	int cpu = smp_processor_id();
 	xen_setup_runstate_info(cpu);
-	xen_setup_timer(cpu);
+	/*
+	 * xen_setup_timer(cpu) - snprintf is bad in atomic context. Hence
+	 * doing it xen_hvm_cpu_notify (which gets called by smp_init during
+	 * early bootup and also during CPU hotplug events).
+	 */
 	xen_setup_cpu_clockevents();
 }
 
-__init void xen_hvm_init_time_ops(void)
+void __init xen_hvm_init_time_ops(void)
 {
 	/* vector callback is needed otherwise we cannot receive interrupts
 	 * on cpu > 0 and at this point we don't know how many cpus are

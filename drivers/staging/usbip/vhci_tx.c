@@ -17,11 +17,11 @@
  * USA.
  */
 
+#include <linux/kthread.h>
 #include <linux/slab.h>
 
 #include "usbip_common.h"
 #include "vhci.h"
-
 
 static void setup_cmd_submit_pdu(struct usbip_header *pdup,  struct urb *urb)
 {
@@ -29,16 +29,14 @@ static void setup_cmd_submit_pdu(struct usbip_header *pdup,  struct urb *urb)
 	struct vhci_device *vdev = priv->vdev;
 
 	usbip_dbg_vhci_tx("URB, local devnum %u, remote devid %u\n",
-				usb_pipedevice(urb->pipe), vdev->devid);
+			  usb_pipedevice(urb->pipe), vdev->devid);
 
-	pdup->base.command = USBIP_CMD_SUBMIT;
-	pdup->base.seqnum  = priv->seqnum;
-	pdup->base.devid   = vdev->devid;
-	if (usb_pipein(urb->pipe))
-		pdup->base.direction = USBIP_DIR_IN;
-	else
-		pdup->base.direction = USBIP_DIR_OUT;
-	pdup->base.ep      = usb_pipeendpoint(urb->pipe);
+	pdup->base.command   = USBIP_CMD_SUBMIT;
+	pdup->base.seqnum    = priv->seqnum;
+	pdup->base.devid     = vdev->devid;
+	pdup->base.direction = usb_pipein(urb->pipe) ?
+		USBIP_DIR_IN : USBIP_DIR_OUT;
+	pdup->base.ep	     = usb_pipeendpoint(urb->pipe);
 
 	usbip_pack_pdu(pdup, urb, USBIP_CMD_SUBMIT, 1);
 
@@ -48,23 +46,20 @@ static void setup_cmd_submit_pdu(struct usbip_header *pdup,  struct urb *urb)
 
 static struct vhci_priv *dequeue_from_priv_tx(struct vhci_device *vdev)
 {
-	unsigned long flags;
 	struct vhci_priv *priv, *tmp;
 
-	spin_lock_irqsave(&vdev->priv_lock, flags);
+	spin_lock(&vdev->priv_lock);
 
 	list_for_each_entry_safe(priv, tmp, &vdev->priv_tx, list) {
 		list_move_tail(&priv->list, &vdev->priv_rx);
-		spin_unlock_irqrestore(&vdev->priv_lock, flags);
+		spin_unlock(&vdev->priv_lock);
 		return priv;
 	}
 
-	spin_unlock_irqrestore(&vdev->priv_lock, flags);
+	spin_unlock(&vdev->priv_lock);
 
 	return NULL;
 }
-
-
 
 static int vhci_send_cmd_submit(struct vhci_device *vdev)
 {
@@ -80,7 +75,7 @@ static int vhci_send_cmd_submit(struct vhci_device *vdev)
 		int ret;
 		struct urb *urb = priv->urb;
 		struct usbip_header pdu_header;
-		void *iso_buffer = NULL;
+		struct usbip_iso_packet_descriptor *iso_buffer = NULL;
 
 		txsize = 0;
 		memset(&pdu_header, 0, sizeof(pdu_header));
@@ -88,7 +83,6 @@ static int vhci_send_cmd_submit(struct vhci_device *vdev)
 		memset(&iov, 0, sizeof(iov));
 
 		usbip_dbg_vhci_tx("setup txdata urb %p\n", urb);
-
 
 		/* 1. setup usbip_header */
 		setup_cmd_submit_pdu(&pdu_header, urb);
@@ -123,8 +117,8 @@ static int vhci_send_cmd_submit(struct vhci_device *vdev)
 
 		ret = kernel_sendmsg(vdev->ud.tcp_socket, &msg, iov, 3, txsize);
 		if (ret != txsize) {
-			usbip_uerr("sendmsg failed!, retval %d for %zd\n", ret,
-									txsize);
+			pr_err("sendmsg failed!, ret=%d for %zd\n", ret,
+			       txsize);
 			kfree(iso_buffer);
 			usbip_event_add(&vdev->ud, VDEV_EVENT_ERROR_TCP);
 			return -1;
@@ -139,23 +133,19 @@ static int vhci_send_cmd_submit(struct vhci_device *vdev)
 	return total_size;
 }
 
-
-/*-------------------------------------------------------------------------*/
-
 static struct vhci_unlink *dequeue_from_unlink_tx(struct vhci_device *vdev)
 {
-	unsigned long flags;
 	struct vhci_unlink *unlink, *tmp;
 
-	spin_lock_irqsave(&vdev->priv_lock, flags);
+	spin_lock(&vdev->priv_lock);
 
 	list_for_each_entry_safe(unlink, tmp, &vdev->unlink_tx, list) {
 		list_move_tail(&unlink->list, &vdev->unlink_rx);
-		spin_unlock_irqrestore(&vdev->priv_lock, flags);
+		spin_unlock(&vdev->priv_lock);
 		return unlink;
 	}
 
-	spin_unlock_irqrestore(&vdev->priv_lock, flags);
+	spin_unlock(&vdev->priv_lock);
 
 	return NULL;
 }
@@ -181,7 +171,6 @@ static int vhci_send_cmd_unlink(struct vhci_device *vdev)
 
 		usbip_dbg_vhci_tx("setup cmd unlink, %lu\n", unlink->seqnum);
 
-
 		/* 1. setup usbip_header */
 		pdu_header.base.command = USBIP_CMD_UNLINK;
 		pdu_header.base.seqnum  = unlink->seqnum;
@@ -197,12 +186,11 @@ static int vhci_send_cmd_unlink(struct vhci_device *vdev)
 
 		ret = kernel_sendmsg(vdev->ud.tcp_socket, &msg, iov, 1, txsize);
 		if (ret != txsize) {
-			usbip_uerr("sendmsg failed!, retval %d for %zd\n", ret,
-									txsize);
+			pr_err("sendmsg failed!, ret=%d for %zd\n", ret,
+			       txsize);
 			usbip_event_add(&vdev->ud, VDEV_EVENT_ERROR_TCP);
 			return -1;
 		}
-
 
 		usbip_dbg_vhci_tx("send txdata\n");
 
@@ -212,20 +200,12 @@ static int vhci_send_cmd_unlink(struct vhci_device *vdev)
 	return total_size;
 }
 
-
-/*-------------------------------------------------------------------------*/
-
-void vhci_tx_loop(struct usbip_task *ut)
+int vhci_tx_loop(void *data)
 {
-	struct usbip_device *ud = container_of(ut, struct usbip_device, tcp_tx);
+	struct usbip_device *ud = data;
 	struct vhci_device *vdev = container_of(ud, struct vhci_device, ud);
 
-	while (1) {
-		if (signal_pending(current)) {
-			usbip_uinfo("vhci_tx signal catched\n");
-			break;
-		}
-
+	while (!kthread_should_stop()) {
 		if (vhci_send_cmd_submit(vdev) < 0)
 			break;
 
@@ -233,9 +213,12 @@ void vhci_tx_loop(struct usbip_task *ut)
 			break;
 
 		wait_event_interruptible(vdev->waitq_tx,
-				(!list_empty(&vdev->priv_tx) ||
-				 !list_empty(&vdev->unlink_tx)));
+					 (!list_empty(&vdev->priv_tx) ||
+					  !list_empty(&vdev->unlink_tx) ||
+					  kthread_should_stop()));
 
 		usbip_dbg_vhci_tx("pending urbs ?, now wake up\n");
 	}
+
+	return 0;
 }

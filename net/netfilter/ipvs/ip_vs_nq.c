@@ -75,7 +75,7 @@ ip_vs_nq_schedule(struct ip_vs_service *svc, const struct sk_buff *skb)
 	 * new connections.
 	 */
 
-	list_for_each_entry(dest, &svc->destinations, n_list) {
+	list_for_each_entry_rcu(dest, &svc->destinations, n_list) {
 
 		if (dest->flags & IP_VS_DEST_F_OVERLOAD ||
 		    !atomic_read(&dest->weight))
@@ -99,7 +99,7 @@ ip_vs_nq_schedule(struct ip_vs_service *svc, const struct sk_buff *skb)
 	}
 
 	if (!least) {
-		IP_VS_ERR_RL("NQ: no destination available\n");
+		ip_vs_scheduler_err(svc, "no destination available");
 		return NULL;
 	}
 
@@ -133,6 +133,7 @@ static int __init ip_vs_nq_init(void)
 static void __exit ip_vs_nq_cleanup(void)
 {
 	unregister_ip_vs_scheduler(&ip_vs_nq_scheduler);
+	synchronize_rcu();
 }
 
 module_init(ip_vs_nq_init);

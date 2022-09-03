@@ -41,6 +41,7 @@
 #include <linux/vmalloc.h>
 #include <linux/bitmap.h>
 #include <linux/slab.h>
+#include <linux/module.h>
 
 #include "ipath_kernel.h"
 #include "ipath_verbs.h"
@@ -126,9 +127,8 @@ const char *ipath_ibcstatus_str[] = {
 	"LTState1C", "LTState1D", "LTState1E", "LTState1F"
 };
 
-static void __devexit ipath_remove_one(struct pci_dev *);
-static int __devinit ipath_init_one(struct pci_dev *,
-				    const struct pci_device_id *);
+static void ipath_remove_one(struct pci_dev *);
+static int ipath_init_one(struct pci_dev *, const struct pci_device_id *);
 
 /* Only needed for registration, nothing else needs this info */
 #define PCI_VENDOR_ID_PATHSCALE 0x1fc1
@@ -147,7 +147,7 @@ MODULE_DEVICE_TABLE(pci, ipath_pci_tbl);
 static struct pci_driver ipath_driver = {
 	.name = IPATH_DRV_NAME,
 	.probe = ipath_init_one,
-	.remove = __devexit_p(ipath_remove_one),
+	.remove = ipath_remove_one,
 	.id_table = ipath_pci_tbl,
 	.driver = {
 		.groups = ipath_driver_attr_groups,
@@ -194,11 +194,6 @@ static struct ipath_devdata *ipath_alloc_devdata(struct pci_dev *pdev)
 	struct ipath_devdata *dd;
 	int ret;
 
-	if (!idr_pre_get(&unit_table, GFP_KERNEL)) {
-		dd = ERR_PTR(-ENOMEM);
-		goto bail;
-	}
-
 	dd = vzalloc(sizeof(*dd));
 	if (!dd) {
 		dd = ERR_PTR(-ENOMEM);
@@ -206,9 +201,10 @@ static struct ipath_devdata *ipath_alloc_devdata(struct pci_dev *pdev)
 	}
 	dd->ipath_unit = -1;
 
+	idr_preload(GFP_KERNEL);
 	spin_lock_irqsave(&ipath_devs_lock, flags);
 
-	ret = idr_get_new(&unit_table, dd, &dd->ipath_unit);
+	ret = idr_alloc(&unit_table, dd, 0, 0, GFP_NOWAIT);
 	if (ret < 0) {
 		printk(KERN_ERR IPATH_DRV_NAME
 		       ": Could not allocate unit ID: error %d\n", -ret);
@@ -216,6 +212,7 @@ static struct ipath_devdata *ipath_alloc_devdata(struct pci_dev *pdev)
 		dd = ERR_PTR(ret);
 		goto bail_unlock;
 	}
+	dd->ipath_unit = ret;
 
 	dd->pcidev = pdev;
 	pci_set_drvdata(pdev, dd);
@@ -224,7 +221,7 @@ static struct ipath_devdata *ipath_alloc_devdata(struct pci_dev *pdev)
 
 bail_unlock:
 	spin_unlock_irqrestore(&ipath_devs_lock, flags);
-
+	idr_preload_end();
 bail:
 	return dd;
 }
@@ -391,14 +388,12 @@ done:
 
 static void cleanup_device(struct ipath_devdata *dd);
 
-static int __devinit ipath_init_one(struct pci_dev *pdev,
-				    const struct pci_device_id *ent)
+static int ipath_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
 	int ret, len, j;
 	struct ipath_devdata *dd;
 	unsigned long long addr;
 	u32 bar0 = 0, bar1 = 0;
-	u8 rev;
 
 	dd = ipath_alloc_devdata(pdev);
 	if (IS_ERR(dd)) {
@@ -540,13 +535,7 @@ static int __devinit ipath_init_one(struct pci_dev *pdev,
 		goto bail_regions;
 	}
 
-	ret = pci_read_config_byte(pdev, PCI_REVISION_ID, &rev);
-	if (ret) {
-		ipath_dev_err(dd, "Failed to read PCI revision ID unit "
-			      "%u: err %d\n", dd->ipath_unit, -ret);
-		goto bail_regions;	/* shouldn't ever happen */
-	}
-	dd->ipath_pcirev = rev;
+	dd->ipath_pcirev = pdev->revision;
 
 #if defined(__powerpc__)
 	/* There isn't a generic way to specify writethrough mappings */
@@ -743,7 +732,7 @@ static void cleanup_device(struct ipath_devdata *dd)
 	kfree(tmp);
 }
 
-static void __devexit ipath_remove_one(struct pci_dev *pdev)
+static void ipath_remove_one(struct pci_dev *pdev)
 {
 	struct ipath_devdata *dd = pci_get_drvdata(pdev);
 
@@ -2392,7 +2381,7 @@ void ipath_shutdown_device(struct ipath_devdata *dd)
 	/*
 	 * clear SerdesEnable and turn the leds off; do this here because
 	 * we are unloading, so don't count on interrupts to move along
-	 * Turn the LEDs off explictly for the same reason.
+	 * Turn the LEDs off explicitly for the same reason.
 	 */
 	dd->ipath_f_quiet_serdes(dd);
 
@@ -2511,11 +2500,6 @@ static int __init infinipath_init(void)
 	 * the PCI subsystem.
 	 */
 	idr_init(&unit_table);
-	if (!idr_pre_get(&unit_table, GFP_KERNEL)) {
-		printk(KERN_ERR IPATH_DRV_NAME ": idr_pre_get() failed\n");
-		ret = -ENOMEM;
-		goto bail;
-	}
 
 	ret = pci_register_driver(&ipath_driver);
 	if (ret < 0) {

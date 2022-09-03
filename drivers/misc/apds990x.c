@@ -609,6 +609,7 @@ static int apds990x_detect(struct apds990x_chip *chip)
 	return ret;
 }
 
+#if defined(CONFIG_PM) || defined(CONFIG_PM_RUNTIME)
 static int apds990x_chip_on(struct apds990x_chip *chip)
 {
 	int err	 = regulator_bulk_enable(ARRAY_SIZE(chip->regs),
@@ -624,6 +625,7 @@ static int apds990x_chip_on(struct apds990x_chip *chip)
 	apds990x_mode_on(chip);
 	return 0;
 }
+#endif
 
 static int apds990x_chip_off(struct apds990x_chip *chip)
 {
@@ -696,9 +698,6 @@ static ssize_t apds990x_lux_calib_store(struct device *dev,
 	unsigned long value;
 
 	if (strict_strtoul(buf, 0, &value))
-		return -EINVAL;
-
-	if (chip->lux_calib > APDS_RANGE)
 		return -EINVAL;
 
 	chip->lux_calib = value;
@@ -1045,7 +1044,7 @@ static struct attribute_group apds990x_attribute_group[] = {
 	{.attrs = sysfs_attrs_ctrl },
 };
 
-static int __devinit apds990x_probe(struct i2c_client *client,
+static int apds990x_probe(struct i2c_client *client,
 				const struct i2c_device_id *id)
 {
 	struct apds990x_chip *chip;
@@ -1179,7 +1178,7 @@ fail1:
 	return err;
 }
 
-static int __devexit apds990x_remove(struct i2c_client *client)
+static int apds990x_remove(struct i2c_client *client)
 {
 	struct apds990x_chip *chip = i2c_get_clientdata(client);
 
@@ -1202,7 +1201,7 @@ static int __devexit apds990x_remove(struct i2c_client *client)
 	return 0;
 }
 
-#ifdef CONFIG_PM
+#ifdef CONFIG_PM_SLEEP
 static int apds990x_suspend(struct device *dev)
 {
 	struct i2c_client *client = container_of(dev, struct i2c_client, dev);
@@ -1225,10 +1224,6 @@ static int apds990x_resume(struct device *dev)
 
 	return 0;
 }
-#else
-#define apds990x_suspend  NULL
-#define apds990x_resume	  NULL
-#define apds990x_shutdown NULL
 #endif
 
 #ifdef CONFIG_PM_RUNTIME
@@ -1273,23 +1268,12 @@ static struct i2c_driver apds990x_driver = {
 		.pm	= &apds990x_pm_ops,
 	},
 	.probe	  = apds990x_probe,
-	.remove	  = __devexit_p(apds990x_remove),
+	.remove	  = apds990x_remove,
 	.id_table = apds990x_id,
 };
 
-static int __init apds990x_init(void)
-{
-	return i2c_add_driver(&apds990x_driver);
-}
-
-static void __exit apds990x_exit(void)
-{
-	i2c_del_driver(&apds990x_driver);
-}
+module_i2c_driver(apds990x_driver);
 
 MODULE_DESCRIPTION("APDS990X combined ALS and proximity sensor");
 MODULE_AUTHOR("Samu Onkalo, Nokia Corporation");
 MODULE_LICENSE("GPL v2");
-
-module_init(apds990x_init);
-module_exit(apds990x_exit);

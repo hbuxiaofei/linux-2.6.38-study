@@ -2,9 +2,11 @@
 #define __PERF_RECORD_H
 
 #include <limits.h>
+#include <stdio.h>
 
 #include "../perf.h"
 #include "map.h"
+#include "build-id.h"
 
 /*
  * PERF_SAMPLE_IP | PERF_SAMPLE_TID | *
@@ -56,12 +58,29 @@ struct read_event {
 	u64 id;
 };
 
+
+#define PERF_SAMPLE_MASK				\
+	(PERF_SAMPLE_IP | PERF_SAMPLE_TID |		\
+	 PERF_SAMPLE_TIME | PERF_SAMPLE_ADDR |		\
+	PERF_SAMPLE_ID | PERF_SAMPLE_STREAM_ID |	\
+	 PERF_SAMPLE_CPU | PERF_SAMPLE_PERIOD)
+
 struct sample_event {
 	struct perf_event_header        header;
 	u64 array[];
 };
 
-struct sample_data {
+struct regs_dump {
+	u64 *regs;
+};
+
+struct stack_dump {
+	u16 offset;
+	u64 size;
+	char *data;
+};
+
+struct perf_sample {
 	u64 ip;
 	u32 pid, tid;
 	u64 time;
@@ -69,18 +88,28 @@ struct sample_data {
 	u64 id;
 	u64 stream_id;
 	u64 period;
+	u64 weight;
 	u32 cpu;
 	u32 raw_size;
+	u64 data_src;
 	void *raw_data;
 	struct ip_callchain *callchain;
+	struct branch_stack *branch_stack;
+	struct regs_dump  user_regs;
+	struct stack_dump user_stack;
 };
 
-#define BUILD_ID_SIZE 20
+#define PERF_MEM_DATA_SRC_NONE \
+	(PERF_MEM_S(OP, NA) |\
+	 PERF_MEM_S(LVL, NA) |\
+	 PERF_MEM_S(SNOOP, NA) |\
+	 PERF_MEM_S(LOCK, NA) |\
+	 PERF_MEM_S(TLB, NA))
 
 struct build_id_event {
 	struct perf_event_header header;
 	pid_t			 pid;
-	u8			 build_id[ALIGN(BUILD_ID_SIZE, sizeof(u64))];
+	u8			 build_id[PERF_ALIGN(BUILD_ID_SIZE, sizeof(u64))];
 	char			 filename[];
 };
 
@@ -117,7 +146,7 @@ struct tracing_data_event {
 	u32 size;
 };
 
-typedef union event_union {
+union perf_event {
 	struct perf_event_header	header;
 	struct ip_event			ip;
 	struct mmap_event		mmap;
@@ -130,50 +159,75 @@ typedef union event_union {
 	struct event_type_event		event_type;
 	struct tracing_data_event	tracing_data;
 	struct build_id_event		build_id;
-} event_t;
+};
 
-void event__print_totals(void);
+void perf_event__print_totals(void);
 
-struct perf_session;
+struct perf_tool;
 struct thread_map;
 
-typedef int (*event__handler_synth_t)(event_t *event, 
-				      struct perf_session *session);
-typedef int (*event__handler_t)(event_t *event, struct sample_data *sample,
-				struct perf_session *session);
+typedef int (*perf_event__handler_t)(struct perf_tool *tool,
+				     union perf_event *event,
+				     struct perf_sample *sample,
+				     struct machine *machine);
 
-int event__synthesize_thread_map(struct thread_map *threads,
-				 event__handler_t process,
-				 struct perf_session *session);
-int event__synthesize_threads(event__handler_t process,
-			      struct perf_session *session);
-int event__synthesize_kernel_mmap(event__handler_t process,
-				struct perf_session *session,
-				struct machine *machine,
-				const char *symbol_name);
+int perf_event__synthesize_thread_map(struct perf_tool *tool,
+				      struct thread_map *threads,
+				      perf_event__handler_t process,
+				      struct machine *machine);
+int perf_event__synthesize_threads(struct perf_tool *tool,
+				   perf_event__handler_t process,
+				   struct machine *machine);
+int perf_event__synthesize_kernel_mmap(struct perf_tool *tool,
+				       perf_event__handler_t process,
+				       struct machine *machine,
+				       const char *symbol_name);
 
-int event__synthesize_modules(event__handler_t process,
-			      struct perf_session *session,
-			      struct machine *machine);
+int perf_event__synthesize_modules(struct perf_tool *tool,
+				   perf_event__handler_t process,
+				   struct machine *machine);
 
-int event__process_comm(event_t *self, struct sample_data *sample,
-			struct perf_session *session);
-int event__process_lost(event_t *self, struct sample_data *sample,
-			struct perf_session *session);
-int event__process_mmap(event_t *self, struct sample_data *sample,
-			struct perf_session *session);
-int event__process_task(event_t *self, struct sample_data *sample,
-			struct perf_session *session);
-int event__process(event_t *event, struct sample_data *sample,
-		   struct perf_session *session);
+int perf_event__process_comm(struct perf_tool *tool,
+			     union perf_event *event,
+			     struct perf_sample *sample,
+			     struct machine *machine);
+int perf_event__process_lost(struct perf_tool *tool,
+			     union perf_event *event,
+			     struct perf_sample *sample,
+			     struct machine *machine);
+int perf_event__process_mmap(struct perf_tool *tool,
+			     union perf_event *event,
+			     struct perf_sample *sample,
+			     struct machine *machine);
+int perf_event__process_fork(struct perf_tool *tool,
+			     union perf_event *event,
+			     struct perf_sample *sample,
+			     struct machine *machine);
+int perf_event__process_exit(struct perf_tool *tool,
+			     union perf_event *event,
+			     struct perf_sample *sample,
+			     struct machine *machine);
+int perf_event__process(struct perf_tool *tool,
+			union perf_event *event,
+			struct perf_sample *sample,
+			struct machine *machine);
 
 struct addr_location;
-int event__preprocess_sample(const event_t *self, struct perf_session *session,
-			     struct addr_location *al, struct sample_data *data,
-			     symbol_filter_t filter);
-int event__parse_sample(const event_t *event, struct perf_session *session,
-			struct sample_data *sample);
+int perf_event__preprocess_sample(const union perf_event *self,
+				  struct machine *machine,
+				  struct addr_location *al,
+				  struct perf_sample *sample,
+				  symbol_filter_t filter);
 
-const char *event__get_event_name(unsigned int id);
+const char *perf_event__name(unsigned int id);
+
+int perf_event__synthesize_sample(union perf_event *event, u64 type,
+				  const struct perf_sample *sample,
+				  bool swapped);
+
+size_t perf_event__fprintf_comm(union perf_event *event, FILE *fp);
+size_t perf_event__fprintf_mmap(union perf_event *event, FILE *fp);
+size_t perf_event__fprintf_task(union perf_event *event, FILE *fp);
+size_t perf_event__fprintf(union perf_event *event, FILE *fp);
 
 #endif /* __PERF_RECORD_H */

@@ -16,15 +16,14 @@
 #include <linux/input.h>
 #include <linux/gpio.h>
 #include <linux/i2c/twl.h>
+#include <linux/mtd/nand.h>
 
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
 
-#include <plat/common.h>
-#include <plat/board.h>
-#include <plat/usb.h>
+#include "common.h"
 
-#include <mach/board-zoom.h>
+#include "board-zoom.h"
 
 #include "board-flash.h"
 #include "mux.h"
@@ -33,23 +32,10 @@
 
 #define ZOOM3_EHCI_RESET_GPIO		64
 
-static void __init omap_zoom_init_irq(void)
-{
-	omap2_init_common_infrastructure();
-	if (machine_is_omap_zoom2())
-		omap2_init_common_devices(mt46h32m32lf6_sdrc_params,
-					  mt46h32m32lf6_sdrc_params);
-	else if (machine_is_omap_zoom3())
-		omap2_init_common_devices(h8mbx00u0mer0em_sdrc_params,
-					  h8mbx00u0mer0em_sdrc_params);
-
-	omap_init_irq();
-}
-
 #ifdef CONFIG_OMAP_MUX
 static struct omap_board_mux board_mux[] __initdata = {
 	/* WLAN IRQ - GPIO 162 */
-	OMAP3_MUX(MCBSP1_CLKX, OMAP_MUX_MODE4 | OMAP_PIN_INPUT_PULLUP),
+	OMAP3_MUX(MCBSP1_CLKX, OMAP_MUX_MODE4 | OMAP_PIN_INPUT),
 	/* WLAN POWER ENABLE - GPIO 101 */
 	OMAP3_MUX(CAM_D2, OMAP_MUX_MODE4 | OMAP_PIN_OUTPUT),
 	/* WLAN SDIO: MMC3 CMD */
@@ -106,14 +92,16 @@ static struct mtd_partition zoom_nand_partitions[] = {
 	},
 };
 
-static const struct ehci_hcd_omap_platform_data ehci_pdata __initconst = {
-	.port_mode[0]		= EHCI_HCD_OMAP_MODE_UNKNOWN,
-	.port_mode[1]		= EHCI_HCD_OMAP_MODE_PHY,
-	.port_mode[2]		= EHCI_HCD_OMAP_MODE_UNKNOWN,
-	.phy_reset		= true,
-	.reset_gpio_port[0]	= -EINVAL,
-	.reset_gpio_port[1]	= ZOOM3_EHCI_RESET_GPIO,
-	.reset_gpio_port[2]	= -EINVAL,
+static struct usbhs_phy_data phy_data[] __initdata = {
+	{
+		.port = 2,
+		.reset_gpio = ZOOM3_EHCI_RESET_GPIO,
+		.vcc_gpio = -EINVAL,
+	},
+};
+
+static struct usbhs_omap_platform_data usbhs_bdata __initdata = {
+	.port_mode[1]		= OMAP_EHCI_PORT_MODE_PHY,
 };
 
 static void __init omap_zoom_init(void)
@@ -123,30 +111,49 @@ static void __init omap_zoom_init(void)
 	} else if (machine_is_omap_zoom3()) {
 		omap3_mux_init(board_mux, OMAP_PACKAGE_CBP);
 		omap_mux_init_gpio(ZOOM3_EHCI_RESET_GPIO, OMAP_PIN_OUTPUT);
-		usb_ehci_init(&ehci_pdata);
+
+		usbhs_init_phys(phy_data, ARRAY_SIZE(phy_data));
+		usbhs_init(&usbhs_bdata);
 	}
 
 	board_nand_init(zoom_nand_partitions,
-			ARRAY_SIZE(zoom_nand_partitions), ZOOM_NAND_CS);
+			ARRAY_SIZE(zoom_nand_partitions), ZOOM_NAND_CS,
+			NAND_BUSWIDTH_16, nand_default_timings);
 	zoom_debugboard_init();
 	zoom_peripherals_init();
+
+	if (machine_is_omap_zoom2())
+		omap_sdrc_init(mt46h32m32lf6_sdrc_params,
+					  mt46h32m32lf6_sdrc_params);
+	else if (machine_is_omap_zoom3())
+		omap_sdrc_init(h8mbx00u0mer0em_sdrc_params,
+					  h8mbx00u0mer0em_sdrc_params);
+
 	zoom_display_init();
 }
 
 MACHINE_START(OMAP_ZOOM2, "OMAP Zoom2 board")
-	.boot_params	= 0x80000100,
-	.map_io		= omap3_map_io,
+	.atag_offset	= 0x100,
 	.reserve	= omap_reserve,
-	.init_irq	= omap_zoom_init_irq,
+	.map_io		= omap3_map_io,
+	.init_early	= omap3430_init_early,
+	.init_irq	= omap3_init_irq,
+	.handle_irq	= omap3_intc_handle_irq,
 	.init_machine	= omap_zoom_init,
-	.timer		= &omap_timer,
+	.init_late	= omap3430_init_late,
+	.init_time	= omap3_sync32k_timer_init,
+	.restart	= omap3xxx_restart,
 MACHINE_END
 
 MACHINE_START(OMAP_ZOOM3, "OMAP Zoom3 board")
-	.boot_params	= 0x80000100,
-	.map_io		= omap3_map_io,
+	.atag_offset	= 0x100,
 	.reserve	= omap_reserve,
-	.init_irq	= omap_zoom_init_irq,
+	.map_io		= omap3_map_io,
+	.init_early	= omap3630_init_early,
+	.init_irq	= omap3_init_irq,
+	.handle_irq	= omap3_intc_handle_irq,
 	.init_machine	= omap_zoom_init,
-	.timer		= &omap_timer,
+	.init_late	= omap3630_init_late,
+	.init_time	= omap3_sync32k_timer_init,
+	.restart	= omap3xxx_restart,
 MACHINE_END

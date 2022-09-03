@@ -806,7 +806,7 @@ static void monitor_card(unsigned long p)
 		dev->flags1 = 0x01;
 		xoutb(dev->flags1, REG_FLAGS1(iobase));
 
-		/* atr is present (which doesnt mean it's valid) */
+		/* atr is present (which doesn't mean it's valid) */
 		set_bit(IS_ATR_PRESENT, &dev->flags);
 		if (dev->atr[0] == 0x03)
 			str_invert_revert(dev->atr, dev->atr_len);
@@ -1400,7 +1400,7 @@ static long cmm_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
 	struct cm4000_dev *dev = filp->private_data;
 	unsigned int iobase = dev->p_dev->resource[0]->start;
-	struct inode *inode = filp->f_path.dentry->d_inode;
+	struct inode *inode = file_inode(filp);
 	struct pcmcia_device *link;
 	int size;
 	int rc;
@@ -1869,7 +1869,7 @@ static const struct file_operations cm4000_fops = {
 	.llseek = no_llseek,
 };
 
-static struct pcmcia_device_id cm4000_ids[] = {
+static const struct pcmcia_device_id cm4000_ids[] = {
 	PCMCIA_DEVICE_MANF_CARD(0x0223, 0x0002),
 	PCMCIA_DEVICE_PROD_ID12("CardMan", "4000", 0x2FB368CA, 0xA2BD8C39),
 	PCMCIA_DEVICE_NULL,

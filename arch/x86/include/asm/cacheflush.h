@@ -3,6 +3,7 @@
 
 /* Caches aren't brain-dead on the intel. */
 #include <asm-generic/cacheflush.h>
+#include <asm/special_insns.h>
 
 #ifdef CONFIG_X86_PAT
 /*
@@ -71,7 +72,7 @@ static inline void set_page_memtype(struct page *pg, unsigned long memtype) { }
  * Read/Write    : ReadOnly, ReadWrite
  * Presence      : NotPresent
  *
- * Within a catagory, the attributes are mutually exclusive.
+ * Within a category, the attributes are mutually exclusive.
  *
  * The implementation of this API will take care of various aspects that
  * are associated with changing such attributes, such as:

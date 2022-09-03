@@ -1,7 +1,7 @@
 menuconfig MTD_ONENAND
 	tristate "OneNAND Device Support"
 	depends on MTD
-	select MTD_PARTITIONS
+	depends on HAS_IOMEM
 	help
 	  This enables support for accessing all type of OneNAND flash
 	  devices. For further information see
@@ -32,7 +32,7 @@ config MTD_ONENAND_OMAP2
 
 config MTD_ONENAND_SAMSUNG
         tristate "OneNAND on Samsung SOC controller support"
-        depends on ARCH_S3C64XX || ARCH_S5PC100 || ARCH_S5PV210 || ARCH_S5PV310
+        depends on ARCH_S3C64XX || ARCH_S5PC100 || ARCH_S5PV210 || ARCH_EXYNOS4
         help
           Support for a OneNAND flash device connected to an Samsung SOC.
           S3C64XX/S5PC100 use command mapping method.
@@ -40,7 +40,6 @@ config MTD_ONENAND_SAMSUNG
 
 config MTD_ONENAND_OTP
 	bool "OneNAND OTP Support"
-	select HAVE_MTD_OTP
 	help
 	  One Block of the NAND Flash Array memory is reserved as
 	  a One-Time Programmable Block memory area.
@@ -67,11 +66,5 @@ config MTD_ONENAND_2X_PROGRAM
 	    Mux:   KFM2G16Q2M, KFN4G16Q2M,
 
 	  And more recent chips
-
-config MTD_ONENAND_SIM
-	tristate "OneNAND simulator support"
-	help
-	  The simulator may simulate various OneNAND flash chips for the
-	  OneNAND MTD layer.
 
 endif # MTD_ONENAND

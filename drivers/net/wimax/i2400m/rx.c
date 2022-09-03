@@ -149,6 +149,8 @@
 #include <linux/if_arp.h>
 #include <linux/netdevice.h>
 #include <linux/workqueue.h>
+#include <linux/export.h>
+#include <linux/moduleparam.h>
 #include "i2400m.h"
 
 
@@ -349,7 +351,7 @@ error_no_waiter:
  *
  * For reports: We can't clone the original skb where the data is
  * because we need to send this up via netlink; netlink has to add
- * headers and we can't overwrite what's preceeding the payload...as
+ * headers and we can't overwrite what's preceding the payload...as
  * it is another message. So we just dup them.
  */
 static
@@ -425,7 +427,7 @@ error_check:
  *
  * As in i2400m_rx_ctl(), we can't clone the original skb where the
  * data is because we need to send this up via netlink; netlink has to
- * add headers and we can't overwrite what's preceeding the
+ * add headers and we can't overwrite what's preceding the
  * payload...as it is another message. So we just dup them.
  */
 static
@@ -1344,29 +1346,22 @@ EXPORT_SYMBOL(i2400m_unknown_barker);
 int i2400m_rx_setup(struct i2400m *i2400m)
 {
 	int result = 0;
-	struct device *dev = i2400m_dev(i2400m);
 
 	i2400m->rx_reorder = i2400m_rx_reorder_disabled? 0 : 1;
 	if (i2400m->rx_reorder) {
 		unsigned itr;
-		size_t size;
 		struct i2400m_roq_log *rd;
 
 		result = -ENOMEM;
 
-		size = sizeof(i2400m->rx_roq[0]) * (I2400M_RO_CIN + 1);
-		i2400m->rx_roq = kzalloc(size, GFP_KERNEL);
-		if (i2400m->rx_roq == NULL) {
-			dev_err(dev, "RX: cannot allocate %zu bytes for "
-				"reorder queues\n", size);
+		i2400m->rx_roq = kcalloc(I2400M_RO_CIN + 1,
+					 sizeof(i2400m->rx_roq[0]), GFP_KERNEL);
+		if (i2400m->rx_roq == NULL)
 			goto error_roq_alloc;
-		}
 
-		size = sizeof(*i2400m->rx_roq[0].log) * (I2400M_RO_CIN + 1);
-		rd = kzalloc(size, GFP_KERNEL);
+		rd = kcalloc(I2400M_RO_CIN + 1, sizeof(*i2400m->rx_roq[0].log),
+			     GFP_KERNEL);
 		if (rd == NULL) {
-			dev_err(dev, "RX: cannot allocate %zu bytes for "
-				"reorder queues log areas\n", size);
 			result = -ENOMEM;
 			goto error_roq_log_alloc;
 		}

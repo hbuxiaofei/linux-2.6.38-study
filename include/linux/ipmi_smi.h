@@ -36,10 +36,10 @@
 
 #include <linux/ipmi_msgdefs.h>
 #include <linux/proc_fs.h>
-#include <linux/module.h>
-#include <linux/device.h>
 #include <linux/platform_device.h>
 #include <linux/ipmi.h>
+
+struct device;
 
 /* This files describes the interface for IPMI system management interface
    drivers to bind into the IPMI message handler. */
@@ -216,7 +216,7 @@ int ipmi_unregister_smi(ipmi_smi_t intf);
 
 /*
  * The lower layer reports received messages through this interface.
- * The data_size should be zero if this is an asyncronous message.  If
+ * The data_size should be zero if this is an asynchronous message.  If
  * the lower layer gets an error sending a message, it should format
  * an error response in the message response.
  */
@@ -236,7 +236,7 @@ static inline void ipmi_free_smi_msg(struct ipmi_smi_msg *msg)
    directory for this interface.  Note that the entry will
    automatically be dstroyed when the interface is destroyed. */
 int ipmi_smi_add_proc_entry(ipmi_smi_t smi, char *name,
-			    read_proc_t *read_proc,
+			    const struct file_operations *proc_ops,
 			    void *data);
 
 #endif /* __LINUX_IPMI_SMI_H */

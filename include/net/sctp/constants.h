@@ -49,7 +49,6 @@
 
 #include <linux/sctp.h>
 #include <linux/ipv6.h> /* For ipv6hdr. */
-#include <net/sctp/user.h>
 #include <net/tcp_states.h>  /* For TCP states used in sctp_sock_state_t */
 
 /* Value used for stream negotiation. */
@@ -150,7 +149,6 @@ SCTP_SUBTYPE_CONSTRUCTOR(OTHER,		sctp_event_other_t,	other)
 SCTP_SUBTYPE_CONSTRUCTOR(PRIMITIVE,	sctp_event_primitive_t,	primitive)
 
 
-#define sctp_chunk_is_control(a) (a->chunk_hdr->type != SCTP_CID_DATA)
 #define sctp_chunk_is_data(a) (a->chunk_hdr->type == SCTP_CID_DATA)
 
 /* Calculate the actual data size in a data chunk */
@@ -188,15 +186,14 @@ typedef enum {
 /* SCTP state defines for internal state machine */
 typedef enum {
 
-	SCTP_STATE_EMPTY		= 0,
-	SCTP_STATE_CLOSED		= 1,
-	SCTP_STATE_COOKIE_WAIT		= 2,
-	SCTP_STATE_COOKIE_ECHOED	= 3,
-	SCTP_STATE_ESTABLISHED		= 4,
-	SCTP_STATE_SHUTDOWN_PENDING	= 5,
-	SCTP_STATE_SHUTDOWN_SENT	= 6,
-	SCTP_STATE_SHUTDOWN_RECEIVED	= 7,
-	SCTP_STATE_SHUTDOWN_ACK_SENT	= 8,
+	SCTP_STATE_CLOSED		= 0,
+	SCTP_STATE_COOKIE_WAIT		= 1,
+	SCTP_STATE_COOKIE_ECHOED	= 2,
+	SCTP_STATE_ESTABLISHED		= 3,
+	SCTP_STATE_SHUTDOWN_PENDING	= 4,
+	SCTP_STATE_SHUTDOWN_SENT	= 5,
+	SCTP_STATE_SHUTDOWN_RECEIVED	= 6,
+	SCTP_STATE_SHUTDOWN_ACK_SENT	= 7,
 
 } sctp_state_t;
 
@@ -305,7 +302,7 @@ enum { SCTP_MAX_GABS = 16 };
                                          * to which we will raise the P-MTU.
 					 */
 #define SCTP_DEFAULT_MINSEGMENT 512	/* MTU size ... if no mtu disc */
-#define SCTP_HOW_MANY_SECRETS 2		/* How many secrets I keep */
+
 #define SCTP_SECRET_SIZE 32		/* Number of octets in a 256 bits. */
 
 #define SCTP_SIGNATURE_SIZE 20	        /* size of a SLA-1 signature */
@@ -313,14 +310,6 @@ enum { SCTP_MAX_GABS = 16 };
 #define SCTP_COOKIE_MULTIPLE 32 /* Pad out our cookie to make our hash
 				 * functions simpler to write.
 				 */
-
-#if defined (CONFIG_SCTP_HMAC_MD5)
-#define SCTP_COOKIE_HMAC_ALG "hmac(md5)"
-#elif defined (CONFIG_SCTP_HMAC_SHA1)
-#define SCTP_COOKIE_HMAC_ALG "hmac(sha1)"
-#else
-#define SCTP_COOKIE_HMAC_ALG NULL
-#endif
 
 /* These return values describe the success or failure of a number of
  * routines which form the lower interface to SCTP_outqueue.
@@ -336,6 +325,7 @@ typedef enum {
 typedef enum {
 	SCTP_TRANSPORT_UP,
 	SCTP_TRANSPORT_DOWN,
+	SCTP_TRANSPORT_PF,
 } sctp_transport_cmd_t;
 
 /* These are the address scopes defined mainly for IPv4 addresses

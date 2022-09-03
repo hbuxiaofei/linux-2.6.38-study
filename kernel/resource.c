@@ -7,7 +7,9 @@
  * Arbitrary resource management.
  */
 
-#include <linux/module.h>
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
+#include <linux/export.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
 #include <linux/init.h>
@@ -19,6 +21,7 @@
 #include <linux/seq_file.h>
 #include <linux/device.h>
 #include <linux/pfn.h>
+#include <linux/mm.h>
 #include <asm/io.h>
 
 
@@ -38,7 +41,23 @@ struct resource iomem_resource = {
 };
 EXPORT_SYMBOL(iomem_resource);
 
+/* constraints to be met while allocating resources */
+struct resource_constraint {
+	resource_size_t min, max, align;
+	resource_size_t (*alignf)(void *, const struct resource *,
+			resource_size_t, resource_size_t);
+	void *alignf_data;
+};
+
 static DEFINE_RWLOCK(resource_lock);
+
+/*
+ * For memory hotplug, there is no way to free resource entries allocated
+ * by boot mem after the system is up. So for reusing the resource entry
+ * we need to remember the resource.
+ */
+static struct resource *bootmem_resource_free;
+static DEFINE_SPINLOCK(bootmem_resource_lock);
 
 static void *r_next(struct seq_file *m, void *v, loff_t *pos)
 {
@@ -140,6 +159,40 @@ static int __init ioresources_init(void)
 __initcall(ioresources_init);
 
 #endif /* CONFIG_PROC_FS */
+
+static void free_resource(struct resource *res)
+{
+	if (!res)
+		return;
+
+	if (!PageSlab(virt_to_head_page(res))) {
+		spin_lock(&bootmem_resource_lock);
+		res->sibling = bootmem_resource_free;
+		bootmem_resource_free = res;
+		spin_unlock(&bootmem_resource_lock);
+	} else {
+		kfree(res);
+	}
+}
+
+static struct resource *alloc_resource(gfp_t flags)
+{
+	struct resource *res = NULL;
+
+	spin_lock(&bootmem_resource_lock);
+	if (bootmem_resource_free) {
+		res = bootmem_resource_free;
+		bootmem_resource_free = res->sibling;
+	}
+	spin_unlock(&bootmem_resource_lock);
+
+	if (res)
+		memset(res, 0, sizeof(struct resource));
+	else
+		res = kzalloc(sizeof(struct resource), flags);
+
+	return res;
+}
 
 /* Return the conflict entry if you can't request it */
 static struct resource * __request_resource(struct resource *root, struct resource *new)
@@ -384,16 +437,13 @@ static bool resource_contains(struct resource *res1, struct resource *res2)
 }
 
 /*
- * Find empty slot in the resource tree given range and alignment.
+ * Find empty slot in the resource tree with the given range and
+ * alignment constraints
  */
-static int find_resource(struct resource *root, struct resource *new,
-			 resource_size_t size, resource_size_t min,
-			 resource_size_t max, resource_size_t align,
-			 resource_size_t (*alignf)(void *,
-						   const struct resource *,
-						   resource_size_t,
-						   resource_size_t),
-			 void *alignf_data)
+static int __find_resource(struct resource *root, struct resource *old,
+			 struct resource *new,
+			 resource_size_t  size,
+			 struct resource_constraint *constraint)
 {
 	struct resource *this = root->child;
 	struct resource tmp = *new, avail, alloc;
@@ -404,25 +454,29 @@ static int find_resource(struct resource *root, struct resource *new,
 	 * Skip past an allocated resource that starts at 0, since the assignment
 	 * of this->start - 1 to tmp->end below would cause an underflow.
 	 */
-	if (this && this->start == 0) {
-		tmp.start = this->end + 1;
+	if (this && this->start == root->start) {
+		tmp.start = (this == old) ? old->start : this->end + 1;
 		this = this->sibling;
 	}
 	for(;;) {
 		if (this)
-			tmp.end = this->start - 1;
+			tmp.end = (this == old) ?  this->end : this->start - 1;
 		else
 			tmp.end = root->end;
 
-		resource_clip(&tmp, min, max);
+		if (tmp.end < tmp.start)
+			goto next;
+
+		resource_clip(&tmp, constraint->min, constraint->max);
 		arch_remove_reservations(&tmp);
 
 		/* Check for overflow after ALIGN() */
 		avail = *new;
-		avail.start = ALIGN(tmp.start, align);
+		avail.start = ALIGN(tmp.start, constraint->align);
 		avail.end = tmp.end;
 		if (avail.start >= tmp.start) {
-			alloc.start = alignf(alignf_data, &avail, size, align);
+			alloc.start = constraint->alignf(constraint->alignf_data, &avail,
+					size, constraint->align);
 			alloc.end = alloc.start + size - 1;
 			if (resource_contains(&avail, &alloc)) {
 				new->start = alloc.start;
@@ -430,21 +484,84 @@ static int find_resource(struct resource *root, struct resource *new,
 				return 0;
 			}
 		}
-		if (!this)
+
+next:		if (!this || this->end == root->end)
 			break;
-		tmp.start = this->end + 1;
+
+		if (this != old)
+			tmp.start = this->end + 1;
 		this = this->sibling;
 	}
 	return -EBUSY;
 }
 
+/*
+ * Find empty slot in the resource tree given range and alignment.
+ */
+static int find_resource(struct resource *root, struct resource *new,
+			resource_size_t size,
+			struct resource_constraint  *constraint)
+{
+	return  __find_resource(root, NULL, new, size, constraint);
+}
+
 /**
- * allocate_resource - allocate empty slot in the resource tree given range & alignment
+ * reallocate_resource - allocate a slot in the resource tree given range & alignment.
+ *	The resource will be relocated if the new size cannot be reallocated in the
+ *	current location.
+ *
+ * @root: root resource descriptor
+ * @old:  resource descriptor desired by caller
+ * @newsize: new size of the resource descriptor
+ * @constraint: the size and alignment constraints to be met.
+ */
+int reallocate_resource(struct resource *root, struct resource *old,
+			resource_size_t newsize,
+			struct resource_constraint  *constraint)
+{
+	int err=0;
+	struct resource new = *old;
+	struct resource *conflict;
+
+	write_lock(&resource_lock);
+
+	if ((err = __find_resource(root, old, &new, newsize, constraint)))
+		goto out;
+
+	if (resource_contains(&new, old)) {
+		old->start = new.start;
+		old->end = new.end;
+		goto out;
+	}
+
+	if (old->child) {
+		err = -EBUSY;
+		goto out;
+	}
+
+	if (resource_contains(old, &new)) {
+		old->start = new.start;
+		old->end = new.end;
+	} else {
+		__release_resource(old);
+		*old = new;
+		conflict = __request_resource(root, old);
+		BUG_ON(conflict);
+	}
+out:
+	write_unlock(&resource_lock);
+	return err;
+}
+
+
+/**
+ * allocate_resource - allocate empty slot in the resource tree given range & alignment.
+ * 	The resource will be reallocated with a new size if it was already allocated
  * @root: root resource descriptor
  * @new: resource descriptor desired by caller
  * @size: requested resource region size
- * @min: minimum size to allocate
- * @max: maximum size to allocate
+ * @min: minimum boundary to allocate
+ * @max: maximum boundary to allocate
  * @align: alignment requested, in bytes
  * @alignf: alignment function, optional, called if not NULL
  * @alignf_data: arbitrary data to pass to the @alignf function
@@ -459,12 +576,25 @@ int allocate_resource(struct resource *root, struct resource *new,
 		      void *alignf_data)
 {
 	int err;
+	struct resource_constraint constraint;
 
 	if (!alignf)
 		alignf = simple_align_resource;
 
+	constraint.min = min;
+	constraint.max = max;
+	constraint.align = align;
+	constraint.alignf = alignf;
+	constraint.alignf_data = alignf_data;
+
+	if ( new->parent ) {
+		/* resource is already allocated, try reallocating with
+		   the new constraints */
+		return reallocate_resource(root, new, size, &constraint);
+	}
+
 	write_lock(&resource_lock);
-	err = find_resource(root, new, size, min, max, align, alignf, alignf_data);
+	err = find_resource(root, new, size, &constraint);
 	if (err >= 0 && __request_resource(root, new))
 		err = -EBUSY;
 	write_unlock(&resource_lock);
@@ -472,6 +602,27 @@ int allocate_resource(struct resource *root, struct resource *new,
 }
 
 EXPORT_SYMBOL(allocate_resource);
+
+/**
+ * lookup_resource - find an existing resource by a resource start address
+ * @root: root resource descriptor
+ * @start: resource start address
+ *
+ * Returns a pointer to the resource if found, NULL otherwise
+ */
+struct resource *lookup_resource(struct resource *root, resource_size_t start)
+{
+	struct resource *res;
+
+	read_lock(&resource_lock);
+	for (res = root->child; res; res = res->sibling) {
+		if (res->start == start)
+			break;
+	}
+	read_unlock(&resource_lock);
+
+	return res;
+}
 
 /*
  * Insert a resource into the resource tree. If successful, return NULL,
@@ -598,31 +749,18 @@ void insert_resource_expand_to_fit(struct resource *root, struct resource *new)
 	write_unlock(&resource_lock);
 }
 
-/**
- * adjust_resource - modify a resource's start and size
- * @res: resource to modify
- * @start: new start value
- * @size: new size
- *
- * Given an existing resource, change its start and size to match the
- * arguments.  Returns 0 on success, -EBUSY if it can't fit.
- * Existing children of the resource are assumed to be immutable.
- */
-int adjust_resource(struct resource *res, resource_size_t start, resource_size_t size)
+static int __adjust_resource(struct resource *res, resource_size_t start,
+				resource_size_t size)
 {
 	struct resource *tmp, *parent = res->parent;
 	resource_size_t end = start + size - 1;
 	int result = -EBUSY;
 
-	write_lock(&resource_lock);
+	if (!parent)
+		goto skip;
 
 	if ((start < parent->start) || (end > parent->end))
 		goto out;
-
-	for (tmp = res->child; tmp; tmp = tmp->sibling) {
-		if ((tmp->start < start) || (tmp->end > end))
-			goto out;
-	}
 
 	if (res->sibling && (res->sibling->start <= end))
 		goto out;
@@ -635,14 +773,40 @@ int adjust_resource(struct resource *res, resource_size_t start, resource_size_t
 			goto out;
 	}
 
+skip:
+	for (tmp = res->child; tmp; tmp = tmp->sibling)
+		if ((tmp->start < start) || (tmp->end > end))
+			goto out;
+
 	res->start = start;
 	res->end = end;
 	result = 0;
 
  out:
+	return result;
+}
+
+/**
+ * adjust_resource - modify a resource's start and size
+ * @res: resource to modify
+ * @start: new start value
+ * @size: new size
+ *
+ * Given an existing resource, change its start and size to match the
+ * arguments.  Returns 0 on success, -EBUSY if it can't fit.
+ * Existing children of the resource are assumed to be immutable.
+ */
+int adjust_resource(struct resource *res, resource_size_t start,
+			resource_size_t size)
+{
+	int result;
+
+	write_lock(&resource_lock);
+	result = __adjust_resource(res, start, size);
 	write_unlock(&resource_lock);
 	return result;
 }
+EXPORT_SYMBOL(adjust_resource);
 
 static void __init __reserve_region_with_split(struct resource *root,
 		resource_size_t start, resource_size_t end,
@@ -650,7 +814,8 @@ static void __init __reserve_region_with_split(struct resource *root,
 {
 	struct resource *parent = root;
 	struct resource *conflict;
-	struct resource *res = kzalloc(sizeof(*res), GFP_ATOMIC);
+	struct resource *res = alloc_resource(GFP_ATOMIC);
+	struct resource *next_res = NULL;
 
 	if (!res)
 		return;
@@ -660,33 +825,75 @@ static void __init __reserve_region_with_split(struct resource *root,
 	res->end = end;
 	res->flags = IORESOURCE_BUSY;
 
-	conflict = __request_resource(parent, res);
-	if (!conflict)
-		return;
+	while (1) {
 
-	/* failed, split and try again */
-	kfree(res);
+		conflict = __request_resource(parent, res);
+		if (!conflict) {
+			if (!next_res)
+				break;
+			res = next_res;
+			next_res = NULL;
+			continue;
+		}
 
-	/* conflict covered whole area */
-	if (conflict->start <= start && conflict->end >= end)
-		return;
+		/* conflict covered whole area */
+		if (conflict->start <= res->start &&
+				conflict->end >= res->end) {
+			free_resource(res);
+			WARN_ON(next_res);
+			break;
+		}
 
-	if (conflict->start > start)
-		__reserve_region_with_split(root, start, conflict->start-1, name);
-	if (conflict->end < end)
-		__reserve_region_with_split(root, conflict->end+1, end, name);
+		/* failed, split and try again */
+		if (conflict->start > res->start) {
+			end = res->end;
+			res->end = conflict->start - 1;
+			if (conflict->end < end) {
+				next_res = alloc_resource(GFP_ATOMIC);
+				if (!next_res) {
+					free_resource(res);
+					break;
+				}
+				next_res->name = name;
+				next_res->start = conflict->end + 1;
+				next_res->end = end;
+				next_res->flags = IORESOURCE_BUSY;
+			}
+		} else {
+			res->start = conflict->end + 1;
+		}
+	}
+
 }
 
 void __init reserve_region_with_split(struct resource *root,
 		resource_size_t start, resource_size_t end,
 		const char *name)
 {
+	int abort = 0;
+
 	write_lock(&resource_lock);
-	__reserve_region_with_split(root, start, end, name);
+	if (root->start > start || root->end < end) {
+		pr_err("requested range [0x%llx-0x%llx] not in root %pr\n",
+		       (unsigned long long)start, (unsigned long long)end,
+		       root);
+		if (start > root->end || end < root->start)
+			abort = 1;
+		else {
+			if (end > root->end)
+				end = root->end;
+			if (start < root->start)
+				start = root->start;
+			pr_err("fixing request to [0x%llx-0x%llx]\n",
+			       (unsigned long long)start,
+			       (unsigned long long)end);
+		}
+		dump_stack();
+	}
+	if (!abort)
+		__reserve_region_with_split(root, start, end, name);
 	write_unlock(&resource_lock);
 }
-
-EXPORT_SYMBOL(adjust_resource);
 
 /**
  * resource_alignment - calculate resource's alignment
@@ -734,7 +941,7 @@ struct resource * __request_region(struct resource *parent,
 				   const char *name, int flags)
 {
 	DECLARE_WAITQUEUE(wait, current);
-	struct resource *res = kzalloc(sizeof(*res), GFP_KERNEL);
+	struct resource *res = alloc_resource(GFP_KERNEL);
 
 	if (!res)
 		return NULL;
@@ -768,7 +975,7 @@ struct resource * __request_region(struct resource *parent,
 			continue;
 		}
 		/* Uhhuh, that didn't work out.. */
-		kfree(res);
+		free_resource(res);
 		res = NULL;
 		break;
 	}
@@ -802,7 +1009,7 @@ int __check_region(struct resource *parent, resource_size_t start,
 		return -EBUSY;
 
 	release_resource(res);
-	kfree(res);
+	free_resource(res);
 	return 0;
 }
 EXPORT_SYMBOL(__check_region);
@@ -842,7 +1049,7 @@ void __release_region(struct resource *parent, resource_size_t start,
 			write_unlock(&resource_lock);
 			if (res->flags & IORESOURCE_MUXED)
 				wake_up(&muxed_resource_wait);
-			kfree(res);
+			free_resource(res);
 			return;
 		}
 		p = &res->sibling;
@@ -855,6 +1062,109 @@ void __release_region(struct resource *parent, resource_size_t start,
 		(unsigned long long)end);
 }
 EXPORT_SYMBOL(__release_region);
+
+#ifdef CONFIG_MEMORY_HOTREMOVE
+/**
+ * release_mem_region_adjustable - release a previously reserved memory region
+ * @parent: parent resource descriptor
+ * @start: resource start address
+ * @size: resource region size
+ *
+ * This interface is intended for memory hot-delete.  The requested region
+ * is released from a currently busy memory resource.  The requested region
+ * must either match exactly or fit into a single busy resource entry.  In
+ * the latter case, the remaining resource is adjusted accordingly.
+ * Existing children of the busy memory resource must be immutable in the
+ * request.
+ *
+ * Note:
+ * - Additional release conditions, such as overlapping region, can be
+ *   supported after they are confirmed as valid cases.
+ * - When a busy memory resource gets split into two entries, the code
+ *   assumes that all children remain in the lower address entry for
+ *   simplicity.  Enhance this logic when necessary.
+ */
+int release_mem_region_adjustable(struct resource *parent,
+			resource_size_t start, resource_size_t size)
+{
+	struct resource **p;
+	struct resource *res;
+	struct resource *new_res;
+	resource_size_t end;
+	int ret = -EINVAL;
+
+	end = start + size - 1;
+	if ((start < parent->start) || (end > parent->end))
+		return ret;
+
+	/* The alloc_resource() result gets checked later */
+	new_res = alloc_resource(GFP_KERNEL);
+
+	p = &parent->child;
+	write_lock(&resource_lock);
+
+	while ((res = *p)) {
+		if (res->start >= end)
+			break;
+
+		/* look for the next resource if it does not fit into */
+		if (res->start > start || res->end < end) {
+			p = &res->sibling;
+			continue;
+		}
+
+		if (!(res->flags & IORESOURCE_MEM))
+			break;
+
+		if (!(res->flags & IORESOURCE_BUSY)) {
+			p = &res->child;
+			continue;
+		}
+
+		/* found the target resource; let's adjust accordingly */
+		if (res->start == start && res->end == end) {
+			/* free the whole entry */
+			*p = res->sibling;
+			free_resource(res);
+			ret = 0;
+		} else if (res->start == start && res->end != end) {
+			/* adjust the start */
+			ret = __adjust_resource(res, end + 1,
+						res->end - end);
+		} else if (res->start != start && res->end == end) {
+			/* adjust the end */
+			ret = __adjust_resource(res, res->start,
+						start - res->start);
+		} else {
+			/* split into two entries */
+			if (!new_res) {
+				ret = -ENOMEM;
+				break;
+			}
+			new_res->name = res->name;
+			new_res->start = end + 1;
+			new_res->end = res->end;
+			new_res->flags = res->flags;
+			new_res->parent = res->parent;
+			new_res->sibling = res->sibling;
+			new_res->child = NULL;
+
+			ret = __adjust_resource(res, res->start,
+						start - res->start);
+			if (ret)
+				break;
+			res->sibling = new_res;
+			new_res = NULL;
+		}
+
+		break;
+	}
+
+	write_unlock(&resource_lock);
+	free_resource(new_res);
+	return ret;
+}
+#endif	/* CONFIG_MEMORY_HOTREMOVE */
 
 /*
  * Managed region resource

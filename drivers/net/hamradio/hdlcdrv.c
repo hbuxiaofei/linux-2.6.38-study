@@ -389,7 +389,7 @@ void hdlcdrv_arbitrate(struct net_device *dev, struct hdlcdrv_state *s)
 	if ((--s->hdlctx.slotcnt) > 0)
 		return;
 	s->hdlctx.slotcnt = s->ch_params.slottime;
-	if ((random32() % 256) > s->ch_params.ppersist)
+	if ((prandom_u32() % 256) > s->ch_params.ppersist)
 		return;
 	start_tx(dev, s);
 }
@@ -749,7 +749,7 @@ EXPORT_SYMBOL(hdlcdrv_unregister);
 static int __init hdlcdrv_init_driver(void)
 {
 	printk(KERN_INFO "hdlcdrv: (C) 1996-2000 Thomas Sailer HB9JNX/AE4WA\n");
-	printk(KERN_INFO "hdlcdrv: version 0.8 compiled " __TIME__ " " __DATE__ "\n");
+	printk(KERN_INFO "hdlcdrv: version 0.8\n");
 	return 0;
 }
 

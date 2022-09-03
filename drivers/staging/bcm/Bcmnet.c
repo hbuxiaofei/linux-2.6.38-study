@@ -4,11 +4,11 @@ struct net_device *gblpnetdev;
 
 static INT bcm_open(struct net_device *dev)
 {
-	PMINI_ADAPTER Adapter = GET_BCM_ADAPTER(dev);
+	struct bcm_mini_adapter *Adapter = GET_BCM_ADAPTER(dev);
 
 	if (Adapter->fw_download_done == FALSE) {
 		pr_notice(PFX "%s: link up failed (download in progress)\n",
- 			  dev->name);
+			  dev->name);
 		return -EBUSY;
 	}
 
@@ -28,7 +28,7 @@ static INT bcm_open(struct net_device *dev)
 
 static INT bcm_close(struct net_device *dev)
 {
-	PMINI_ADAPTER Adapter = GET_BCM_ADAPTER(dev);
+	struct bcm_mini_adapter *Adapter = GET_BCM_ADAPTER(dev);
 
 	if (netif_msg_ifdown(Adapter))
 		pr_info(PFX "%s: disabling interface\n", dev->name);
@@ -50,7 +50,7 @@ static u16 bcm_select_queue(struct net_device *dev, struct sk_buff *skb)
 * Description - This is the main transmit function for our virtual
 *		interface(eth0). It handles the ARP packets. It
 *		clones this packet and then Queue it to a suitable
-* 		Queue. Then calls the transmit_packet().
+*		Queue. Then calls the transmit_packet().
 *
 * Parameter   -	 skb - Pointer to the socket buffer structure
 *		 dev - Pointer to the virtual net device structure
@@ -59,7 +59,7 @@ static u16 bcm_select_queue(struct net_device *dev, struct sk_buff *skb)
 
 static netdev_tx_t bcm_transmit(struct sk_buff *skb, struct net_device *dev)
 {
-	PMINI_ADAPTER Adapter = GET_BCM_ADAPTER(dev);
+	struct bcm_mini_adapter *Adapter = GET_BCM_ADAPTER(dev);
 	u16 qindex = skb_get_queue_mapping(skb);
 
 
@@ -110,13 +110,13 @@ static netdev_tx_t bcm_transmit(struct sk_buff *skb, struct net_device *dev)
 Register other driver entry points with the kernel
 */
 static const struct net_device_ops bcmNetDevOps = {
-    .ndo_open		= bcm_open,
-    .ndo_stop 		= bcm_close,
-    .ndo_start_xmit	= bcm_transmit,
-    .ndo_change_mtu	= eth_change_mtu,
-    .ndo_set_mac_address = eth_mac_addr,
-    .ndo_validate_addr	= eth_validate_addr,
-    .ndo_select_queue	= bcm_select_queue,
+	.ndo_open		= bcm_open,
+	.ndo_stop		= bcm_close,
+	.ndo_start_xmit	        = bcm_transmit,
+	.ndo_change_mtu	        = eth_change_mtu,
+	.ndo_set_mac_address    = eth_mac_addr,
+	.ndo_validate_addr	= eth_validate_addr,
+	.ndo_select_queue	= bcm_select_queue,
 };
 
 static struct device_type wimax_type = {
@@ -138,14 +138,15 @@ static int bcm_get_settings(struct net_device *dev, struct ethtool_cmd *cmd)
 	return 0;
 }
 
-static void bcm_get_drvinfo(struct net_device *dev, struct ethtool_drvinfo *info)
+static void bcm_get_drvinfo(struct net_device *dev,
+			    struct ethtool_drvinfo *info)
 {
-	PMINI_ADAPTER Adapter = GET_BCM_ADAPTER(dev);
-	PS_INTERFACE_ADAPTER psIntfAdapter = Adapter->pvInterfaceAdapter;
+	struct bcm_mini_adapter *Adapter = GET_BCM_ADAPTER(dev);
+	struct bcm_interface_adapter *psIntfAdapter = Adapter->pvInterfaceAdapter;
 	struct usb_device *udev = interface_to_usbdev(psIntfAdapter->interface);
 
-	strcpy(info->driver, DRV_NAME);
-	strcpy(info->version, DRV_VERSION);
+	strlcpy(info->driver, DRV_NAME, sizeof(info->driver));
+	strlcpy(info->version, DRV_VERSION, sizeof(info->version));
 	snprintf(info->fw_version, sizeof(info->fw_version), "%u.%u",
 		 Adapter->uiFlashLayoutMajorVersion,
 		 Adapter->uiFlashLayoutMinorVersion);
@@ -155,21 +156,21 @@ static void bcm_get_drvinfo(struct net_device *dev, struct ethtool_drvinfo *info
 
 static u32 bcm_get_link(struct net_device *dev)
 {
-	PMINI_ADAPTER Adapter = GET_BCM_ADAPTER(dev);
+	struct bcm_mini_adapter *Adapter = GET_BCM_ADAPTER(dev);
 
 	return Adapter->LinkUpStatus;
 }
 
-static u32 bcm_get_msglevel (struct net_device *dev)
+static u32 bcm_get_msglevel(struct net_device *dev)
 {
-	PMINI_ADAPTER Adapter = GET_BCM_ADAPTER(dev);
+	struct bcm_mini_adapter *Adapter = GET_BCM_ADAPTER(dev);
 
 	return Adapter->msg_enable;
 }
 
-static void bcm_set_msglevel (struct net_device *dev, u32 level)
+static void bcm_set_msglevel(struct net_device *dev, u32 level)
 {
-	PMINI_ADAPTER Adapter = GET_BCM_ADAPTER(dev);
+	struct bcm_mini_adapter *Adapter = GET_BCM_ADAPTER(dev);
 
 	Adapter->msg_enable = level;
 }
@@ -177,15 +178,15 @@ static void bcm_set_msglevel (struct net_device *dev, u32 level)
 static const struct ethtool_ops bcm_ethtool_ops = {
 	.get_settings	= bcm_get_settings,
 	.get_drvinfo	= bcm_get_drvinfo,
-	.get_link 	= bcm_get_link,
+	.get_link	= bcm_get_link,
 	.get_msglevel	= bcm_get_msglevel,
 	.set_msglevel	= bcm_set_msglevel,
 };
 
-int register_networkdev(PMINI_ADAPTER Adapter)
+int register_networkdev(struct bcm_mini_adapter *Adapter)
 {
 	struct net_device *net = Adapter->dev;
-	PS_INTERFACE_ADAPTER IntfAdapter = Adapter->pvInterfaceAdapter;
+	struct bcm_interface_adapter *IntfAdapter = Adapter->pvInterfaceAdapter;
 	struct usb_interface *udev = IntfAdapter->interface;
 	struct usb_device *xdev = IntfAdapter->udev;
 
@@ -206,7 +207,7 @@ int register_networkdev(PMINI_ADAPTER Adapter)
 	if (result != STATUS_SUCCESS) {
 		dev_err(&udev->dev,
 			PFX "Error in Reading the mac Address: %d", result);
- 		return -EIO;
+		return -EIO;
 	}
 
 	result = register_netdev(net);
@@ -223,16 +224,16 @@ int register_networkdev(PMINI_ADAPTER Adapter)
 	return 0;
 }
 
-void unregister_networkdev(PMINI_ADAPTER Adapter)
+void unregister_networkdev(struct bcm_mini_adapter *Adapter)
 {
 	struct net_device *net = Adapter->dev;
-	PS_INTERFACE_ADAPTER IntfAdapter = Adapter->pvInterfaceAdapter;
+	struct bcm_interface_adapter *IntfAdapter = Adapter->pvInterfaceAdapter;
 	struct usb_interface *udev = IntfAdapter->interface;
 	struct usb_device *xdev = IntfAdapter->udev;
 
 	if (netif_msg_probe(Adapter))
 		dev_info(&udev->dev, PFX "%s: unregister usb-%s%s\n",
 			 net->name, xdev->bus->bus_name, xdev->devpath);
- 
+
 	unregister_netdev(Adapter->dev);
 }

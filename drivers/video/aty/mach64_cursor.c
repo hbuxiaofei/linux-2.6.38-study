@@ -51,7 +51,7 @@
  * to a larger number and saturate CUR_HORZ_POSN to zero.
  *
  * if Y becomes negative, CUR_VERT_OFFSET must be adjusted to a larger number,
- * CUR_OFFSET must be adjusted to a point to the appropraite line in the cursor
+ * CUR_OFFSET must be adjusted to a point to the appropriate line in the cursor
  * definitation and CUR_VERT_POSN must be saturated to zero.
  */
 
@@ -183,7 +183,7 @@ static int atyfb_cursor(struct fb_info *info, struct fb_cursor *cursor)
 	return 0;
 }
 
-int __devinit aty_init_cursor(struct fb_info *info)
+int aty_init_cursor(struct fb_info *info)
 {
 	unsigned long addr;
 

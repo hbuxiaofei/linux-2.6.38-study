@@ -12,10 +12,10 @@
  *  it under the terms of the GNU General Public License version 2 as
  *  published by the Free Software Foundation.
  */
-
+#include <linux/gpio.h>
 #include <linux/init.h>
 #include <linux/platform_device.h>
-#include <linux/sysdev.h>
+#include <linux/syscore_ops.h>
 #include <linux/interrupt.h>
 #include <linux/sched.h>
 #include <linux/bitops.h>
@@ -27,6 +27,9 @@
 #include <linux/gpio_keys.h>
 #include <linux/pwm_backlight.h>
 #include <linux/smc91x.h>
+#include <linux/i2c/pxa-i2c.h>
+#include <linux/slab.h>
+#include <linux/leds.h>
 
 #include <asm/types.h>
 #include <asm/setup.h>
@@ -42,15 +45,13 @@
 #include <asm/mach/flash.h>
 
 #include <mach/pxa27x.h>
-#include <mach/gpio.h>
 #include <mach/mainstone.h>
 #include <mach/audio.h>
-#include <mach/pxafb.h>
-#include <plat/i2c.h>
-#include <mach/mmc.h>
-#include <mach/irda.h>
-#include <mach/ohci.h>
-#include <plat/pxa27x_keypad.h>
+#include <linux/platform_data/video-pxafb.h>
+#include <linux/platform_data/mmc-pxamci.h>
+#include <linux/platform_data/irda-pxaficp.h>
+#include <linux/platform_data/usb-ohci-pxa27x.h>
+#include <linux/platform_data/keypad-pxa27x.h>
 #include <mach/smemc.h>
 
 #include "generic.h"
@@ -166,8 +167,8 @@ static void __init mainstone_init_irq(void)
 
 	/* setup extra Mainstone irqs */
 	for(irq = MAINSTONE_IRQ(0); irq <= MAINSTONE_IRQ(15); irq++) {
-		set_irq_chip(irq, &mainstone_irq_chip);
-		set_irq_handler(irq, handle_level_irq);
+		irq_set_chip_and_handler(irq, &mainstone_irq_chip,
+					 handle_level_irq);
 		if (irq == MAINSTONE_IRQ(10) || irq == MAINSTONE_IRQ(14))
 			set_irq_flags(irq, IRQF_VALID | IRQF_PROBE | IRQF_NOAUTOEN);
 		else
@@ -179,37 +180,27 @@ static void __init mainstone_init_irq(void)
 	MST_INTMSKENA = 0;
 	MST_INTSETCLR = 0;
 
-	set_irq_chained_handler(IRQ_GPIO(0), mainstone_irq_handler);
-	set_irq_type(IRQ_GPIO(0), IRQ_TYPE_EDGE_FALLING);
+	irq_set_chained_handler(PXA_GPIO_TO_IRQ(0), mainstone_irq_handler);
+	irq_set_irq_type(PXA_GPIO_TO_IRQ(0), IRQ_TYPE_EDGE_FALLING);
 }
 
 #ifdef CONFIG_PM
 
-static int mainstone_irq_resume(struct sys_device *dev)
+static void mainstone_irq_resume(void)
 {
 	MST_INTMSKENA = mainstone_irq_enabled;
-	return 0;
 }
 
-static struct sysdev_class mainstone_irq_sysclass = {
-	.name = "cpld_irq",
+static struct syscore_ops mainstone_irq_syscore_ops = {
 	.resume = mainstone_irq_resume,
-};
-
-static struct sys_device mainstone_irq_device = {
-	.cls = &mainstone_irq_sysclass,
 };
 
 static int __init mainstone_irq_device_init(void)
 {
-	int ret = -ENODEV;
+	if (machine_is_mainstone())
+		register_syscore_ops(&mainstone_irq_syscore_ops);
 
-	if (machine_is_mainstone()) {
-		ret = sysdev_class_register(&mainstone_irq_sysclass);
-		if (ret == 0)
-			ret = sysdev_register(&mainstone_irq_device);
-	}
-	return ret;
+	return 0;
 }
 
 device_initcall(mainstone_irq_device_init);
@@ -592,7 +583,7 @@ static void __init mainstone_init(void)
 	else
 		mainstone_pxafb_info.modes = &toshiba_ltm035a776c_mode;
 
-	set_pxa_fb_info(&mainstone_pxafb_info);
+	pxa_set_fb_info(NULL, &mainstone_pxafb_info);
 	mainstone_backlight_register();
 
 	pxa_set_mci_info(&mainstone_mci_platform_data);
@@ -624,12 +615,106 @@ static void __init mainstone_map_io(void)
  	PCFR = 0x66;
 }
 
+/*
+ * Driver for the 8 discrete LEDs available for general use:
+ * Note: bits [15-8] are used to enable/blank the 8 7 segment hex displays
+ * so be sure to not monkey with them here.
+ */
+
+#if defined(CONFIG_NEW_LEDS) && defined(CONFIG_LEDS_CLASS)
+struct mainstone_led {
+	struct led_classdev	cdev;
+	u8			mask;
+};
+
+/*
+ * The triggers lines up below will only be used if the
+ * LED triggers are compiled in.
+ */
+static const struct {
+	const char *name;
+	const char *trigger;
+} mainstone_leds[] = {
+	{ "mainstone:D28", "default-on", },
+	{ "mainstone:D27", "cpu0", },
+	{ "mainstone:D26", "heartbeat" },
+	{ "mainstone:D25", },
+	{ "mainstone:D24", },
+	{ "mainstone:D23", },
+	{ "mainstone:D22", },
+	{ "mainstone:D21", },
+};
+
+static void mainstone_led_set(struct led_classdev *cdev,
+			      enum led_brightness b)
+{
+	struct mainstone_led *led = container_of(cdev,
+					 struct mainstone_led, cdev);
+	u32 reg = MST_LEDCTRL;
+
+	if (b != LED_OFF)
+		reg |= led->mask;
+	else
+		reg &= ~led->mask;
+
+	MST_LEDCTRL = reg;
+}
+
+static enum led_brightness mainstone_led_get(struct led_classdev *cdev)
+{
+	struct mainstone_led *led = container_of(cdev,
+					 struct mainstone_led, cdev);
+	u32 reg = MST_LEDCTRL;
+
+	return (reg & led->mask) ? LED_FULL : LED_OFF;
+}
+
+static int __init mainstone_leds_init(void)
+{
+	int i;
+
+	if (!machine_is_mainstone())
+		return -ENODEV;
+
+	/* All ON */
+	MST_LEDCTRL |= 0xff;
+	for (i = 0; i < ARRAY_SIZE(mainstone_leds); i++) {
+		struct mainstone_led *led;
+
+		led = kzalloc(sizeof(*led), GFP_KERNEL);
+		if (!led)
+			break;
+
+		led->cdev.name = mainstone_leds[i].name;
+		led->cdev.brightness_set = mainstone_led_set;
+		led->cdev.brightness_get = mainstone_led_get;
+		led->cdev.default_trigger = mainstone_leds[i].trigger;
+		led->mask = BIT(i);
+
+		if (led_classdev_register(NULL, &led->cdev) < 0) {
+			kfree(led);
+			break;
+		}
+	}
+
+	return 0;
+}
+
+/*
+ * Since we may have triggers on any subsystem, defer registration
+ * until after subsystem_init.
+ */
+fs_initcall(mainstone_leds_init);
+#endif
+
 MACHINE_START(MAINSTONE, "Intel HCDDBBVA0 Development Platform (aka Mainstone)")
 	/* Maintainer: MontaVista Software Inc. */
-	.boot_params	= 0xa0000100,	/* BLOB boot parameter setting */
+	.atag_offset	= 0x100,	/* BLOB boot parameter setting */
 	.map_io		= mainstone_map_io,
 	.nr_irqs	= MAINSTONE_NR_IRQS,
 	.init_irq	= mainstone_init_irq,
-	.timer		= &pxa_timer,
+	.handle_irq	= pxa27x_handle_irq,
+	.init_time	= pxa_timer_init,
 	.init_machine	= mainstone_init,
+	.restart	= pxa_restart,
 MACHINE_END

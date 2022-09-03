@@ -1,6 +1,6 @@
 /*
  * Copyright (C) 2008 Google, Inc.
- * Copyright (c) 2008-2010, Code Aurora Forum. All rights reserved.
+ * Copyright (c) 2008-2011, Code Aurora Forum. All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -17,6 +17,7 @@
 #include <linux/platform_device.h>
 
 #include <linux/dma-mapping.h>
+#include <linux/clkdev.h>
 #include <mach/irqs.h>
 #include <mach/msm_iomap.h>
 #include <mach/dma.h>
@@ -28,8 +29,40 @@
 #include <asm/mach/flash.h>
 
 #include "clock-pcom.h"
+#include "clock-7x30.h"
 
-#include <mach/mmc.h>
+#include <linux/platform_data/mmc-msm_sdcc.h>
+
+static struct resource msm_gpio_resources[] = {
+	{
+		.start	= 32 + 18,
+		.end	= 32 + 18,
+		.flags	= IORESOURCE_IRQ,
+	},
+	{
+		.start	= 32 + 19,
+		.end	= 32 + 19,
+		.flags	= IORESOURCE_IRQ,
+	},
+	{
+		.start	= 0xac001000,
+		.end	= 0xac001000 + SZ_4K - 1,
+		.flags	= IORESOURCE_MEM,
+		.name  = "gpio1"
+	},
+	{
+		.start	= 0xac101400,
+		.end	= 0xac101400 + SZ_4K - 1,
+		.flags	= IORESOURCE_MEM,
+		.name  = "gpio2"
+	},
+};
+
+struct platform_device msm_device_gpio_7x30 = {
+	.name	= "gpio-msm-7x30",
+	.num_resources	= ARRAY_SIZE(msm_gpio_resources),
+	.resource	= msm_gpio_resources,
+};
 
 static struct resource resources_uart2[] = {
 	{
@@ -41,6 +74,7 @@ static struct resource resources_uart2[] = {
 		.start	= MSM_UART2_PHYS,
 		.end	= MSM_UART2_PHYS + MSM_UART2_SIZE - 1,
 		.flags	= IORESOURCE_MEM,
+		.name  = "uart_resource"
 	},
 };
 
@@ -127,11 +161,13 @@ struct platform_device msm_device_hsusb_host = {
 	},
 };
 
-struct clk msm_clocks_7x30[] = {
+struct clk_lookup msm_clocks_7x30[] = {
 	CLK_PCOM("adm_clk",	ADM_CLK,	NULL, 0),
 	CLK_PCOM("adsp_clk",	ADSP_CLK,	NULL, 0),
 	CLK_PCOM("cam_m_clk",	CAM_M_CLK,	NULL, 0),
 	CLK_PCOM("camif_pad_pclk",	CAMIF_PAD_P_CLK,	NULL, OFF),
+	CLK_PCOM("ce_clk",	CE_CLK,	NULL, 0),
+	CLK_PCOM("codec_ssbi_clk",	CODEC_SSBI_CLK,	NULL, 0),
 	CLK_PCOM("ebi1_clk",	EBI1_CLK,	NULL, CLK_MIN),
 	CLK_PCOM("ecodec_clk",	ECODEC_CLK,	NULL, 0),
 	CLK_PCOM("emdh_clk",	EMDH_CLK,	NULL, OFF | CLK_MINMAX),
@@ -177,7 +213,7 @@ struct clk msm_clocks_7x30[] = {
 	CLK_7X30S("tv_src_clk",	TV_CLK, 	TV_ENC_CLK,	NULL, 0),
 	CLK_PCOM("tv_dac_clk",	TV_DAC_CLK,	NULL, 0),
 	CLK_PCOM("tv_enc_clk",	TV_ENC_CLK,	NULL, 0),
-	CLK_PCOM("uart_clk",	UART2_CLK,	&msm_device_uart2.dev, 0),
+	CLK_PCOM("uart_clk",	UART2_CLK,	"msm_serial.1", 0),
 	CLK_PCOM("usb_phy_clk",	USB_PHY_CLK,	NULL, 0),
 	CLK_PCOM("usb_hs_clk",		USB_HS_CLK,		NULL, OFF),
 	CLK_PCOM("usb_hs_pclk",		USB_HS_P_CLK,		NULL, OFF),
