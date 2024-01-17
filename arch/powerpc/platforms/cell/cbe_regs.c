@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * cbe_regs.c
  *
@@ -8,13 +9,13 @@
 
 #include <linux/percpu.h>
 #include <linux/types.h>
-#include <linux/module.h>
+#include <linux/export.h>
+#include <linux/of_address.h>
 #include <linux/of_device.h>
 #include <linux/of_platform.h>
+#include <linux/pgtable.h>
 
 #include <asm/io.h>
-#include <asm/pgtable.h>
-#include <asm/prom.h>
 #include <asm/ptrace.h>
 #include <asm/cell-regs.h>
 
@@ -22,7 +23,7 @@
  * Current implementation uses "cpu" nodes. We build our own mapping
  * array of cpu numbers to cpu nodes locally for now to allow interrupt
  * time code to have a fast path rather than call of_get_cpu_node(). If
- * we implement cpu hotplug, we'll have to install an appropriate norifier
+ * we implement cpu hotplug, we'll have to install an appropriate notifier
  * in order to release references to the cpu going away
  */
 static struct cbe_regs_map
@@ -45,15 +46,15 @@ static struct cbe_thread_map
 	unsigned int cbe_id;
 } cbe_thread_map[NR_CPUS];
 
-static cpumask_t cbe_local_mask[MAX_CBE] = { [0 ... MAX_CBE-1] = CPU_MASK_NONE };
-static cpumask_t cbe_first_online_cpu = CPU_MASK_NONE;
+static cpumask_t cbe_local_mask[MAX_CBE] = { [0 ... MAX_CBE-1] = {CPU_BITS_NONE} };
+static cpumask_t cbe_first_online_cpu = { CPU_BITS_NONE };
 
 static struct cbe_regs_map *cbe_find_map(struct device_node *np)
 {
 	int i;
 	struct device_node *tmp_np;
 
-	if (strcasecmp(np->type, "spe")) {
+	if (!of_node_is_type(np, "spe")) {
 		for (i = 0; i < cbe_regs_map_count; i++)
 			if (cbe_regs_maps[i].cpu_node == np ||
 			    cbe_regs_maps[i].be_node == np)
@@ -70,8 +71,8 @@ static struct cbe_regs_map *cbe_find_map(struct device_node *np)
 		tmp_np = tmp_np->parent;
 		/* on a correct devicetree we wont get up to root */
 		BUG_ON(!tmp_np);
-	} while (strcasecmp(tmp_np->type, "cpu") &&
-		 strcasecmp(tmp_np->type, "be"));
+	} while (!of_node_is_type(tmp_np, "cpu") ||
+		 !of_node_is_type(tmp_np, "be"));
 
 	np->data = cbe_find_map(tmp_np);
 
@@ -159,11 +160,12 @@ EXPORT_SYMBOL_GPL(cbe_cpu_to_node);
 
 u32 cbe_node_to_cpu(int node)
 {
-	return find_first_bit( (unsigned long *) &cbe_local_mask[node], sizeof(cpumask_t));
+	return cpumask_first(&cbe_local_mask[node]);
+
 }
 EXPORT_SYMBOL_GPL(cbe_node_to_cpu);
 
-static struct device_node *cbe_get_be_node(int cpu_id)
+static struct device_node *__init cbe_get_be_node(int cpu_id)
 {
 	struct device_node *np;
 
@@ -180,32 +182,48 @@ static struct device_node *cbe_get_be_node(int cpu_id)
 		if (WARN_ON_ONCE(!cpu_handle))
 			return np;
 
-		for (i=0; i<len; i++)
-			if (of_find_node_by_phandle(cpu_handle[i]) == of_get_cpu_node(cpu_id, NULL))
+		for (i = 0; i < len; i++) {
+			struct device_node *ch_np = of_find_node_by_phandle(cpu_handle[i]);
+			struct device_node *ci_np = of_get_cpu_node(cpu_id, NULL);
+
+			of_node_put(ch_np);
+			of_node_put(ci_np);
+
+			if (ch_np == ci_np)
 				return np;
+		}
 	}
 
 	return NULL;
 }
 
-void __init cbe_fill_regs_map(struct cbe_regs_map *map)
+static void __init cbe_fill_regs_map(struct cbe_regs_map *map)
 {
 	if(map->be_node) {
-		struct device_node *be, *np;
+		struct device_node *be, *np, *parent_np;
 
 		be = map->be_node;
 
-		for_each_node_by_type(np, "pervasive")
-			if (of_get_parent(np) == be)
+		for_each_node_by_type(np, "pervasive") {
+			parent_np = of_get_parent(np);
+			if (parent_np == be)
 				map->pmd_regs = of_iomap(np, 0);
+			of_node_put(parent_np);
+		}
 
-		for_each_node_by_type(np, "CBEA-Internal-Interrupt-Controller")
-			if (of_get_parent(np) == be)
+		for_each_node_by_type(np, "CBEA-Internal-Interrupt-Controller") {
+			parent_np = of_get_parent(np);
+			if (parent_np == be)
 				map->iic_regs = of_iomap(np, 2);
+			of_node_put(parent_np);
+		}
 
-		for_each_node_by_type(np, "mic-tm")
-			if (of_get_parent(np) == be)
+		for_each_node_by_type(np, "mic-tm") {
+			parent_np = of_get_parent(np);
+			if (parent_np == be)
 				map->mic_tm_regs = of_iomap(np, 0);
+			of_node_put(parent_np);
+		}
 	} else {
 		struct device_node *cpu;
 		/* That hack must die die die ! */
@@ -259,7 +277,8 @@ void __init cbe_regs_init(void)
 			of_node_put(cpu);
 			return;
 		}
-		map->cpu_node = cpu;
+		of_node_put(map->cpu_node);
+		map->cpu_node = of_node_get(cpu);
 
 		for_each_possible_cpu(i) {
 			struct cbe_thread_map *thread = &cbe_thread_map[i];
@@ -268,9 +287,9 @@ void __init cbe_regs_init(void)
 				thread->regs = map;
 				thread->cbe_id = cbe_id;
 				map->be_node = thread->be_node;
-				cpu_set(i, cbe_local_mask[cbe_id]);
+				cpumask_set_cpu(i, &cbe_local_mask[cbe_id]);
 				if(thread->thread_id == 0)
-					cpu_set(i, cbe_first_online_cpu);
+					cpumask_set_cpu(i, &cbe_first_online_cpu);
 			}
 		}
 

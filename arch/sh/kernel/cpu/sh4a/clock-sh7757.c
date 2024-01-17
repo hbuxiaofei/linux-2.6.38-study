@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * arch/sh/kernel/cpu/sh4/clock-sh7757.c
  *
  * SH7757 support for the clock framework
  *
  *  Copyright (C) 2009-2010  Renesas Solutions Corp.
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
  */
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -33,7 +30,7 @@ static unsigned long pll_recalc(struct clk *clk)
 	return clk->parent->rate * multiplier;
 }
 
-static struct clk_ops pll_clk_ops = {
+static struct sh_clk_ops pll_clk_ops = {
 	.recalc		= pll_recalc,
 };
 
@@ -77,9 +74,10 @@ struct clk div4_clks[DIV4_NR] = {
 
 #define MSTPCR0		0xffc80030
 #define MSTPCR1		0xffc80034
+#define MSTPCR2		0xffc10028
 
-enum { MSTP004, MSTP000, MSTP114, MSTP113, MSTP112,
-       MSTP111, MSTP110, MSTP103, MSTP102,
+enum { MSTP004, MSTP000, MSTP127, MSTP114, MSTP113, MSTP112,
+       MSTP111, MSTP110, MSTP103, MSTP102, MSTP220,
        MSTP_NR };
 
 static struct clk mstp_clks[MSTP_NR] = {
@@ -88,6 +86,7 @@ static struct clk mstp_clks[MSTP_NR] = {
 	[MSTP000] = SH_CLK_MSTP32(&div4_clks[DIV4_P], MSTPCR0, 0, 0),
 
 	/* MSTPCR1 */
+	[MSTP127] = SH_CLK_MSTP32(&div4_clks[DIV4_P], MSTPCR1, 27, 0),
 	[MSTP114] = SH_CLK_MSTP32(&div4_clks[DIV4_P], MSTPCR1, 14, 0),
 	[MSTP113] = SH_CLK_MSTP32(&div4_clks[DIV4_P], MSTPCR1, 13, 0),
 	[MSTP112] = SH_CLK_MSTP32(&div4_clks[DIV4_P], MSTPCR1, 12, 0),
@@ -95,9 +94,10 @@ static struct clk mstp_clks[MSTP_NR] = {
 	[MSTP110] = SH_CLK_MSTP32(&div4_clks[DIV4_P], MSTPCR1, 10, 0),
 	[MSTP103] = SH_CLK_MSTP32(&div4_clks[DIV4_P], MSTPCR1, 3, 0),
 	[MSTP102] = SH_CLK_MSTP32(&div4_clks[DIV4_P], MSTPCR1, 2, 0),
-};
 
-#define CLKDEV_CON_ID(_id, _clk) { .con_id = _id, .clk = _clk }
+	/* MSTPCR2 */
+	[MSTP220] = SH_CLK_MSTP32(&div4_clks[DIV4_P], MSTPCR2, 20, 0),
+};
 
 static struct clk_lookup lookups[] = {
 	/* main clocks */
@@ -110,36 +110,26 @@ static struct clk_lookup lookups[] = {
 	CLKDEV_CON_ID("cpu_clk", &div4_clks[DIV4_I]),
 
 	/* MSTP32 clocks */
-	CLKDEV_CON_ID("sdhi0", &mstp_clks[MSTP004]),
-	CLKDEV_CON_ID("riic", &mstp_clks[MSTP000]),
-	{
-		/* TMU0 */
-		.dev_id		= "sh_tmu.0",
-		.con_id		= "tmu_fck",
-		.clk		= &mstp_clks[MSTP113],
-	}, {
-		/* TMU1 */
-		.dev_id		= "sh_tmu.1",
-		.con_id		= "tmu_fck",
-		.clk		= &mstp_clks[MSTP114],
-	},
-	{
-		/* SCIF4 (But, ID is 2) */
-		.dev_id		= "sh-sci.2",
-		.con_id		= "sci_fck",
-		.clk		= &mstp_clks[MSTP112],
-	}, {
-		/* SCIF3 */
-		.dev_id		= "sh-sci.1",
-		.con_id		= "sci_fck",
-		.clk		= &mstp_clks[MSTP111],
-	}, {
-		/* SCIF2 */
-		.dev_id		= "sh-sci.0",
-		.con_id		= "sci_fck",
-		.clk		= &mstp_clks[MSTP110],
-	},
-	CLKDEV_CON_ID("usb0", &mstp_clks[MSTP102]),
+	CLKDEV_DEV_ID("sh_mobile_sdhi.0", &mstp_clks[MSTP004]),
+	CLKDEV_CON_ID("riic0", &mstp_clks[MSTP000]),
+	CLKDEV_CON_ID("riic1", &mstp_clks[MSTP000]),
+	CLKDEV_CON_ID("riic2", &mstp_clks[MSTP000]),
+	CLKDEV_CON_ID("riic3", &mstp_clks[MSTP000]),
+	CLKDEV_CON_ID("riic4", &mstp_clks[MSTP000]),
+	CLKDEV_CON_ID("riic5", &mstp_clks[MSTP000]),
+	CLKDEV_CON_ID("riic6", &mstp_clks[MSTP000]),
+	CLKDEV_CON_ID("riic7", &mstp_clks[MSTP000]),
+
+	CLKDEV_ICK_ID("fck", "sh-tmu.0", &mstp_clks[MSTP113]),
+	CLKDEV_ICK_ID("fck", "sh-tmu.1", &mstp_clks[MSTP114]),
+	CLKDEV_ICK_ID("fck", "sh-sci.2", &mstp_clks[MSTP112]),
+	CLKDEV_ICK_ID("fck", "sh-sci.1", &mstp_clks[MSTP111]),
+	CLKDEV_ICK_ID("fck", "sh-sci.0", &mstp_clks[MSTP110]),
+
+	CLKDEV_CON_ID("usb_fck", &mstp_clks[MSTP103]),
+	CLKDEV_DEV_ID("renesas_usbhs.0", &mstp_clks[MSTP102]),
+	CLKDEV_CON_ID("mmc0", &mstp_clks[MSTP220]),
+	CLKDEV_DEV_ID("rspi.2", &mstp_clks[MSTP127]),
 };
 
 int __init arch_clk_init(void)
@@ -148,14 +138,14 @@ int __init arch_clk_init(void)
 
 	for (i = 0; i < ARRAY_SIZE(clks); i++)
 		ret |= clk_register(clks[i]);
-	for (i = 0; i < ARRAY_SIZE(lookups); i++)
-		clkdev_add(&lookups[i]);
+
+	clkdev_add_table(lookups, ARRAY_SIZE(lookups));
 
 	if (!ret)
 		ret = sh_clk_div4_register(div4_clks, ARRAY_SIZE(div4_clks),
 					   &div4_table);
 	if (!ret)
-		ret = sh_clk_mstp32_register(mstp_clks, MSTP_NR);
+		ret = sh_clk_mstp_register(mstp_clks, MSTP_NR);
 
 	return ret;
 }

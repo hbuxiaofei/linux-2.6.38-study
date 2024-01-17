@@ -1,13 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * IP Payload Compression Protocol (IPComp) - RFC3173.
  *
  * Copyright (c) 2003 James Morris <jmorris@intercode.com.au>
  * Copyright (c) 2003-2008 Herbert Xu <herbert@gondor.apana.org.au>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
  *
  * Todo:
  *   - Tunable compression parameters.
@@ -45,19 +41,16 @@ static int ipcomp_decompress(struct xfrm_state *x, struct sk_buff *skb)
 	const int plen = skb->len;
 	int dlen = IPCOMP_SCRATCH_SIZE;
 	const u8 *start = skb->data;
-	const int cpu = get_cpu();
-	u8 *scratch = *per_cpu_ptr(ipcomp_scratches, cpu);
-	struct crypto_comp *tfm = *per_cpu_ptr(ipcd->tfms, cpu);
+	u8 *scratch = *this_cpu_ptr(ipcomp_scratches);
+	struct crypto_comp *tfm = *this_cpu_ptr(ipcd->tfms);
 	int err = crypto_comp_decompress(tfm, start, plen, scratch, &dlen);
 	int len;
 
 	if (err)
-		goto out;
+		return err;
 
-	if (dlen < (plen + sizeof(struct ip_comp_hdr))) {
-		err = -EINVAL;
-		goto out;
-	}
+	if (dlen < (plen + sizeof(struct ip_comp_hdr)))
+		return -EINVAL;
 
 	len = dlen - plen;
 	if (len > skb_tailroom(skb))
@@ -70,26 +63,27 @@ static int ipcomp_decompress(struct xfrm_state *x, struct sk_buff *skb)
 
 	while ((scratch += len, dlen -= len) > 0) {
 		skb_frag_t *frag;
+		struct page *page;
 
-		err = -EMSGSIZE;
 		if (WARN_ON(skb_shinfo(skb)->nr_frags >= MAX_SKB_FRAGS))
-			goto out;
+			return -EMSGSIZE;
 
 		frag = skb_shinfo(skb)->frags + skb_shinfo(skb)->nr_frags;
-		frag->page = alloc_page(GFP_ATOMIC);
+		page = alloc_page(GFP_ATOMIC);
 
-		err = -ENOMEM;
-		if (!frag->page)
-			goto out;
+		if (!page)
+			return -ENOMEM;
+
+		__skb_frag_set_page(frag, page);
 
 		len = PAGE_SIZE;
 		if (dlen < len)
 			len = dlen;
 
-		memcpy(page_address(frag->page), scratch, len);
+		skb_frag_off_set(frag, 0);
+		skb_frag_size_set(frag, len);
+		memcpy(skb_frag_address(frag), scratch, len);
 
-		frag->page_offset = 0;
-		frag->size = len;
 		skb->truesize += len;
 		skb->data_len += len;
 		skb->len += len;
@@ -97,11 +91,7 @@ static int ipcomp_decompress(struct xfrm_state *x, struct sk_buff *skb)
 		skb_shinfo(skb)->nr_frags++;
 	}
 
-	err = 0;
-
-out:
-	put_cpu();
-	return err;
+	return 0;
 }
 
 int ipcomp_input(struct xfrm_state *x, struct sk_buff *skb)
@@ -138,14 +128,14 @@ static int ipcomp_compress(struct xfrm_state *x, struct sk_buff *skb)
 	const int plen = skb->len;
 	int dlen = IPCOMP_SCRATCH_SIZE;
 	u8 *start = skb->data;
-	const int cpu = get_cpu();
-	u8 *scratch = *per_cpu_ptr(ipcomp_scratches, cpu);
-	struct crypto_comp *tfm = *per_cpu_ptr(ipcd->tfms, cpu);
+	struct crypto_comp *tfm;
+	u8 *scratch;
 	int err;
 
 	local_bh_disable();
+	scratch = *this_cpu_ptr(ipcomp_scratches);
+	tfm = *this_cpu_ptr(ipcd->tfms);
 	err = crypto_comp_compress(tfm, start, plen, scratch, &dlen);
-	local_bh_enable();
 	if (err)
 		goto out;
 
@@ -155,13 +145,13 @@ static int ipcomp_compress(struct xfrm_state *x, struct sk_buff *skb)
 	}
 
 	memcpy(start + sizeof(struct ip_comp_hdr), scratch, dlen);
-	put_cpu();
+	local_bh_enable();
 
 	pskb_trim(skb, dlen + sizeof(struct ip_comp_hdr));
 	return 0;
 
 out:
-	put_cpu();
+	local_bh_enable();
 	return err;
 }
 
@@ -213,12 +203,13 @@ static void ipcomp_free_scratches(void)
 		vfree(*per_cpu_ptr(scratches, i));
 
 	free_percpu(scratches);
+	ipcomp_scratches = NULL;
 }
 
 static void * __percpu *ipcomp_alloc_scratches(void)
 {
-	int i;
 	void * __percpu *scratches;
+	int i;
 
 	if (ipcomp_scratch_users++)
 		return ipcomp_scratches;
@@ -230,7 +221,9 @@ static void * __percpu *ipcomp_alloc_scratches(void)
 	ipcomp_scratches = scratches;
 
 	for_each_possible_cpu(i) {
-		void *scratch = vmalloc(IPCOMP_SCRATCH_SIZE);
+		void *scratch;
+
+		scratch = vmalloc_node(IPCOMP_SCRATCH_SIZE, cpu_to_node(i));
 		if (!scratch)
 			return NULL;
 		*per_cpu_ptr(scratches, i) = scratch;
@@ -249,7 +242,7 @@ static void ipcomp_free_tfms(struct crypto_comp * __percpu *tfms)
 			break;
 	}
 
-	WARN_ON(!pos);
+	WARN_ON(list_entry_is_head(pos, &ipcomp_tfms_list, list));
 
 	if (--pos->users)
 		return;
@@ -273,18 +266,16 @@ static struct crypto_comp * __percpu *ipcomp_alloc_tfms(const char *alg_name)
 	struct crypto_comp * __percpu *tfms;
 	int cpu;
 
-	/* This can be any valid CPU ID so we don't need locking. */
-	cpu = raw_smp_processor_id();
 
 	list_for_each_entry(pos, &ipcomp_tfms_list, list) {
 		struct crypto_comp *tfm;
 
-		tfms = pos->tfms;
-		tfm = *per_cpu_ptr(tfms, cpu);
+		/* This can be any valid CPU ID so we don't need locking. */
+		tfm = this_cpu_read(*pos->tfms);
 
 		if (!strcmp(crypto_comp_name(tfm), alg_name)) {
 			pos->users++;
-			return tfms;
+			return pos->tfms;
 		}
 	}
 
@@ -335,18 +326,22 @@ void ipcomp_destroy(struct xfrm_state *x)
 }
 EXPORT_SYMBOL_GPL(ipcomp_destroy);
 
-int ipcomp_init_state(struct xfrm_state *x)
+int ipcomp_init_state(struct xfrm_state *x, struct netlink_ext_ack *extack)
 {
 	int err;
 	struct ipcomp_data *ipcd;
 	struct xfrm_algo_desc *calg_desc;
 
 	err = -EINVAL;
-	if (!x->calg)
+	if (!x->calg) {
+		NL_SET_ERR_MSG(extack, "Missing required compression algorithm");
 		goto out;
+	}
 
-	if (x->encap)
+	if (x->encap) {
+		NL_SET_ERR_MSG(extack, "IPComp is not compatible with encapsulation");
 		goto out;
+	}
 
 	err = -ENOMEM;
 	ipcd = kzalloc(sizeof(*ipcd), GFP_KERNEL);

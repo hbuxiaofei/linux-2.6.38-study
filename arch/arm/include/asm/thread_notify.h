@@ -1,11 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  *  arch/arm/include/asm/thread_notify.h
  *
  *  Copyright (C) 2006 Russell King.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #ifndef ASMARM_THREAD_NOTIFY_H
 #define ASMARM_THREAD_NOTIFY_H
@@ -43,6 +40,7 @@ static inline void thread_notify(unsigned long rc, struct thread_info *thread)
 #define THREAD_NOTIFY_FLUSH	0
 #define THREAD_NOTIFY_EXIT	1
 #define THREAD_NOTIFY_SWITCH	2
+#define THREAD_NOTIFY_COPY	3
 
 #endif
 #endif

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /* OLPC machine specific definitions */
 
 #ifndef _ASM_X86_OLPC_H
@@ -8,7 +9,6 @@
 struct olpc_platform_t {
 	int flags;
 	uint32_t boardrev;
-	int ecver;
 };
 
 #define OLPC_F_PRESENT		0x01
@@ -20,7 +20,7 @@ extern struct olpc_platform_t olpc_platform_info;
 
 /*
  * OLPC board IDs contain the major build number within the mask 0x0ff0,
- * and the minor build number withing 0x000f.  Pre-builds have a minor
+ * and the minor build number within 0x000f.  Pre-builds have a minor
  * number less than 8, and normal builds start at 8.  For example, 0x0B10
  * is a PreB1, and 0x0C18 is a C1.
  */
@@ -76,33 +76,13 @@ static inline int olpc_has_dcon(void)
 
 #endif
 
+#ifdef CONFIG_OLPC_XO1_PM
+extern void do_olpc_suspend_lowlevel(void);
+extern void olpc_xo1_pm_wakeup_set(u16 value);
+extern void olpc_xo1_pm_wakeup_clear(u16 value);
+#endif
+
 extern int pci_olpc_init(void);
-
-/* EC related functions */
-
-extern int olpc_ec_cmd(unsigned char cmd, unsigned char *inbuf, size_t inlen,
-		unsigned char *outbuf, size_t outlen);
-
-extern int olpc_ec_mask_set(uint8_t bits);
-extern int olpc_ec_mask_unset(uint8_t bits);
-
-/* EC commands */
-
-#define EC_FIRMWARE_REV		0x08
-#define EC_WLAN_ENTER_RESET	0x35
-#define EC_WLAN_LEAVE_RESET	0x25
-
-/* SCI source values */
-
-#define EC_SCI_SRC_EMPTY	0x00
-#define EC_SCI_SRC_GAME		0x01
-#define EC_SCI_SRC_BATTERY	0x02
-#define EC_SCI_SRC_BATSOC	0x04
-#define EC_SCI_SRC_BATERR	0x08
-#define EC_SCI_SRC_EBOOK	0x10
-#define EC_SCI_SRC_WLAN		0x20
-#define EC_SCI_SRC_ACPWR	0x40
-#define EC_SCI_SRC_ALL		0x7F
 
 /* GPIO assignments */
 
@@ -116,7 +96,7 @@ extern int olpc_ec_mask_unset(uint8_t bits);
 #define OLPC_GPIO_SMB_CLK      14
 #define OLPC_GPIO_SMB_DATA     15
 #define OLPC_GPIO_WORKAUX	geode_gpio(24)
-#define OLPC_GPIO_LID		geode_gpio(26)
-#define OLPC_GPIO_ECSCI		geode_gpio(27)
+#define OLPC_GPIO_LID		26
+#define OLPC_GPIO_ECSCI		27
 
 #endif /* _ASM_X86_OLPC_H */

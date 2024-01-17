@@ -1,22 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Shared CARL9170 Header
  *
  * Firmware descriptor format
  *
- * Copyright 2009, 2010, Christian Lamparter <chunkeey@googlemail.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; see the file COPYING.  If not, see
- * http://www.gnu.org/licenses/.
+ * Copyright 2009-2011 Christian Lamparter <chunkeey@googlemail.com>
  */
 
 #ifndef __CARL9170_SHARED_FWDESC_H
@@ -69,6 +57,24 @@ enum carl9170fw_feature_list {
 	/* Firmware RX filter | CARL9170_CMD_RX_FILTER */
 	CARL9170FW_RX_FILTER,
 
+	/* Wake up on WLAN */
+	CARL9170FW_WOL,
+
+	/* Firmware supports PSM in the 5GHZ Band */
+	CARL9170FW_FIXED_5GHZ_PSM,
+
+	/* HW (ANI, CCA, MIB) tally counters */
+	CARL9170FW_HW_COUNTERS,
+
+	/* Firmware will pass BA when BARs are queued */
+	CARL9170FW_RX_BA_FILTER,
+
+	/* Firmware has support to write a byte at a time */
+	CARL9170FW_HAS_WREGB_CMD,
+
+	/* Pattern generator */
+	CARL9170FW_PATTERN_GENERATOR,
+
 	/* KEEP LAST */
 	__CARL9170FW_FEATURE_NUM
 };
@@ -78,6 +84,8 @@ enum carl9170fw_feature_list {
 #define FIX_MAGIC	"FIX\0"
 #define DBG_MAGIC	"DBG\0"
 #define CHK_MAGIC	"CHK\0"
+#define TXSQ_MAGIC	"TXSQ"
+#define WOL_MAGIC	"WOL\0"
 #define LAST_MAGIC	"LAST"
 
 #define CARL9170FW_SET_DAY(d) (((d) - 1) % 31)
@@ -88,8 +96,10 @@ enum carl9170fw_feature_list {
 #define CARL9170FW_GET_MONTH(m) ((((m) / 31) % 12) + 1)
 #define CARL9170FW_GET_YEAR(y) ((y) / 372 + 10)
 
+#define CARL9170FW_MAGIC_SIZE			4
+
 struct carl9170fw_desc_head {
-	u8	magic[4];
+	u8	magic[CARL9170FW_MAGIC_SIZE];
 	__le16 length;
 	u8 min_ver;
 	u8 cur_ver;
@@ -98,7 +108,7 @@ struct carl9170fw_desc_head {
 	(sizeof(struct carl9170fw_desc_head))
 
 #define CARL9170FW_OTUS_DESC_MIN_VER		6
-#define CARL9170FW_OTUS_DESC_CUR_VER		6
+#define CARL9170FW_OTUS_DESC_CUR_VER		7
 struct carl9170fw_otus_desc {
 	struct carl9170fw_desc_head head;
 	__le32 feature_set;
@@ -139,7 +149,7 @@ struct carl9170fw_fix_entry {
 
 struct carl9170fw_fix_desc {
 	struct carl9170fw_desc_head head;
-	struct carl9170fw_fix_entry data[0];
+	struct carl9170fw_fix_entry data[];
 } __packed;
 #define CARL9170FW_FIX_DESC_SIZE			\
 	(sizeof(struct carl9170fw_fix_desc))
@@ -170,6 +180,26 @@ struct carl9170fw_chk_desc {
 #define CARL9170FW_CHK_DESC_SIZE			\
 	(sizeof(struct carl9170fw_chk_desc))
 
+#define CARL9170FW_TXSQ_DESC_MIN_VER			1
+#define CARL9170FW_TXSQ_DESC_CUR_VER			1
+struct carl9170fw_txsq_desc {
+	struct carl9170fw_desc_head head;
+
+	__le32 seq_table_addr;
+} __packed;
+#define CARL9170FW_TXSQ_DESC_SIZE			\
+	(sizeof(struct carl9170fw_txsq_desc))
+
+#define CARL9170FW_WOL_DESC_MIN_VER			1
+#define CARL9170FW_WOL_DESC_CUR_VER			1
+struct carl9170fw_wol_desc {
+	struct carl9170fw_desc_head head;
+
+	__le32 supported_triggers;	/* CARL9170_WOL_ */
+} __packed;
+#define CARL9170FW_WOL_DESC_SIZE			\
+	(sizeof(struct carl9170fw_wol_desc))
+
 #define CARL9170FW_LAST_DESC_MIN_VER			1
 #define CARL9170FW_LAST_DESC_CUR_VER			2
 struct carl9170fw_last_desc {
@@ -189,8 +219,8 @@ struct carl9170fw_last_desc {
 	}
 
 static inline void carl9170fw_fill_desc(struct carl9170fw_desc_head *head,
-					 u8 magic[4], __le16 length,
-					 u8 min_ver, u8 cur_ver)
+					 u8 magic[CARL9170FW_MAGIC_SIZE],
+					 __le16 length, u8 min_ver, u8 cur_ver)
 {
 	head->magic[0] = magic[0];
 	head->magic[1] = magic[1];
@@ -204,7 +234,7 @@ static inline void carl9170fw_fill_desc(struct carl9170fw_desc_head *head,
 
 #define carl9170fw_for_each_hdr(desc, fw_desc)				\
 	for (desc = fw_desc;						\
-	     memcmp(desc->magic, LAST_MAGIC, 4) &&			\
+	     memcmp(desc->magic, LAST_MAGIC, CARL9170FW_MAGIC_SIZE) &&	\
 	     le16_to_cpu(desc->length) >= CARL9170FW_DESC_HEAD_SIZE &&	\
 	     le16_to_cpu(desc->length) < CARL9170FW_DESC_MAX_LENGTH;	\
 	     desc = (void *)((unsigned long)desc + le16_to_cpu(desc->length)))
@@ -218,8 +248,8 @@ static inline bool carl9170fw_supports(__le32 list, u8 feature)
 }
 
 static inline bool carl9170fw_desc_cmp(const struct carl9170fw_desc_head *head,
-				       const u8 descid[4], u16 min_len,
-				       u8 compatible_revision)
+				       const u8 descid[CARL9170FW_MAGIC_SIZE],
+				       u16 min_len, u8 compatible_revision)
 {
 	if (descid[0] == head->magic[0] && descid[1] == head->magic[1] &&
 	    descid[2] == head->magic[2] && descid[3] == head->magic[3] &&

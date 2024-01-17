@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * VIA AGPGART routines.
  */
@@ -43,16 +44,15 @@ static int via_fetch_size(void)
 
 static int via_configure(void)
 {
-	u32 temp;
 	struct aper_size_info_8 *current_size;
 
 	current_size = A_SIZE_8(agp_bridge->current_size);
 	/* aperture size */
 	pci_write_config_byte(agp_bridge->dev, VIA_APSIZE,
 			      current_size->size_value);
-	/* address to map too */
-	pci_read_config_dword(agp_bridge->dev, AGP_APBASE, &temp);
-	agp_bridge->gart_bus_addr = (temp & PCI_BASE_ADDRESS_MEM_MASK);
+	/* address to map to */
+	agp_bridge->gart_bus_addr = pci_bus_address(agp_bridge->dev,
+						    AGP_APERTURE_BAR);
 
 	/* GART control register */
 	pci_write_config_dword(agp_bridge->dev, VIA_GARTCTRL, 0x0000000f);
@@ -128,13 +128,10 @@ static int via_fetch_size_agp3(void)
 static int via_configure_agp3(void)
 {
 	u32 temp;
-	struct aper_size_info_16 *current_size;
 
-	current_size = A_SIZE_16(agp_bridge->current_size);
-
-	/* address to map too */
-	pci_read_config_dword(agp_bridge->dev, AGP_APBASE, &temp);
-	agp_bridge->gart_bus_addr = (temp & PCI_BASE_ADDRESS_MEM_MASK);
+	/* address to map to */
+	agp_bridge->gart_bus_addr = pci_bus_address(agp_bridge->dev,
+						    AGP_APERTURE_BAR);
 
 	/* attbase - aperture GATT base */
 	pci_write_config_dword(agp_bridge->dev, VIA_AGP3_ATTBASE,
@@ -224,7 +221,7 @@ static const struct agp_bridge_driver via_driver = {
 	.agp_type_to_mask_type  = agp_generic_type_to_mask_type,
 };
 
-static struct agp_device_ids via_agp_device_ids[] __devinitdata =
+static struct agp_device_ids via_agp_device_ids[] =
 {
 	{
 		.device_id	= PCI_DEVICE_ID_VIA_82C597_0,
@@ -400,7 +397,7 @@ static struct agp_device_ids via_agp_device_ids[] __devinitdata =
 	 * the traditional AGP which resides only in chipset. AGP is used
 	 * by 3D driver which wasn't available for the VT3336 and VT3364
 	 * generation until now.  Unfortunately, by testing, VT3364 works
-	 * but VT3336 doesn't. - explaination from via, just leave this as
+	 * but VT3336 doesn't. - explanation from via, just leave this as
 	 * as a placeholder to avoid future patches adding it back in.
 	 */
 #if 0
@@ -438,8 +435,7 @@ static void check_via_agp3 (struct agp_bridge_data *bridge)
 }
 
 
-static int __devinit agp_via_probe(struct pci_dev *pdev,
-				   const struct pci_device_id *ent)
+static int agp_via_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
 	struct agp_device_ids *devs = via_agp_device_ids;
 	struct agp_bridge_data *bridge;
@@ -485,7 +481,7 @@ static int __devinit agp_via_probe(struct pci_dev *pdev,
 	return agp_add_bridge(bridge);
 }
 
-static void __devexit agp_via_remove(struct pci_dev *pdev)
+static void agp_via_remove(struct pci_dev *pdev)
 {
 	struct agp_bridge_data *bridge = pci_get_drvdata(pdev);
 
@@ -493,22 +489,11 @@ static void __devexit agp_via_remove(struct pci_dev *pdev)
 	agp_put_bridge(bridge);
 }
 
-#ifdef CONFIG_PM
+#define agp_via_suspend NULL
 
-static int agp_via_suspend(struct pci_dev *pdev, pm_message_t state)
+static int __maybe_unused agp_via_resume(struct device *dev)
 {
-	pci_save_state (pdev);
-	pci_set_power_state (pdev, PCI_D3hot);
-
-	return 0;
-}
-
-static int agp_via_resume(struct pci_dev *pdev)
-{
-	struct agp_bridge_data *bridge = pci_get_drvdata(pdev);
-
-	pci_set_power_state (pdev, PCI_D0);
-	pci_restore_state(pdev);
+	struct agp_bridge_data *bridge = dev_get_drvdata(dev);
 
 	if (bridge->driver == &via_agp3_driver)
 		return via_configure_agp3();
@@ -517,8 +502,6 @@ static int agp_via_resume(struct pci_dev *pdev)
 
 	return 0;
 }
-
-#endif /* CONFIG_PM */
 
 /* must be the same order as name table above */
 static const struct pci_device_id agp_via_pci_table[] = {
@@ -568,16 +551,14 @@ static const struct pci_device_id agp_via_pci_table[] = {
 
 MODULE_DEVICE_TABLE(pci, agp_via_pci_table);
 
+static SIMPLE_DEV_PM_OPS(agp_via_pm_ops, agp_via_suspend, agp_via_resume);
 
 static struct pci_driver agp_via_pci_driver = {
 	.name		= "agpgart-via",
 	.id_table	= agp_via_pci_table,
 	.probe		= agp_via_probe,
 	.remove		= agp_via_remove,
-#ifdef CONFIG_PM
-	.suspend	= agp_via_suspend,
-	.resume		= agp_via_resume,
-#endif
+	.driver.pm      = &agp_via_pm_ops,
 };
 
 
@@ -597,4 +578,4 @@ module_init(agp_via_init);
 module_exit(agp_via_cleanup);
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Dave Jones <davej@redhat.com>");
+MODULE_AUTHOR("Dave Jones");

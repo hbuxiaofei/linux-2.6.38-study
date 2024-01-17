@@ -1,11 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * linux/arch/arm/common/locomo.c
  *
  * Sharp LoCoMo support
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  * This file contains all generic LoCoMo support.
  *
@@ -26,7 +23,6 @@
 #include <linux/spinlock.h>
 #include <linux/io.h>
 
-#include <mach/hardware.h>
 #include <asm/irq.h>
 #include <asm/mach/irq.h>
 
@@ -138,9 +134,9 @@ static struct locomo_dev_info locomo_devices[] = {
 	},
 };
 
-static void locomo_handler(unsigned int irq, struct irq_desc *desc)
+static void locomo_handler(struct irq_desc *desc)
 {
-	struct locomo *lchip = get_irq_chip_data(irq);
+	struct locomo *lchip = irq_desc_get_handler_data(desc);
 	int req, i;
 
 	/* Acknowledge the parent IRQ */
@@ -150,6 +146,8 @@ static void locomo_handler(unsigned int irq, struct irq_desc *desc)
 	req = locomo_readl(lchip->base + LOCOMO_ICR) & 0x0f00;
 
 	if (req) {
+		unsigned int irq;
+
 		/* generate the next interrupt(s) */
 		irq = lchip->irq_base;
 		for (i = 0; i <= 3; i++, irq++) {
@@ -197,16 +195,14 @@ static void locomo_setup_irq(struct locomo *lchip)
 	/*
 	 * Install handler for IRQ_LOCOMO_HW.
 	 */
-	set_irq_type(lchip->irq, IRQ_TYPE_EDGE_FALLING);
-	set_irq_chip_data(lchip->irq, lchip);
-	set_irq_chained_handler(lchip->irq, locomo_handler);
+	irq_set_irq_type(lchip->irq, IRQ_TYPE_EDGE_FALLING);
+	irq_set_chained_handler_and_data(lchip->irq, locomo_handler, lchip);
 
 	/* Install handlers for IRQ_LOCOMO_* */
 	for ( ; irq <= lchip->irq_base + 3; irq++) {
-		set_irq_chip(irq, &locomo_chip);
-		set_irq_chip_data(irq, lchip);
-		set_irq_handler(irq, handle_level_irq);
-		set_irq_flags(irq, IRQF_VALID | IRQF_PROBE);
+		irq_set_chip_and_handler(irq, &locomo_chip, handle_level_irq);
+		irq_set_chip_data(irq, lchip);
+		irq_clear_status_flags(irq, IRQ_NOREQUEST | IRQ_NOPROBE);
 	}
 }
 
@@ -476,8 +472,7 @@ static void __locomo_remove(struct locomo *lchip)
 	device_for_each_child(lchip->dev, NULL, locomo_remove_child);
 
 	if (lchip->irq != NO_IRQ) {
-		set_irq_chained_handler(lchip->irq, NULL);
-		set_irq_data(lchip->irq, NULL);
+		irq_set_chained_handler_and_data(lchip->irq, NULL, NULL);
 	}
 
 	iounmap(lchip->base);
@@ -827,28 +822,6 @@ static int locomo_match(struct device *_dev, struct device_driver *_drv)
 	return dev->devid == drv->devid;
 }
 
-static int locomo_bus_suspend(struct device *dev, pm_message_t state)
-{
-	struct locomo_dev *ldev = LOCOMO_DEV(dev);
-	struct locomo_driver *drv = LOCOMO_DRV(dev->driver);
-	int ret = 0;
-
-	if (drv && drv->suspend)
-		ret = drv->suspend(ldev, state);
-	return ret;
-}
-
-static int locomo_bus_resume(struct device *dev)
-{
-	struct locomo_dev *ldev = LOCOMO_DEV(dev);
-	struct locomo_driver *drv = LOCOMO_DRV(dev->driver);
-	int ret = 0;
-
-	if (drv && drv->resume)
-		ret = drv->resume(ldev);
-	return ret;
-}
-
 static int locomo_bus_probe(struct device *dev)
 {
 	struct locomo_dev *ldev = LOCOMO_DEV(dev);
@@ -860,15 +833,13 @@ static int locomo_bus_probe(struct device *dev)
 	return ret;
 }
 
-static int locomo_bus_remove(struct device *dev)
+static void locomo_bus_remove(struct device *dev)
 {
 	struct locomo_dev *ldev = LOCOMO_DEV(dev);
 	struct locomo_driver *drv = LOCOMO_DRV(dev->driver);
-	int ret = 0;
 
 	if (drv->remove)
-		ret = drv->remove(ldev);
-	return ret;
+		drv->remove(ldev);
 }
 
 struct bus_type locomo_bus_type = {
@@ -876,8 +847,6 @@ struct bus_type locomo_bus_type = {
 	.match		= locomo_match,
 	.probe		= locomo_bus_probe,
 	.remove		= locomo_bus_remove,
-	.suspend	= locomo_bus_suspend,
-	.resume		= locomo_bus_resume,
 };
 
 int locomo_driver_register(struct locomo_driver *driver)

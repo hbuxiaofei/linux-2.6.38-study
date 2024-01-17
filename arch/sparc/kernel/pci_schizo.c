@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /* pci_schizo.c: SCHIZO/TOMATILLO specific PCI controller support.
  *
  * Copyright (C) 2001, 2002, 2003, 2007, 2008 David S. Miller (davem@davemloft.net)
@@ -8,8 +9,10 @@
 #include <linux/pci.h>
 #include <linux/init.h>
 #include <linux/slab.h>
+#include <linux/export.h>
 #include <linux/interrupt.h>
 #include <linux/of_device.h>
+#include <linux/numa.h>
 
 #include <asm/iommu.h>
 #include <asm/irq.h>
@@ -264,7 +267,7 @@ static void schizo_check_iommu_error_pbm(struct pci_pbm_info *pbm,
 		default:
 			type_string = "ECC Error";
 			break;
-		};
+		}
 		printk("%s: IOMMU Error, type[%s]\n",
 		       pbm->name, type_string);
 
@@ -319,7 +322,7 @@ static void schizo_check_iommu_error_pbm(struct pci_pbm_info *pbm,
 			default:
 				type_string = "ECC Error";
 				break;
-			};
+			}
 			printk("%s: IOMMU TAG(%d)[error(%s) ctx(%x) wr(%d) str(%d) "
 			       "sz(%dK) vpg(%08lx)]\n",
 			       pbm->name, i, type_string,
@@ -580,7 +583,7 @@ static irqreturn_t schizo_pcierr_intr_other(struct pci_pbm_info *pbm)
 {
 	unsigned long csr_reg, csr, csr_error_bits;
 	irqreturn_t ret = IRQ_NONE;
-	u16 stat;
+	u32 stat;
 
 	csr_reg = pbm->pbm_regs + SCHIZO_PCI_CTRL;
 	csr = upa_readq(csr_reg);
@@ -616,7 +619,7 @@ static irqreturn_t schizo_pcierr_intr_other(struct pci_pbm_info *pbm)
 			       pbm->name);
 		ret = IRQ_HANDLED;
 	}
-	pci_read_config_word(pbm->pci_bus->self, PCI_STATUS, &stat);
+	pbm->pci_ops->read(pbm->pci_bus, 0, PCI_STATUS, 2, &stat);
 	if (stat & (PCI_STATUS_PARITY |
 		    PCI_STATUS_SIG_TARGET_ABORT |
 		    PCI_STATUS_REC_TARGET_ABORT |
@@ -624,7 +627,7 @@ static irqreturn_t schizo_pcierr_intr_other(struct pci_pbm_info *pbm)
 		    PCI_STATUS_SIG_SYSTEM_ERROR)) {
 		printk("%s: PCI bus error, PCI_STATUS[%04x]\n",
 		       pbm->name, stat);
-		pci_write_config_word(pbm->pci_bus->self, PCI_STATUS, 0xffff);
+		pbm->pci_ops->write(pbm->pci_bus, 0, PCI_STATUS, 2, 0xffff);
 		ret = IRQ_HANDLED;
 	}
 	return ret;
@@ -1063,8 +1066,7 @@ static void pbm_config_busmastering(struct pci_pbm_info *pbm)
 	pci_config_write8(addr, 64);
 }
 
-static void __devinit schizo_scan_bus(struct pci_pbm_info *pbm,
-				      struct device *parent)
+static void schizo_scan_bus(struct pci_pbm_info *pbm, struct device *parent)
 {
 	pbm_config_busmastering(pbm);
 	pbm->is_66mhz_capable =
@@ -1306,14 +1308,14 @@ static void schizo_pbm_hw_init(struct pci_pbm_info *pbm)
 	}
 }
 
-static int __devinit schizo_pbm_init(struct pci_pbm_info *pbm,
-				     struct platform_device *op, u32 portid,
-				     int chip_type)
+static int schizo_pbm_init(struct pci_pbm_info *pbm,
+			   struct platform_device *op, u32 portid,
+			   int chip_type)
 {
 	const struct linux_prom64_registers *regs;
 	struct device_node *dp = op->dev.of_node;
 	const char *chipset_name;
-	int is_pbm_a, err;
+	int err;
 
 	switch (chip_type) {
 	case PBM_CHIP_TYPE_TOMATILLO:
@@ -1328,7 +1330,7 @@ static int __devinit schizo_pbm_init(struct pci_pbm_info *pbm,
 	default:
 		chipset_name = "SCHIZO";
 		break;
-	};
+	}
 
 	/* For SCHIZO, three OBP regs:
 	 * 1) PBM controller regs
@@ -1343,12 +1345,10 @@ static int __devinit schizo_pbm_init(struct pci_pbm_info *pbm,
 	 */
 	regs = of_get_property(dp, "reg", NULL);
 
-	is_pbm_a = ((regs[0].phys_addr & 0x00700000) == 0x00600000);
-
 	pbm->next = pci_pbm_root;
 	pci_pbm_root = pbm;
 
-	pbm->numa_node = -1;
+	pbm->numa_node = NUMA_NO_NODE;
 
 	pbm->pci_ops = &sun4u_pci_ops;
 	pbm->config_space_reg_bits = 8;
@@ -1401,8 +1401,7 @@ static inline int portid_compare(u32 x, u32 y, int chip_type)
 	return (x == y);
 }
 
-static struct pci_pbm_info * __devinit schizo_find_sibling(u32 portid,
-							   int chip_type)
+static struct pci_pbm_info *schizo_find_sibling(u32 portid, int chip_type)
 {
 	struct pci_pbm_info *pbm;
 
@@ -1413,7 +1412,7 @@ static struct pci_pbm_info * __devinit schizo_find_sibling(u32 portid,
 	return NULL;
 }
 
-static int __devinit __schizo_init(struct platform_device *op, unsigned long chip_type)
+static int __schizo_init(struct platform_device *op, unsigned long chip_type)
 {
 	struct device_node *dp = op->dev.of_node;
 	struct pci_pbm_info *pbm;
@@ -1460,10 +1459,15 @@ out_err:
 	return err;
 }
 
-static int __devinit schizo_probe(struct platform_device *op,
-				  const struct of_device_id *match)
+static const struct of_device_id schizo_match[];
+static int schizo_probe(struct platform_device *op)
 {
-	return __schizo_init(op, (unsigned long) match->data);
+	const struct of_device_id *match;
+
+	match = of_match_device(schizo_match, &op->dev);
+	if (!match)
+		return -EINVAL;
+	return __schizo_init(op, (unsigned long)match->data);
 }
 
 /* The ordering of this table is very important.  Some Tomatillo
@@ -1471,7 +1475,7 @@ static int __devinit schizo_probe(struct platform_device *op,
  * and pci108e,8001.  So list the chips in reverse chronological
  * order.
  */
-static struct of_device_id __initdata schizo_match[] = {
+static const struct of_device_id schizo_match[] = {
 	{
 		.name = "pci",
 		.compatible = "pci108e,a801",
@@ -1490,10 +1494,9 @@ static struct of_device_id __initdata schizo_match[] = {
 	{},
 };
 
-static struct of_platform_driver schizo_driver = {
+static struct platform_driver schizo_driver = {
 	.driver = {
 		.name = DRIVER_NAME,
-		.owner = THIS_MODULE,
 		.of_match_table = schizo_match,
 	},
 	.probe		= schizo_probe,
@@ -1501,7 +1504,7 @@ static struct of_platform_driver schizo_driver = {
 
 static int __init schizo_init(void)
 {
-	return of_register_platform_driver(&schizo_driver);
+	return platform_driver_register(&schizo_driver);
 }
 
 subsys_initcall(schizo_init);

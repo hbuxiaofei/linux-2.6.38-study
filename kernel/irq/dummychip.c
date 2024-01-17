@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 1992, 1998-2006 Linus Torvalds, Ingo Molnar
  * Copyright (C) 2005-2006, Thomas Gleixner, Russell King
@@ -6,12 +7,13 @@
  */
 #include <linux/interrupt.h>
 #include <linux/irq.h>
+#include <linux/export.h>
 
 #include "internals.h"
 
 /*
  * What should we do if we get a hw irq event on an illegal vector?
- * Each architecture has to answer this themself.
+ * Each architecture has to answer this themselves.
  */
 static void ack_bad(struct irq_data *data)
 {
@@ -31,13 +33,6 @@ static unsigned int noop_ret(struct irq_data *data)
 	return 0;
 }
 
-#ifndef CONFIG_GENERIC_HARDIRQS_NO_DEPRECATED
-static void compat_noop(unsigned int irq) { }
-#define END_INIT .end = compat_noop
-#else
-#define END_INIT
-#endif
-
 /*
  * Generic no controller implementation
  */
@@ -48,7 +43,7 @@ struct irq_chip no_irq_chip = {
 	.irq_enable	= noop,
 	.irq_disable	= noop,
 	.irq_ack	= ack_bad,
-	END_INIT
+	.flags		= IRQCHIP_SKIP_SET_WAKE,
 };
 
 /*
@@ -64,5 +59,6 @@ struct irq_chip dummy_irq_chip = {
 	.irq_ack	= noop,
 	.irq_mask	= noop,
 	.irq_unmask	= noop,
-	END_INIT
+	.flags		= IRQCHIP_SKIP_SET_WAKE,
 };
+EXPORT_SYMBOL_GPL(dummy_irq_chip);

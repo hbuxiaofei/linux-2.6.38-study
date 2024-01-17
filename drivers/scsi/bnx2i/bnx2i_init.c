@@ -1,15 +1,17 @@
-/* bnx2i.c: Broadcom NetXtreme II iSCSI driver.
+/* bnx2i.c: QLogic NetXtreme II iSCSI driver.
  *
- * Copyright (c) 2006 - 2010 Broadcom Corporation
+ * Copyright (c) 2006 - 2013 Broadcom Corporation
  * Copyright (c) 2007, 2008 Red Hat, Inc.  All rights reserved.
  * Copyright (c) 2007, 2008 Mike Christie
+ * Copyright (c) 2014, QLogic Corporation
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation.
  *
  * Written by: Anil Veerabhadrappa (anilgv@broadcom.com)
- * Maintained by: Eddie Wai (eddie.wai@broadcom.com)
+ * Previously Maintained by: Eddie Wai (eddie.wai@broadcom.com)
+ * Maintained by: QLogic-Storage-Upstream@qlogic.com
  */
 
 #include "bnx2i.h"
@@ -18,19 +20,19 @@ static struct list_head adapter_list = LIST_HEAD_INIT(adapter_list);
 static u32 adapter_count;
 
 #define DRV_MODULE_NAME		"bnx2i"
-#define DRV_MODULE_VERSION	"2.6.2.2"
-#define DRV_MODULE_RELDATE	"Nov 23, 2010"
+#define DRV_MODULE_VERSION	"2.7.10.1"
+#define DRV_MODULE_RELDATE	"Jul 16, 2014"
 
-static char version[] __devinitdata =
-		"Broadcom NetXtreme II iSCSI Driver " DRV_MODULE_NAME \
+static char version[] =
+		"QLogic NetXtreme II iSCSI Driver " DRV_MODULE_NAME \
 		" v" DRV_MODULE_VERSION " (" DRV_MODULE_RELDATE ")\n";
 
 
 MODULE_AUTHOR("Anil Veerabhadrappa <anilgv@broadcom.com> and "
 	      "Eddie Wai <eddie.wai@broadcom.com>");
 
-MODULE_DESCRIPTION("Broadcom NetXtreme II BCM5706/5708/5709/57710/57711"
-		   " iSCSI Driver");
+MODULE_DESCRIPTION("QLogic NetXtreme II BCM5706/5708/5709/57710/57711/57712"
+		   "/57800/57810/57840 iSCSI Driver");
 MODULE_LICENSE("GPL");
 MODULE_VERSION(DRV_MODULE_VERSION);
 
@@ -40,7 +42,7 @@ unsigned int event_coal_min = 24;
 module_param(event_coal_min, int, 0664);
 MODULE_PARM_DESC(event_coal_min, "Event Coalescing Minimum Commands");
 
-unsigned int event_coal_div = 1;
+unsigned int event_coal_div = 2;
 module_param(event_coal_div, int, 0664);
 MODULE_PARM_DESC(event_coal_div, "Event Coalescing Divide Factor");
 
@@ -49,11 +51,11 @@ module_param(en_tcp_dack, int, 0664);
 MODULE_PARM_DESC(en_tcp_dack, "Enable TCP Delayed ACK");
 
 unsigned int error_mask1 = 0x00;
-module_param(error_mask1, int, 0664);
+module_param(error_mask1, uint, 0664);
 MODULE_PARM_DESC(error_mask1, "Config FW iSCSI Error Mask #1");
 
 unsigned int error_mask2 = 0x00;
-module_param(error_mask2, int, 0664);
+module_param(error_mask2, uint, 0664);
 MODULE_PARM_DESC(error_mask2, "Config FW iSCSI Error Mask #2");
 
 unsigned int sq_size;
@@ -66,35 +68,38 @@ MODULE_PARM_DESC(rq_size, "Configure RQ size");
 
 u64 iscsi_error_mask = 0x00;
 
+DEFINE_PER_CPU(struct bnx2i_percpu_s, bnx2i_percpu);
 
 /**
  * bnx2i_identify_device - identifies NetXtreme II device type
  * @hba: 		Adapter structure pointer
+ * @dev:		Corresponding cnic device
  *
  * This function identifies the NX2 device type and sets appropriate
  *	queue mailbox register access method, 5709 requires driver to
  *	access MBOX regs using *bin* mode
  */
-void bnx2i_identify_device(struct bnx2i_hba *hba)
+void bnx2i_identify_device(struct bnx2i_hba *hba, struct cnic_dev *dev)
 {
 	hba->cnic_dev_type = 0;
-	if ((hba->pci_did == PCI_DEVICE_ID_NX2_5706) ||
-	    (hba->pci_did == PCI_DEVICE_ID_NX2_5706S))
-		set_bit(BNX2I_NX2_DEV_5706, &hba->cnic_dev_type);
-	else if ((hba->pci_did == PCI_DEVICE_ID_NX2_5708) ||
-	    (hba->pci_did == PCI_DEVICE_ID_NX2_5708S))
-		set_bit(BNX2I_NX2_DEV_5708, &hba->cnic_dev_type);
-	else if ((hba->pci_did == PCI_DEVICE_ID_NX2_5709) ||
-	    (hba->pci_did == PCI_DEVICE_ID_NX2_5709S)) {
-		set_bit(BNX2I_NX2_DEV_5709, &hba->cnic_dev_type);
-		hba->mail_queue_access = BNX2I_MQ_BIN_MODE;
-	} else if (hba->pci_did == PCI_DEVICE_ID_NX2_57710 ||
-		   hba->pci_did == PCI_DEVICE_ID_NX2_57711 ||
-		   hba->pci_did == PCI_DEVICE_ID_NX2_57711E)
+	if (test_bit(CNIC_F_BNX2_CLASS, &dev->flags)) {
+		if (hba->pci_did == PCI_DEVICE_ID_NX2_5706 ||
+		    hba->pci_did == PCI_DEVICE_ID_NX2_5706S) {
+			set_bit(BNX2I_NX2_DEV_5706, &hba->cnic_dev_type);
+		} else if (hba->pci_did == PCI_DEVICE_ID_NX2_5708 ||
+		    hba->pci_did == PCI_DEVICE_ID_NX2_5708S) {
+			set_bit(BNX2I_NX2_DEV_5708, &hba->cnic_dev_type);
+		} else if (hba->pci_did == PCI_DEVICE_ID_NX2_5709 ||
+		    hba->pci_did == PCI_DEVICE_ID_NX2_5709S) {
+			set_bit(BNX2I_NX2_DEV_5709, &hba->cnic_dev_type);
+			hba->mail_queue_access = BNX2I_MQ_BIN_MODE;
+		}
+	} else if (test_bit(CNIC_F_BNX2X_CLASS, &dev->flags)) {
 		set_bit(BNX2I_NX2_DEV_57710, &hba->cnic_dev_type);
-	else
+	} else {
 		printk(KERN_ALERT "bnx2i: unknown device, 0x%x\n",
 				  hba->pci_did);
+	}
 }
 
 
@@ -161,8 +166,14 @@ void bnx2i_start(void *handle)
 	struct bnx2i_hba *hba = handle;
 	int i = HZ;
 
+	/* On some bnx2x devices, it is possible that iSCSI is no
+	 * longer supported after firmware is downloaded.  In that
+	 * case, the iscsi_init_msg will return failure.
+	 */
+
 	bnx2i_send_fw_iscsi_init_msg(hba);
-	while (!test_bit(ADAPTER_STATE_UP, &hba->adapter_state) && i--)
+	while (!test_bit(ADAPTER_STATE_UP, &hba->adapter_state) &&
+	       !test_bit(ADAPTER_STATE_INIT_FAILED, &hba->adapter_state) && i--)
 		msleep(BNX2I_INIT_POLL_TIME);
 }
 
@@ -227,7 +238,7 @@ void bnx2i_stop(void *handle)
 	wait_event_interruptible_timeout(hba->eh_wait,
 					 (list_empty(&hba->ep_ofld_list) &&
 					 list_empty(&hba->ep_destroy_list)),
-					 10 * HZ);
+					 2 * HZ);
 	/* Wait for all endpoints to be torn down, Chip will be reset once
 	 *  control returns to network driver. So it is required to cleanup and
 	 * release all connection resources before returning from this routine.
@@ -264,6 +275,13 @@ static int bnx2i_init_one(struct bnx2i_hba *hba, struct cnic_dev *cnic)
 	int rc;
 
 	mutex_lock(&bnx2i_dev_lock);
+	if (!cnic->max_iscsi_conn) {
+		printk(KERN_ALERT "bnx2i: dev %s does not support "
+			"iSCSI\n", hba->netdev->name);
+		rc = -EOPNOTSUPP;
+		goto out;
+	}
+
 	hba->cnic = cnic;
 	rc = cnic->register_device(cnic, CNIC_ULP_ISCSI, hba);
 	if (!rc) {
@@ -281,6 +299,7 @@ static int bnx2i_init_one(struct bnx2i_hba *hba, struct cnic_dev *cnic)
 	else
 		printk(KERN_ERR "bnx2i dev reg, unknown error, %d\n", rc);
 
+out:
 	mutex_unlock(&bnx2i_dev_lock);
 
 	return rc;
@@ -345,6 +364,99 @@ void bnx2i_ulp_exit(struct cnic_dev *dev)
 
 
 /**
+ * bnx2i_get_stats - Retrieve various statistic from iSCSI offload
+ * @handle:	bnx2i_hba
+ *
+ * function callback exported via bnx2i - cnic driver interface to
+ *      retrieve various iSCSI offload related statistics.
+ */
+int bnx2i_get_stats(void *handle)
+{
+	struct bnx2i_hba *hba = handle;
+	struct iscsi_stats_info *stats;
+
+	if (!hba)
+		return -EINVAL;
+
+	stats = (struct iscsi_stats_info *)hba->cnic->stats_addr;
+
+	if (!stats)
+		return -ENOMEM;
+
+	strlcpy(stats->version, DRV_MODULE_VERSION, sizeof(stats->version));
+	memcpy(stats->mac_add1 + 2, hba->cnic->mac_addr, ETH_ALEN);
+
+	stats->max_frame_size = hba->netdev->mtu;
+	stats->txq_size = hba->max_sqes;
+	stats->rxq_size = hba->max_cqes;
+
+	stats->txq_avg_depth = 0;
+	stats->rxq_avg_depth = 0;
+
+	GET_STATS_64(hba, stats, rx_pdus);
+	GET_STATS_64(hba, stats, rx_bytes);
+
+	GET_STATS_64(hba, stats, tx_pdus);
+	GET_STATS_64(hba, stats, tx_bytes);
+
+	return 0;
+}
+
+
+/**
+ * bnx2i_cpu_online - Create a receive thread for an online CPU
+ *
+ * @cpu:	cpu index for the online cpu
+ */
+static int bnx2i_cpu_online(unsigned int cpu)
+{
+	struct bnx2i_percpu_s *p;
+	struct task_struct *thread;
+
+	p = &per_cpu(bnx2i_percpu, cpu);
+
+	thread = kthread_create_on_node(bnx2i_percpu_io_thread, (void *)p,
+					cpu_to_node(cpu),
+					"bnx2i_thread/%d", cpu);
+	if (IS_ERR(thread))
+		return PTR_ERR(thread);
+
+	/* bind thread to the cpu */
+	kthread_bind(thread, cpu);
+	p->iothread = thread;
+	wake_up_process(thread);
+	return 0;
+}
+
+static int bnx2i_cpu_offline(unsigned int cpu)
+{
+	struct bnx2i_percpu_s *p;
+	struct task_struct *thread;
+	struct bnx2i_work *work, *tmp;
+
+	/* Prevent any new work from being queued for this CPU */
+	p = &per_cpu(bnx2i_percpu, cpu);
+	spin_lock_bh(&p->p_work_lock);
+	thread = p->iothread;
+	p->iothread = NULL;
+
+	/* Free all work in the list */
+	list_for_each_entry_safe(work, tmp, &p->work_list, list) {
+		list_del_init(&work->list);
+		bnx2i_process_scsi_cmd_resp(work->session,
+					    work->bnx2i_conn, &work->cqe);
+		kfree(work);
+	}
+
+	spin_unlock_bh(&p->p_work_lock);
+	if (thread)
+		kthread_stop(thread);
+	return 0;
+}
+
+static enum cpuhp_state bnx2i_online_state;
+
+/**
  * bnx2i_mod_init - module init entry point
  *
  * initialize any driver wide global data structures such as endpoint pool,
@@ -354,13 +466,13 @@ void bnx2i_ulp_exit(struct cnic_dev *dev)
 static int __init bnx2i_mod_init(void)
 {
 	int err;
+	unsigned cpu = 0;
+	struct bnx2i_percpu_s *p;
 
 	printk(KERN_INFO "%s", version);
 
 	if (sq_size && !is_power_of_2(sq_size))
 		sq_size = roundup_pow_of_two(sq_size);
-
-	mutex_init(&bnx2i_dev_lock);
 
 	bnx2i_scsi_xport_template =
 			iscsi_register_transport(&bnx2i_iscsi_transport);
@@ -376,8 +488,23 @@ static int __init bnx2i_mod_init(void)
 		goto unreg_xport;
 	}
 
+	/* Create percpu kernel threads to handle iSCSI I/O completions */
+	for_each_possible_cpu(cpu) {
+		p = &per_cpu(bnx2i_percpu, cpu);
+		INIT_LIST_HEAD(&p->work_list);
+		spin_lock_init(&p->p_work_lock);
+		p->iothread = NULL;
+	}
+
+	err = cpuhp_setup_state(CPUHP_AP_ONLINE_DYN, "scsi/bnx2i:online",
+				bnx2i_cpu_online, bnx2i_cpu_offline);
+	if (err < 0)
+		goto unreg_driver;
+	bnx2i_online_state = err;
 	return 0;
 
+unreg_driver:
+	cnic_unregister_driver(CNIC_ULP_ISCSI);
 unreg_xport:
 	iscsi_unregister_transport(&bnx2i_iscsi_transport);
 out:
@@ -412,6 +539,8 @@ static void __exit bnx2i_mod_exit(void)
 		bnx2i_free_hba(hba);
 	}
 	mutex_unlock(&bnx2i_dev_lock);
+
+	cpuhp_remove_state(bnx2i_online_state);
 
 	iscsi_unregister_transport(&bnx2i_iscsi_transport);
 	cnic_unregister_driver(CNIC_ULP_ISCSI);

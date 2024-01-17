@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * init.c:  Initialize internal variables used by the PROM
  *          library functions.
@@ -27,12 +28,9 @@ EXPORT_SYMBOL(prom_root_node);
 struct linux_nodeops *prom_nodeops;
 
 /* You must call prom_init() before you attempt to use any of the
- * routines in the prom library.  It returns 0 on success, 1 on
- * failure.  It gets passed the pointer to the PROM vector.
+ * routines in the prom library.
+ * It gets passed the pointer to the PROM vector.
  */
-
-extern void prom_meminit(void);
-extern void prom_ranges_init(void);
 
 void __init prom_init(struct linux_romvec *rp)
 {
@@ -53,7 +51,7 @@ void __init prom_init(struct linux_romvec *rp)
 			    romvec->pv_romvers);
 		prom_halt();
 		break;
-	};
+	}
 
 	prom_rev = romvec->pv_plugin_revision;
 	prom_prev = romvec->pv_printrev;

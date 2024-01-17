@@ -9,6 +9,7 @@
 #include <linux/slab.h>
 #include <linux/jiffies.h>
 #include <linux/agp_backend.h>
+#include <asm/set_memory.h>
 #include "agp.h"
 
 #define SVWRKS_COMMAND		0x04
@@ -95,7 +96,7 @@ static int serverworks_create_gatt_pages(int nr_tables)
 	int retval = 0;
 	int i;
 
-	tables = kzalloc((nr_tables + 1) * sizeof(struct serverworks_page_map *),
+	tables = kcalloc(nr_tables + 1, sizeof(struct serverworks_page_map *),
 			 GFP_KERNEL);
 	if (tables == NULL)
 		return -ENOMEM;
@@ -229,7 +230,7 @@ static int serverworks_fetch_size(void)
  * This routine could be implemented by taking the addresses
  * written to the GATT, and flushing them individually.  However
  * currently it just flushes the whole table.  Which is probably
- * more efficent, since agp_memory blocks can be a large number of
+ * more efficient, since agp_memory blocks can be a large number of
  * entries.
  */
 static void serverworks_tlbflush(struct agp_memory *temp)
@@ -261,12 +262,9 @@ static void serverworks_tlbflush(struct agp_memory *temp)
 
 static int serverworks_configure(void)
 {
-	struct aper_size_info_lvl2 *current_size;
 	u32 temp;
 	u8 enable_reg;
 	u16 cap_reg;
-
-	current_size = A_SIZE_LVL2(agp_bridge->current_size);
 
 	/* Get the memory mapped registers */
 	pci_read_config_dword(agp_bridge->dev, serverworks_private.mm_addr_ofs, &temp);
@@ -349,7 +347,7 @@ static int serverworks_insert_memory(struct agp_memory *mem,
 	for (i = 0, j = pg_start; i < mem->page_count; i++, j++) {
 		addr = (j * PAGE_SIZE) + agp_bridge->gart_bus_addr;
 		cur_gatt = SVRWRKS_GET_GATT(addr);
-		writel(agp_bridge->driver->mask_memory(agp_bridge, 
+		writel(agp_bridge->driver->mask_memory(agp_bridge,
 				page_to_phys(mem->pages[i]), mem->type),
 		       cur_gatt+GET_GATT_OFF(addr));
 	}
@@ -445,8 +443,8 @@ static const struct agp_bridge_driver sworks_driver = {
 	.agp_type_to_mask_type  = agp_generic_type_to_mask_type,
 };
 
-static int __devinit agp_serverworks_probe(struct pci_dev *pdev,
-					   const struct pci_device_id *ent)
+static int agp_serverworks_probe(struct pci_dev *pdev,
+				 const struct pci_device_id *ent)
 {
 	struct agp_bridge_data *bridge;
 	struct pci_dev *bridge_dev;
@@ -473,7 +471,8 @@ static int __devinit agp_serverworks_probe(struct pci_dev *pdev,
 	}
 
 	/* Everything is on func 1 here so we are hardcoding function one */
-	bridge_dev = pci_get_bus_and_slot((unsigned int)pdev->bus->number,
+	bridge_dev = pci_get_domain_bus_and_slot(pci_domain_nr(pdev->bus),
+			(unsigned int)pdev->bus->number,
 			PCI_DEVFN(0, 1));
 	if (!bridge_dev) {
 		dev_info(&pdev->dev, "can't find secondary device\n");
@@ -511,14 +510,14 @@ static int __devinit agp_serverworks_probe(struct pci_dev *pdev,
 		return -ENOMEM;
 
 	bridge->driver = &sworks_driver;
-	bridge->dev_private_data = &serverworks_private,
+	bridge->dev_private_data = &serverworks_private;
 	bridge->dev = pci_dev_get(pdev);
 
 	pci_set_drvdata(pdev, bridge);
 	return agp_add_bridge(bridge);
 }
 
-static void __devexit agp_serverworks_remove(struct pci_dev *pdev)
+static void agp_serverworks_remove(struct pci_dev *pdev)
 {
 	struct agp_bridge_data *bridge = pci_get_drvdata(pdev);
 

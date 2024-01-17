@@ -1,7 +1,4 @@
-font.c
-lib1funcs.S
-piggy.gzip
-piggy.lzo
-piggy.lzma
+# SPDX-License-Identifier: GPL-2.0-only
+piggy_data
 vmlinux
 vmlinux.lds

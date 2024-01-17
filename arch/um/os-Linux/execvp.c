@@ -27,12 +27,12 @@
 #include <limits.h>
 
 #ifndef TEST
-#include "um_malloc.h"
+#include <um_malloc.h>
 #else
 #include <stdio.h>
 #define um_kmalloc malloc
 #endif
-#include "os.h"
+#include <os.h>
 
 /* Execute FILE, searching in the `PATH' environment variable if it contains
    no slashes, with arguments ARGV and environment from `environ'.  */
@@ -93,6 +93,7 @@ int execvp_noalloc(char *buf, const char *file, char *const argv[])
 					   up finding no executable we can use, we want to diagnose
 					   that we did find one but were denied access.  */
 					got_eacces = 1;
+					break;
 				case ENOENT:
 				case ESTALE:
 				case ENOTDIR:
@@ -136,7 +137,7 @@ int main(int argc, char**argv)
 	int ret;
 	argc--;
 	if (!argc) {
-		fprintf(stderr, "Not enough arguments\n");
+		os_warn("Not enough arguments\n");
 		return 1;
 	}
 	argv++;

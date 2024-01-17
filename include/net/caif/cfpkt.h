@@ -1,7 +1,7 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (C) ST-Ericsson AB 2010
- * Author:	Sjur Brendeland/sjur.brandeland@stericsson.com
- * License terms: GNU General Public License (GPL) version 2
+ * Author:	Sjur Brendeland
  */
 
 #ifndef CFPKT_H_
@@ -16,12 +16,6 @@ struct cfpkt;
  */
 struct cfpkt *cfpkt_create(u16 len);
 
-/* Create a CAIF packet.
- * data Data to copy.
- * len Length of packet to be created
- * @return New packet.
- */
-struct cfpkt *cfpkt_create_uplink(const unsigned char *data, unsigned int len);
 /*
  * Destroy a CAIF Packet.
  * pkt Packet to be destoyed.
@@ -37,6 +31,33 @@ void cfpkt_destroy(struct cfpkt *pkt);
  * @return zero on success and error code upon failure
  */
 int cfpkt_extr_head(struct cfpkt *pkt, void *data, u16 len);
+
+static inline u8 cfpkt_extr_head_u8(struct cfpkt *pkt)
+{
+	u8 tmp;
+
+	cfpkt_extr_head(pkt, &tmp, 1);
+
+	return tmp;
+}
+
+static inline u16 cfpkt_extr_head_u16(struct cfpkt *pkt)
+{
+	__le16 tmp;
+
+	cfpkt_extr_head(pkt, &tmp, 2);
+
+	return le16_to_cpu(tmp);
+}
+
+static inline u32 cfpkt_extr_head_u32(struct cfpkt *pkt)
+{
+	__le32 tmp;
+
+	cfpkt_extr_head(pkt, &tmp, 4);
+
+	return le32_to_cpu(tmp);
+}
 
 /*
  * Peek header from packet.
@@ -177,25 +198,9 @@ struct cfpkt *cfpkt_split(struct cfpkt *pkt, u16 pos);
  * @return    Checksum of buffer.
  */
 
-u16 cfpkt_iterate(struct cfpkt *pkt,
+int cfpkt_iterate(struct cfpkt *pkt,
 		u16 (*iter_func)(u16 chks, void *buf, u16 len),
 		u16 data);
-
-/* Append by giving user access to packet buffer
- * cfpkt Packet to append to
- * buf Buffer inside pkt that user shall copy data into
- * buflen Length of buffer and number of bytes added to packet
- * @return 0 on error, 1 on success
- */
-int cfpkt_raw_append(struct cfpkt *cfpkt, void **buf, unsigned int buflen);
-
-/* Extract by giving user access to packet buffer
- * cfpkt Packet to extract from
- * buf Buffer inside pkt that user shall copy data from
- * buflen Length of buffer and number of bytes removed from packet
- * @return 0 on error, 1 on success
- */
-int cfpkt_raw_extract(struct cfpkt *cfpkt, void **buf, unsigned int buflen);
 
 /* Map from a "native" packet (e.g. Linux Socket Buffer) to a CAIF packet.
  *  dir - Direction indicating whether this packet is to be sent or received.
@@ -211,64 +216,17 @@ struct cfpkt *cfpkt_fromnative(enum caif_direction dir, void *nativepkt);
 void *cfpkt_tonative(struct cfpkt *pkt);
 
 /*
- * Insert a packet in the packet queue.
- * pktq Packet queue to insert into
- * pkt Packet to be inserted in queue
- * prio Priority of packet
- */
-void cfpkt_queue(struct cfpktq *pktq, struct cfpkt *pkt,
-		 unsigned short prio);
-
-/*
- * Remove a packet from the packet queue.
- * pktq Packet queue to fetch packets from.
- * @return Dequeued packet.
- */
-struct cfpkt *cfpkt_dequeue(struct cfpktq *pktq);
-
-/*
- * Peek into a packet from the packet queue.
- * pktq Packet queue to fetch packets from.
- * @return Peeked packet.
- */
-struct cfpkt *cfpkt_qpeek(struct cfpktq *pktq);
-
-/*
- * Initiates the packet queue.
- * @return Pointer to new packet queue.
- */
-struct cfpktq *cfpktq_create(void);
-
-/*
- * Get the number of packets in the queue.
- * pktq Packet queue to fetch count from.
- * @return Number of packets in queue.
- */
-int cfpkt_qcount(struct cfpktq *pktq);
-
-/*
- * Put content of packet into buffer for debuging purposes.
- * pkt Packet to copy data from
- * buf Buffer to copy data into
- * buflen Length of data to copy
- * @return Pointer to copied data
- */
-char *cfpkt_log_pkt(struct cfpkt *pkt, char *buf, int buflen);
-
-/*
- * Clones a packet and releases the original packet.
- * This is used for taking ownership of a packet e.g queueing.
- * pkt Packet to clone and release.
- * @return Cloned packet.
- */
-struct cfpkt *cfpkt_clone_release(struct cfpkt *pkt);
-
-
-/*
  * Returns packet information for a packet.
  * pkt Packet to get info from;
  * @return Packet information
  */
 struct caif_payload_info *cfpkt_info(struct cfpkt *pkt);
-/*! @} */
+
+/** cfpkt_set_prio - set priority for a CAIF packet.
+ *
+ * @pkt: The CAIF packet to be adjusted.
+ * @prio: one of TC_PRIO_ constants.
+ */
+void cfpkt_set_prio(struct cfpkt *pkt, int prio);
+
 #endif				/* CFPKT_H_ */

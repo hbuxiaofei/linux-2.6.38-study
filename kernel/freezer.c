@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * kernel/freezer.c - Function to freeze a process
  *
@@ -6,161 +7,229 @@
 
 #include <linux/interrupt.h>
 #include <linux/suspend.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/syscalls.h>
 #include <linux/freezer.h>
+#include <linux/kthread.h>
+
+/* total number of freezing conditions in effect */
+DEFINE_STATIC_KEY_FALSE(freezer_active);
+EXPORT_SYMBOL(freezer_active);
 
 /*
- * freezing is complete, mark current process as frozen
+ * indicate whether PM freezing is in effect, protected by
+ * system_transition_mutex
  */
-static inline void frozen_process(void)
+bool pm_freezing;
+bool pm_nosig_freezing;
+
+/* protects freezing and frozen transitions */
+static DEFINE_SPINLOCK(freezer_lock);
+
+/**
+ * freezing_slow_path - slow path for testing whether a task needs to be frozen
+ * @p: task to be tested
+ *
+ * This function is called by freezing() if freezer_active isn't zero
+ * and tests whether @p needs to enter and stay in frozen state.  Can be
+ * called under any context.  The freezers are responsible for ensuring the
+ * target tasks see the updated state.
+ */
+bool freezing_slow_path(struct task_struct *p)
 {
-	if (!unlikely(current->flags & PF_NOFREEZE)) {
-		current->flags |= PF_FROZEN;
-		wmb();
-	}
-	clear_freeze_flag(current);
+	if (p->flags & (PF_NOFREEZE | PF_SUSPEND_TASK))
+		return false;
+
+	if (test_tsk_thread_flag(p, TIF_MEMDIE))
+		return false;
+
+	if (pm_nosig_freezing || cgroup_freezing(p))
+		return true;
+
+	if (pm_freezing && !(p->flags & PF_KTHREAD))
+		return true;
+
+	return false;
+}
+EXPORT_SYMBOL(freezing_slow_path);
+
+bool frozen(struct task_struct *p)
+{
+	return READ_ONCE(p->__state) & TASK_FROZEN;
 }
 
 /* Refrigerator is place where frozen processes are stored :-). */
-void refrigerator(void)
+bool __refrigerator(bool check_kthr_stop)
 {
-	/* Hmm, should we be allowed to suspend when there are realtime
-	   processes around? */
-	long save;
+	unsigned int state = get_current_state();
+	bool was_frozen = false;
 
-	task_lock(current);
-	if (freezing(current)) {
-		frozen_process();
-		task_unlock(current);
-	} else {
-		task_unlock(current);
-		return;
-	}
-	save = current->state;
 	pr_debug("%s entered refrigerator\n", current->comm);
 
-	spin_lock_irq(&current->sighand->siglock);
-	recalc_sigpending(); /* We sent fake signal, clean it up */
-	spin_unlock_irq(&current->sighand->siglock);
-
-	/* prevent accounting of that task to load */
-	current->flags |= PF_FREEZING;
+	WARN_ON_ONCE(state && !(state & TASK_NORMAL));
 
 	for (;;) {
-		set_current_state(TASK_UNINTERRUPTIBLE);
-		if (!frozen(current))
+		bool freeze;
+
+		set_current_state(TASK_FROZEN);
+
+		spin_lock_irq(&freezer_lock);
+		freeze = freezing(current) && !(check_kthr_stop && kthread_should_stop());
+		spin_unlock_irq(&freezer_lock);
+
+		if (!freeze)
 			break;
+
+		was_frozen = true;
 		schedule();
 	}
-
-	/* Remove the accounting blocker */
-	current->flags &= ~PF_FREEZING;
+	__set_current_state(TASK_RUNNING);
 
 	pr_debug("%s left refrigerator\n", current->comm);
-	__set_current_state(save);
+
+	return was_frozen;
 }
-EXPORT_SYMBOL(refrigerator);
+EXPORT_SYMBOL(__refrigerator);
 
 static void fake_signal_wake_up(struct task_struct *p)
 {
 	unsigned long flags;
 
-	spin_lock_irqsave(&p->sighand->siglock, flags);
-	signal_wake_up(p, 0);
-	spin_unlock_irqrestore(&p->sighand->siglock, flags);
+	if (lock_task_sighand(p, &flags)) {
+		signal_wake_up(p, 0);
+		unlock_task_sighand(p, &flags);
+	}
+}
+
+static int __set_task_frozen(struct task_struct *p, void *arg)
+{
+	unsigned int state = READ_ONCE(p->__state);
+
+	if (p->on_rq)
+		return 0;
+
+	if (p != current && task_curr(p))
+		return 0;
+
+	if (!(state & (TASK_FREEZABLE | __TASK_STOPPED | __TASK_TRACED)))
+		return 0;
+
+	/*
+	 * Only TASK_NORMAL can be augmented with TASK_FREEZABLE, since they
+	 * can suffer spurious wakeups.
+	 */
+	if (state & TASK_FREEZABLE)
+		WARN_ON_ONCE(!(state & TASK_NORMAL));
+
+#ifdef CONFIG_LOCKDEP
+	/*
+	 * It's dangerous to freeze with locks held; there be dragons there.
+	 */
+	if (!(state & __TASK_FREEZABLE_UNSAFE))
+		WARN_ON_ONCE(debug_locks && p->lockdep_depth);
+#endif
+
+	WRITE_ONCE(p->__state, TASK_FROZEN);
+	return TASK_FROZEN;
+}
+
+static bool __freeze_task(struct task_struct *p)
+{
+	/* TASK_FREEZABLE|TASK_STOPPED|TASK_TRACED -> TASK_FROZEN */
+	return task_call_func(p, __set_task_frozen, NULL);
 }
 
 /**
- *	freeze_task - send a freeze request to given task
- *	@p: task to send the request to
- *	@sig_only: if set, the request will only be sent if the task has the
- *		PF_FREEZER_NOSIG flag unset
- *	Return value: 'false', if @sig_only is set and the task has
- *		PF_FREEZER_NOSIG set or the task is frozen, 'true', otherwise
+ * freeze_task - send a freeze request to given task
+ * @p: task to send the request to
  *
- *	The freeze request is sent by setting the tasks's TIF_FREEZE flag and
- *	either sending a fake signal to it or waking it up, depending on whether
- *	or not it has PF_FREEZER_NOSIG set.  If @sig_only is set and the task
- *	has PF_FREEZER_NOSIG set (ie. it is a typical kernel thread), its
- *	TIF_FREEZE flag will not be set.
+ * If @p is freezing, the freeze request is sent either by sending a fake
+ * signal (if it's not a kernel thread) or waking it up (if it's a kernel
+ * thread).
+ *
+ * RETURNS:
+ * %false, if @p is not freezing or already frozen; %true, otherwise
  */
-bool freeze_task(struct task_struct *p, bool sig_only)
-{
-	/*
-	 * We first check if the task is freezing and next if it has already
-	 * been frozen to avoid the race with frozen_process() which first marks
-	 * the task as frozen and next clears its TIF_FREEZE.
-	 */
-	if (!freezing(p)) {
-		rmb();
-		if (frozen(p))
-			return false;
-
-		if (!sig_only || should_send_signal(p))
-			set_freeze_flag(p);
-		else
-			return false;
-	}
-
-	if (should_send_signal(p)) {
-		fake_signal_wake_up(p);
-		/*
-		 * fake_signal_wake_up() goes through p's scheduler
-		 * lock and guarantees that TASK_STOPPED/TRACED ->
-		 * TASK_RUNNING transition can't race with task state
-		 * testing in try_to_freeze_tasks().
-		 */
-	} else if (sig_only) {
-		return false;
-	} else {
-		wake_up_state(p, TASK_INTERRUPTIBLE);
-	}
-
-	return true;
-}
-
-void cancel_freezing(struct task_struct *p)
+bool freeze_task(struct task_struct *p)
 {
 	unsigned long flags;
 
-	if (freezing(p)) {
-		pr_debug("  clean up: %s\n", p->comm);
-		clear_freeze_flag(p);
-		spin_lock_irqsave(&p->sighand->siglock, flags);
-		recalc_sigpending_and_wake(p);
-		spin_unlock_irqrestore(&p->sighand->siglock, flags);
+	spin_lock_irqsave(&freezer_lock, flags);
+	if (!freezing(p) || frozen(p) || __freeze_task(p)) {
+		spin_unlock_irqrestore(&freezer_lock, flags);
+		return false;
 	}
-}
 
-static int __thaw_process(struct task_struct *p)
-{
-	if (frozen(p)) {
-		p->flags &= ~PF_FROZEN;
-		return 1;
-	}
-	clear_freeze_flag(p);
-	return 0;
+	if (!(p->flags & PF_KTHREAD))
+		fake_signal_wake_up(p);
+	else
+		wake_up_state(p, TASK_NORMAL);
+
+	spin_unlock_irqrestore(&freezer_lock, flags);
+	return true;
 }
 
 /*
- * Wake up a frozen process
- *
- * task_lock() is needed to prevent the race with refrigerator() which may
- * occur if the freezing of tasks fails.  Namely, without the lock, if the
- * freezing of tasks failed, thaw_tasks() might have run before a task in
- * refrigerator() could call frozen_process(), in which case the task would be
- * frozen and no one would thaw it.
+ * The special task states (TASK_STOPPED, TASK_TRACED) keep their canonical
+ * state in p->jobctl. If either of them got a wakeup that was missed because
+ * TASK_FROZEN, then their canonical state reflects that and the below will
+ * refuse to restore the special state and instead issue the wakeup.
  */
-int thaw_process(struct task_struct *p)
+static int __set_task_special(struct task_struct *p, void *arg)
 {
-	task_lock(p);
-	if (__thaw_process(p) == 1) {
-		task_unlock(p);
-		wake_up_process(p);
-		return 1;
-	}
-	task_unlock(p);
-	return 0;
+	unsigned int state = 0;
+
+	if (p->jobctl & JOBCTL_TRACED)
+		state = TASK_TRACED;
+
+	else if (p->jobctl & JOBCTL_STOPPED)
+		state = TASK_STOPPED;
+
+	if (state)
+		WRITE_ONCE(p->__state, state);
+
+	return state;
 }
-EXPORT_SYMBOL(thaw_process);
+
+void __thaw_task(struct task_struct *p)
+{
+	unsigned long flags, flags2;
+
+	spin_lock_irqsave(&freezer_lock, flags);
+	if (WARN_ON_ONCE(freezing(p)))
+		goto unlock;
+
+	if (lock_task_sighand(p, &flags2)) {
+		/* TASK_FROZEN -> TASK_{STOPPED,TRACED} */
+		bool ret = task_call_func(p, __set_task_special, NULL);
+		unlock_task_sighand(p, &flags2);
+		if (ret)
+			goto unlock;
+	}
+
+	wake_up_state(p, TASK_FROZEN);
+unlock:
+	spin_unlock_irqrestore(&freezer_lock, flags);
+}
+
+/**
+ * set_freezable - make %current freezable
+ *
+ * Mark %current freezable and enter refrigerator if necessary.
+ */
+bool set_freezable(void)
+{
+	might_sleep();
+
+	/*
+	 * Modify flags while holding freezer_lock.  This ensures the
+	 * freezer notices that we aren't frozen yet or the freezing
+	 * condition is visible to try_to_freeze() below.
+	 */
+	spin_lock_irq(&freezer_lock);
+	current->flags &= ~PF_NOFREEZE;
+	spin_unlock_irq(&freezer_lock);
+
+	return try_to_freeze();
+}
+EXPORT_SYMBOL(set_freezable);

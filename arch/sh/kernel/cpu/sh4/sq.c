@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * arch/sh/kernel/cpu/sh4/sq.c
  *
@@ -5,21 +6,18 @@
  *
  * Copyright (C) 2001 - 2006  Paul Mundt
  * Copyright (C) 2001, 2002  M. R. Brown
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
  */
 #include <linux/init.h>
 #include <linux/cpu.h>
 #include <linux/bitmap.h>
-#include <linux/sysdev.h>
+#include <linux/device.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/mm.h>
 #include <linux/io.h>
+#include <linux/prefetch.h>
 #include <asm/page.h>
 #include <asm/cacheflush.h>
 #include <cpu/sq.h>
@@ -105,7 +103,8 @@ static int __sq_remap(struct sq_mapping *map, pgprot_t prot)
 #if defined(CONFIG_MMU)
 	struct vm_struct *vma;
 
-	vma = __get_vm_area(map->size, VM_ALLOC, map->sq_addr, SQ_ADDRMAX);
+	vma = __get_vm_area_caller(map->size, VM_ALLOC, map->sq_addr,
+			SQ_ADDRMAX, __builtin_return_address(0));
 	if (!vma)
 		return -ENOMEM;
 
@@ -325,6 +324,7 @@ static struct attribute *sq_sysfs_attrs[] = {
 	&mapping_attr.attr,
 	NULL,
 };
+ATTRIBUTE_GROUPS(sq_sysfs);
 
 static const struct sysfs_ops sq_sysfs_ops = {
 	.show	= sq_sysfs_show,
@@ -333,12 +333,12 @@ static const struct sysfs_ops sq_sysfs_ops = {
 
 static struct kobj_type ktype_percpu_entry = {
 	.sysfs_ops	= &sq_sysfs_ops,
-	.default_attrs	= sq_sysfs_attrs,
+	.default_groups	= sq_sysfs_groups,
 };
 
-static int __devinit sq_sysdev_add(struct sys_device *sysdev)
+static int sq_dev_add(struct device *dev, struct subsys_interface *sif)
 {
-	unsigned int cpu = sysdev->id;
+	unsigned int cpu = dev->id;
 	struct kobject *kobj;
 	int error;
 
@@ -347,25 +347,26 @@ static int __devinit sq_sysdev_add(struct sys_device *sysdev)
 		return -ENOMEM;
 
 	kobj = sq_kobject[cpu];
-	error = kobject_init_and_add(kobj, &ktype_percpu_entry, &sysdev->kobj,
+	error = kobject_init_and_add(kobj, &ktype_percpu_entry, &dev->kobj,
 				     "%s", "sq");
 	if (!error)
 		kobject_uevent(kobj, KOBJ_ADD);
 	return error;
 }
 
-static int __devexit sq_sysdev_remove(struct sys_device *sysdev)
+static void sq_dev_remove(struct device *dev, struct subsys_interface *sif)
 {
-	unsigned int cpu = sysdev->id;
+	unsigned int cpu = dev->id;
 	struct kobject *kobj = sq_kobject[cpu];
 
 	kobject_put(kobj);
-	return 0;
 }
 
-static struct sysdev_driver sq_sysdev_driver = {
-	.add		= sq_sysdev_add,
-	.remove		= __devexit_p(sq_sysdev_remove),
+static struct subsys_interface sq_interface = {
+	.name		= "sq",
+	.subsys		= &cpu_subsys,
+	.add_dev	= sq_dev_add,
+	.remove_dev	= sq_dev_remove,
 };
 
 static int __init sq_api_init(void)
@@ -381,11 +382,11 @@ static int __init sq_api_init(void)
 	if (unlikely(!sq_cache))
 		return ret;
 
-	sq_bitmap = kzalloc(size, GFP_KERNEL);
+	sq_bitmap = kcalloc(size, sizeof(long), GFP_KERNEL);
 	if (unlikely(!sq_bitmap))
 		goto out;
 
-	ret = sysdev_driver_register(&cpu_sysdev_class, &sq_sysdev_driver);
+	ret = subsys_interface_register(&sq_interface);
 	if (unlikely(ret != 0))
 		goto out;
 
@@ -400,7 +401,7 @@ out:
 
 static void __exit sq_api_exit(void)
 {
-	sysdev_driver_unregister(&cpu_sysdev_class, &sq_sysdev_driver);
+	subsys_interface_unregister(&sq_interface);
 	kfree(sq_bitmap);
 	kmem_cache_destroy(sq_cache);
 }

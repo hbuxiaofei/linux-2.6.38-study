@@ -1,23 +1,7 @@
-/* -*- mode: c; c-basic-offset: 8; -*-
- *
- * vim: noexpandtab sw=8 ts=8 sts=0:
+// SPDX-License-Identifier: GPL-2.0-or-later
+/*
  *
  * Copyright (C) 2004 Oracle.  All rights reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public
- * License along with this program; if not, write to the
- * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
- * Boston, MA 021110-1307, USA.
  *
  * ----
  *
@@ -54,14 +38,16 @@
  */
 
 #include <linux/kernel.h>
+#include <linux/sched/mm.h>
 #include <linux/jiffies.h>
 #include <linux/slab.h>
 #include <linux/idr.h>
 #include <linux/kref.h>
 #include <linux/net.h>
+#include <linux/export.h>
 #include <net/tcp.h>
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #include "heartbeat.h"
 #include "tcp.h"
@@ -96,7 +82,7 @@
 	typeof(sc) __sc = (sc);						\
 	mlog(ML_SOCKET, "[sc %p refs %d sock %p node %u page %p "	\
 	     "pg_off %zu] " fmt, __sc,					\
-	     atomic_read(&__sc->sc_kref.refcount), __sc->sc_sock,	\
+	     kref_read(&__sc->sc_kref), __sc->sc_sock,	\
 	    __sc->sc_node->nd_num, __sc->sc_page, __sc->sc_page_off ,	\
 	    ##args);							\
 } while (0)
@@ -107,7 +93,7 @@ static struct rb_root o2net_handler_tree = RB_ROOT;
 static struct o2net_node o2net_nodes[O2NM_MAX_NODES];
 
 /* XXX someday we'll need better accounting */
-static struct socket *o2net_listen_sock = NULL;
+static struct socket *o2net_listen_sock;
 
 /*
  * listen work is only queued by the listening socket callbacks on the
@@ -136,9 +122,9 @@ static int o2net_sys_err_translations[O2NET_ERR_MAX] =
 static void o2net_sc_connect_completed(struct work_struct *work);
 static void o2net_rx_until_empty(struct work_struct *work);
 static void o2net_shutdown_sc(struct work_struct *work);
-static void o2net_listen_data_ready(struct sock *sk, int bytes);
+static void o2net_listen_data_ready(struct sock *sk);
 static void o2net_sc_send_keep_req(struct work_struct *work);
-static void o2net_idle_timer(unsigned long data);
+static void o2net_idle_timer(struct timer_list *t);
 static void o2net_sc_postpone_idle(struct o2net_sock_container *sc);
 static void o2net_sc_reset_idle_timer(struct o2net_sock_container *sc);
 
@@ -210,10 +196,6 @@ static inline void o2net_set_func_stop_time(struct o2net_sock_container *sc)
 	sc->sc_tv_func_stop = ktime_get();
 }
 
-static ktime_t o2net_get_func_run_time(struct o2net_sock_container *sc)
-{
-	return ktime_sub(sc->sc_tv_func_stop, sc->sc_tv_func_start);
-}
 #else  /* CONFIG_DEBUG_FS */
 # define o2net_init_nst(a, b, c, d, e)
 # define o2net_set_nst_sock_time(a)
@@ -227,10 +209,14 @@ static ktime_t o2net_get_func_run_time(struct o2net_sock_container *sc)
 # define o2net_set_advance_stop_time(a)
 # define o2net_set_func_start_time(a)
 # define o2net_set_func_stop_time(a)
-# define o2net_get_func_run_time(a)		(ktime_t)0
 #endif /* CONFIG_DEBUG_FS */
 
 #ifdef CONFIG_OCFS2_FS_STATS
+static ktime_t o2net_get_func_run_time(struct o2net_sock_container *sc)
+{
+	return ktime_sub(sc->sc_tv_func_stop, sc->sc_tv_func_start);
+}
+
 static void o2net_update_send_stats(struct o2net_send_tracking *nst,
 				    struct o2net_sock_container *sc)
 {
@@ -261,17 +247,17 @@ static void o2net_update_recv_stats(struct o2net_sock_container *sc)
 
 #endif /* CONFIG_OCFS2_FS_STATS */
 
-static inline int o2net_reconnect_delay(void)
+static inline unsigned int o2net_reconnect_delay(void)
 {
 	return o2nm_single_cluster->cl_reconnect_delay_ms;
 }
 
-static inline int o2net_keepalive_delay(void)
+static inline unsigned int o2net_keepalive_delay(void)
 {
 	return o2nm_single_cluster->cl_keepalive_delay_ms;
 }
 
-static inline int o2net_idle_timeout(void)
+static inline unsigned int o2net_idle_timeout(void)
 {
 	return o2nm_single_cluster->cl_idle_timeout_ms;
 }
@@ -303,28 +289,22 @@ static u8 o2net_num_from_nn(struct o2net_node *nn)
 
 static int o2net_prep_nsw(struct o2net_node *nn, struct o2net_status_wait *nsw)
 {
-	int ret = 0;
+	int ret;
 
-	do {
-		if (!idr_pre_get(&nn->nn_status_idr, GFP_ATOMIC)) {
-			ret = -EAGAIN;
-			break;
-		}
-		spin_lock(&nn->nn_lock);
-		ret = idr_get_new(&nn->nn_status_idr, nsw, &nsw->ns_id);
-		if (ret == 0)
-			list_add_tail(&nsw->ns_node_item,
-				      &nn->nn_status_list);
-		spin_unlock(&nn->nn_lock);
-	} while (ret == -EAGAIN);
-
-	if (ret == 0)  {
-		init_waitqueue_head(&nsw->ns_wq);
-		nsw->ns_sys_status = O2NET_ERR_NONE;
-		nsw->ns_status = 0;
+	spin_lock(&nn->nn_lock);
+	ret = idr_alloc(&nn->nn_status_idr, nsw, 0, 0, GFP_ATOMIC);
+	if (ret >= 0) {
+		nsw->ns_id = ret;
+		list_add_tail(&nsw->ns_node_item, &nn->nn_status_list);
 	}
+	spin_unlock(&nn->nn_lock);
+	if (ret < 0)
+		return ret;
 
-	return ret;
+	init_waitqueue_head(&nsw->ns_wq);
+	nsw->ns_sys_status = O2NET_ERR_NONE;
+	nsw->ns_status = 0;
+	return 0;
 }
 
 static void o2net_complete_nsw_locked(struct o2net_node *nn,
@@ -411,6 +391,9 @@ static void sc_kref_release(struct kref *kref)
 	sc->sc_node = NULL;
 
 	o2net_debug_del_sc(sc);
+
+	if (sc->sc_page)
+		__free_page(sc->sc_page);
 	kfree(sc);
 }
 
@@ -451,9 +434,7 @@ static struct o2net_sock_container *sc_alloc(struct o2nm_node *node)
 	INIT_WORK(&sc->sc_shutdown_work, o2net_shutdown_sc);
 	INIT_DELAYED_WORK(&sc->sc_keepalive_work, o2net_sc_send_keep_req);
 
-	init_timer(&sc->sc_idle_timeout);
-	sc->sc_idle_timeout.function = o2net_idle_timer;
-	sc->sc_idle_timeout.data = (unsigned long)sc;
+	timer_setup(&sc->sc_idle_timeout, o2net_idle_timer, 0);
 
 	sclog(sc, "alloced\n");
 
@@ -538,15 +519,16 @@ static void o2net_set_nn_state(struct o2net_node *nn,
 	if (nn->nn_persistent_error || nn->nn_sc_valid)
 		wake_up(&nn->nn_sc_wq);
 
-	if (!was_err && nn->nn_persistent_error) {
+	if (was_valid && !was_err && nn->nn_persistent_error) {
 		o2quo_conn_err(o2net_num_from_nn(nn));
 		queue_delayed_work(o2net_wq, &nn->nn_still_up,
 				   msecs_to_jiffies(O2NET_QUORUM_DELAY_MS));
 	}
 
 	if (was_valid && !valid) {
-		printk(KERN_NOTICE "o2net: no longer connected to "
-		       SC_NODEF_FMT "\n", SC_NODEF_ARGS(old_sc));
+		if (old_sc)
+			printk(KERN_NOTICE "o2net: No longer connected to "
+				SC_NODEF_FMT "\n", SC_NODEF_ARGS(old_sc));
 		o2net_complete_nodes_nsw(nn);
 	}
 
@@ -555,7 +537,7 @@ static void o2net_set_nn_state(struct o2net_node *nn,
 		cancel_delayed_work(&nn->nn_connect_expired);
 		printk(KERN_NOTICE "o2net: %s " SC_NODEF_FMT "\n",
 		       o2nm_this_node() > sc->sc_node->nd_num ?
-		       		"connected to" : "accepted connection from",
+		       "Connected to" : "Accepted connection from",
 		       SC_NODEF_ARGS(sc));
 	}
 
@@ -565,7 +547,7 @@ static void o2net_set_nn_state(struct o2net_node *nn,
 	 * the work queue actually being up. */
 	if (!valid && o2net_wq) {
 		unsigned long delay;
-		/* delay if we're withing a RECONNECT_DELAY of the
+		/* delay if we're within a RECONNECT_DELAY of the
 		 * last attempt */
 		delay = (nn->nn_last_connect_attempt +
 			 msecs_to_jiffies(o2net_reconnect_delay()))
@@ -598,13 +580,14 @@ static void o2net_set_nn_state(struct o2net_node *nn,
 }
 
 /* see o2net_register_callbacks() */
-static void o2net_data_ready(struct sock *sk, int bytes)
+static void o2net_data_ready(struct sock *sk)
 {
-	void (*ready)(struct sock *sk, int bytes);
+	void (*ready)(struct sock *sk);
+	struct o2net_sock_container *sc;
 
-	read_lock(&sk->sk_callback_lock);
-	if (sk->sk_user_data) {
-		struct o2net_sock_container *sc = sk->sk_user_data;
+	read_lock_bh(&sk->sk_callback_lock);
+	sc = sk->sk_user_data;
+	if (sc) {
 		sclog(sc, "data_ready hit\n");
 		o2net_set_data_ready_time(sc);
 		o2net_sc_queue_work(sc, &sc->sc_rx_work);
@@ -612,9 +595,9 @@ static void o2net_data_ready(struct sock *sk, int bytes)
 	} else {
 		ready = sk->sk_data_ready;
 	}
-	read_unlock(&sk->sk_callback_lock);
+	read_unlock_bh(&sk->sk_callback_lock);
 
-	ready(sk, bytes);
+	ready(sk);
 }
 
 /* see o2net_register_callbacks() */
@@ -623,7 +606,7 @@ static void o2net_state_change(struct sock *sk)
 	void (*state_change)(struct sock *sk);
 	struct o2net_sock_container *sc;
 
-	read_lock(&sk->sk_callback_lock);
+	read_lock_bh(&sk->sk_callback_lock);
 	sc = sk->sk_user_data;
 	if (sc == NULL) {
 		state_change = sk->sk_state_change;
@@ -635,22 +618,22 @@ static void o2net_state_change(struct sock *sk)
 	state_change = sc->sc_state_change;
 
 	switch(sk->sk_state) {
-		/* ignore connecting sockets as they make progress */
-		case TCP_SYN_SENT:
-		case TCP_SYN_RECV:
-			break;
-		case TCP_ESTABLISHED:
-			o2net_sc_queue_work(sc, &sc->sc_connect_work);
-			break;
-		default:
-			printk(KERN_INFO "o2net: connection to " SC_NODEF_FMT
-			      " shutdown, state %d\n",
-			      SC_NODEF_ARGS(sc), sk->sk_state);
-			o2net_sc_queue_work(sc, &sc->sc_shutdown_work);
-			break;
+	/* ignore connecting sockets as they make progress */
+	case TCP_SYN_SENT:
+	case TCP_SYN_RECV:
+		break;
+	case TCP_ESTABLISHED:
+		o2net_sc_queue_work(sc, &sc->sc_connect_work);
+		break;
+	default:
+		printk(KERN_INFO "o2net: Connection to " SC_NODEF_FMT
+			" shutdown, state %d\n",
+			SC_NODEF_ARGS(sc), sk->sk_state);
+		o2net_sc_queue_work(sc, &sc->sc_shutdown_work);
+		break;
 	}
 out:
-	read_unlock(&sk->sk_callback_lock);
+	read_unlock_bh(&sk->sk_callback_lock);
 	state_change(sk);
 }
 
@@ -767,32 +750,32 @@ static struct o2net_msg_handler *
 o2net_handler_tree_lookup(u32 msg_type, u32 key, struct rb_node ***ret_p,
 			  struct rb_node **ret_parent)
 {
-        struct rb_node **p = &o2net_handler_tree.rb_node;
-        struct rb_node *parent = NULL;
+	struct rb_node **p = &o2net_handler_tree.rb_node;
+	struct rb_node *parent = NULL;
 	struct o2net_msg_handler *nmh, *ret = NULL;
 	int cmp;
 
-        while (*p) {
-                parent = *p;
-                nmh = rb_entry(parent, struct o2net_msg_handler, nh_node);
+	while (*p) {
+		parent = *p;
+		nmh = rb_entry(parent, struct o2net_msg_handler, nh_node);
 		cmp = o2net_handler_cmp(nmh, msg_type, key);
 
-                if (cmp < 0)
-                        p = &(*p)->rb_left;
-                else if (cmp > 0)
-                        p = &(*p)->rb_right;
-                else {
+		if (cmp < 0)
+			p = &(*p)->rb_left;
+		else if (cmp > 0)
+			p = &(*p)->rb_right;
+		else {
 			ret = nmh;
-                        break;
+			break;
 		}
-        }
+	}
 
-        if (ret_p != NULL)
-                *ret_p = p;
-        if (ret_parent != NULL)
-                *ret_parent = parent;
+	if (ret_p != NULL)
+		*ret_p = p;
+	if (ret_parent != NULL)
+		*ret_parent = parent;
 
-        return ret;
+	return ret;
 }
 
 static void o2net_handler_kref_release(struct kref *kref)
@@ -869,12 +852,10 @@ int o2net_register_handler(u32 msg_type, u32 key, u32 max_len,
 		/* we've had some trouble with handlers seemingly vanishing. */
 		mlog_bug_on_msg(o2net_handler_tree_lookup(msg_type, key, &p,
 							  &parent) == NULL,
-			        "couldn't find handler we *just* registerd "
+			        "couldn't find handler we *just* registered "
 				"for type %u key %08x\n", msg_type, key);
 	}
 	write_unlock(&o2net_handler_lock);
-	if (ret)
-		goto out;
 
 out:
 	if (ret)
@@ -917,57 +898,31 @@ static struct o2net_msg_handler *o2net_handler_get(u32 msg_type, u32 key)
 
 static int o2net_recv_tcp_msg(struct socket *sock, void *data, size_t len)
 {
-	int ret;
-	mm_segment_t oldfs;
-	struct kvec vec = {
-		.iov_len = len,
-		.iov_base = data,
-	};
-	struct msghdr msg = {
-		.msg_iovlen = 1,
-		.msg_iov = (struct iovec *)&vec,
-       		.msg_flags = MSG_DONTWAIT,
-	};
-
-	oldfs = get_fs();
-	set_fs(get_ds());
-	ret = sock_recvmsg(sock, &msg, len, msg.msg_flags);
-	set_fs(oldfs);
-
-	return ret;
+	struct kvec vec = { .iov_len = len, .iov_base = data, };
+	struct msghdr msg = { .msg_flags = MSG_DONTWAIT, };
+	iov_iter_kvec(&msg.msg_iter, ITER_DEST, &vec, 1, len);
+	return sock_recvmsg(sock, &msg, MSG_DONTWAIT);
 }
 
 static int o2net_send_tcp_msg(struct socket *sock, struct kvec *vec,
 			      size_t veclen, size_t total)
 {
 	int ret;
-	mm_segment_t oldfs;
-	struct msghdr msg = {
-		.msg_iov = (struct iovec *)vec,
-		.msg_iovlen = veclen,
-	};
+	struct msghdr msg = {.msg_flags = 0,};
 
 	if (sock == NULL) {
 		ret = -EINVAL;
 		goto out;
 	}
 
-	oldfs = get_fs();
-	set_fs(get_ds());
-	ret = sock_sendmsg(sock, &msg, total);
-	set_fs(oldfs);
-	if (ret != total) {
-		mlog(ML_ERROR, "sendmsg returned %d instead of %zu\n", ret,
-		     total);
-		if (ret >= 0)
-			ret = -EPIPE; /* should be smarter, I bet */
-		goto out;
-	}
-
-	ret = 0;
+	ret = kernel_sendmsg(sock, &msg, vec, veclen, total);
+	if (likely(ret == total))
+		return 0;
+	mlog(ML_ERROR, "sendmsg returned %d instead of %zu\n", ret, total);
+	if (ret >= 0)
+		ret = -EPIPE; /* should be smarter, I bet */
 out:
-	if (ret < 0)
-		mlog(0, "returning error: %d\n", ret);
+	mlog(0, "returning error: %d\n", ret);
 	return ret;
 }
 
@@ -982,7 +937,7 @@ static void o2net_sendpage(struct o2net_sock_container *sc,
 		mutex_lock(&sc->sc_send_lock);
 		ret = sc->sc_sock->ops->sendpage(sc->sc_sock,
 						 virt_to_page(kmalloced_virt),
-						 (long)kmalloced_virt & ~PAGE_MASK,
+						 offset_in_page(kmalloced_virt),
 						 size, MSG_DONTWAIT);
 		mutex_unlock(&sc->sc_send_lock);
 		if (ret == size)
@@ -1033,6 +988,26 @@ static int o2net_tx_can_proceed(struct o2net_node *nn,
 
 	return ret;
 }
+
+/* Get a map of all nodes to which this node is currently connected to */
+void o2net_fill_node_map(unsigned long *map, unsigned bytes)
+{
+	struct o2net_sock_container *sc;
+	int node, ret;
+
+	BUG_ON(bytes < (BITS_TO_LONGS(O2NM_MAX_NODES) * sizeof(unsigned long)));
+
+	memset(map, 0, bytes);
+	for (node = 0; node < O2NM_MAX_NODES; ++node) {
+		if (!o2net_tx_can_proceed(o2net_nn_from_num(node), &sc, &ret))
+			continue;
+		if (!ret) {
+			set_bit(node, map);
+			sc_put(sc);
+		}
+	}
+}
+EXPORT_SYMBOL_GPL(o2net_fill_node_map);
 
 int o2net_send_message_vec(u32 msg_type, u32 key, struct kvec *caller_vec,
 			   size_t caller_veclen, u8 target_node, int *status)
@@ -1085,7 +1060,7 @@ int o2net_send_message_vec(u32 msg_type, u32 key, struct kvec *caller_vec,
 	o2net_set_nst_sock_container(&nst, sc);
 
 	veclen = caller_veclen + 1;
-	vec = kmalloc(sizeof(struct kvec) * veclen, GFP_ATOMIC);
+	vec = kmalloc_array(veclen, sizeof(struct kvec), GFP_ATOMIC);
 	if (vec == NULL) {
 		mlog(0, "failed to %zu element kvec!\n", veclen);
 		ret = -ENOMEM;
@@ -1145,10 +1120,8 @@ out:
 	o2net_debug_del_nst(&nst); /* must be before dropping sc and node */
 	if (sc)
 		sc_put(sc);
-	if (vec)
-		kfree(vec);
-	if (msg)
-		kfree(msg);
+	kfree(vec);
+	kfree(msg);
 	o2net_complete_nsw(nn, &nsw, 0, 0, 0);
 	return ret;
 }
@@ -1223,7 +1196,6 @@ static int o2net_process_message(struct o2net_sock_container *sc,
 			msglog(hdr, "bad magic\n");
 			ret = -EINVAL;
 			goto out;
-			break;
 	}
 
 	/* find a handler for it */
@@ -1284,11 +1256,11 @@ static int o2net_check_handshake(struct o2net_sock_container *sc)
 	struct o2net_node *nn = o2net_nn_from_num(sc->sc_node->nd_num);
 
 	if (hand->protocol_version != cpu_to_be64(O2NET_PROTOCOL_VERSION)) {
-		mlog(ML_NOTICE, SC_NODEF_FMT " advertised net protocol "
-		     "version %llu but %llu is required, disconnecting\n",
-		     SC_NODEF_ARGS(sc),
-		     (unsigned long long)be64_to_cpu(hand->protocol_version),
-		     O2NET_PROTOCOL_VERSION);
+		printk(KERN_NOTICE "o2net: " SC_NODEF_FMT " Advertised net "
+		       "protocol version %llu but %llu is required. "
+		       "Disconnecting.\n", SC_NODEF_ARGS(sc),
+		       (unsigned long long)be64_to_cpu(hand->protocol_version),
+		       O2NET_PROTOCOL_VERSION);
 
 		/* don't bother reconnecting if its the wrong version. */
 		o2net_ensure_shutdown(nn, sc, -ENOTCONN);
@@ -1302,33 +1274,33 @@ static int o2net_check_handshake(struct o2net_sock_container *sc)
 	 */
 	if (be32_to_cpu(hand->o2net_idle_timeout_ms) !=
 				o2net_idle_timeout()) {
-		mlog(ML_NOTICE, SC_NODEF_FMT " uses a network idle timeout of "
-		     "%u ms, but we use %u ms locally.  disconnecting\n",
-		     SC_NODEF_ARGS(sc),
-		     be32_to_cpu(hand->o2net_idle_timeout_ms),
-		     o2net_idle_timeout());
+		printk(KERN_NOTICE "o2net: " SC_NODEF_FMT " uses a network "
+		       "idle timeout of %u ms, but we use %u ms locally. "
+		       "Disconnecting.\n", SC_NODEF_ARGS(sc),
+		       be32_to_cpu(hand->o2net_idle_timeout_ms),
+		       o2net_idle_timeout());
 		o2net_ensure_shutdown(nn, sc, -ENOTCONN);
 		return -1;
 	}
 
 	if (be32_to_cpu(hand->o2net_keepalive_delay_ms) !=
 			o2net_keepalive_delay()) {
-		mlog(ML_NOTICE, SC_NODEF_FMT " uses a keepalive delay of "
-		     "%u ms, but we use %u ms locally.  disconnecting\n",
-		     SC_NODEF_ARGS(sc),
-		     be32_to_cpu(hand->o2net_keepalive_delay_ms),
-		     o2net_keepalive_delay());
+		printk(KERN_NOTICE "o2net: " SC_NODEF_FMT " uses a keepalive "
+		       "delay of %u ms, but we use %u ms locally. "
+		       "Disconnecting.\n", SC_NODEF_ARGS(sc),
+		       be32_to_cpu(hand->o2net_keepalive_delay_ms),
+		       o2net_keepalive_delay());
 		o2net_ensure_shutdown(nn, sc, -ENOTCONN);
 		return -1;
 	}
 
 	if (be32_to_cpu(hand->o2hb_heartbeat_timeout_ms) !=
 			O2HB_MAX_WRITE_TIMEOUT_MS) {
-		mlog(ML_NOTICE, SC_NODEF_FMT " uses a heartbeat timeout of "
-		     "%u ms, but we use %u ms locally.  disconnecting\n",
-		     SC_NODEF_ARGS(sc),
-		     be32_to_cpu(hand->o2hb_heartbeat_timeout_ms),
-		     O2HB_MAX_WRITE_TIMEOUT_MS);
+		printk(KERN_NOTICE "o2net: " SC_NODEF_FMT " uses a heartbeat "
+		       "timeout of %u ms, but we use %u ms locally. "
+		       "Disconnecting.\n", SC_NODEF_ARGS(sc),
+		       be32_to_cpu(hand->o2hb_heartbeat_timeout_ms),
+		       O2HB_MAX_WRITE_TIMEOUT_MS);
 		o2net_ensure_shutdown(nn, sc, -ENOTCONN);
 		return -1;
 	}
@@ -1466,31 +1438,6 @@ static void o2net_rx_until_empty(struct work_struct *work)
 	sc_put(sc);
 }
 
-static int o2net_set_nodelay(struct socket *sock)
-{
-	int ret, val = 1;
-	mm_segment_t oldfs;
-
-	oldfs = get_fs();
-	set_fs(KERNEL_DS);
-
-	/*
-	 * Dear unsuspecting programmer,
-	 *
-	 * Don't use sock_setsockopt() for SOL_TCP.  It doesn't check its level
-	 * argument and assumes SOL_SOCKET so, say, your TCP_NODELAY will
-	 * silently turn into SO_DEBUG.
-	 *
-	 * Yours,
-	 * Keeper of hilariously fragile interfaces.
-	 */
-	ret = sock->ops->setsockopt(sock, SOL_TCP, TCP_NODELAY,
-				    (char __user *)&val, sizeof(val));
-
-	set_fs(oldfs);
-	return ret;
-}
-
 static void o2net_initialize_handshake(void)
 {
 	o2net_hand->o2hb_heartbeat_timeout_ms = cpu_to_be32(
@@ -1535,40 +1482,32 @@ static void o2net_sc_send_keep_req(struct work_struct *work)
 /* socket shutdown does a del_timer_sync against this as it tears down.
  * we can't start this timer until we've got to the point in sc buildup
  * where shutdown is going to be involved */
-static void o2net_idle_timer(unsigned long data)
+static void o2net_idle_timer(struct timer_list *t)
 {
-	struct o2net_sock_container *sc = (struct o2net_sock_container *)data;
+	struct o2net_sock_container *sc = from_timer(sc, t, sc_idle_timeout);
 	struct o2net_node *nn = o2net_nn_from_num(sc->sc_node->nd_num);
-
 #ifdef CONFIG_DEBUG_FS
-	ktime_t now = ktime_get();
+	unsigned long msecs = ktime_to_ms(ktime_get()) -
+		ktime_to_ms(sc->sc_tv_timer);
+#else
+	unsigned long msecs = o2net_idle_timeout();
 #endif
 
-	printk(KERN_NOTICE "o2net: connection to " SC_NODEF_FMT " has been idle for %u.%u "
-	     "seconds, shutting it down.\n", SC_NODEF_ARGS(sc),
-		     o2net_idle_timeout() / 1000,
-		     o2net_idle_timeout() % 1000);
+	printk(KERN_NOTICE "o2net: Connection to " SC_NODEF_FMT " has been "
+	       "idle for %lu.%lu secs.\n",
+	       SC_NODEF_ARGS(sc), msecs / 1000, msecs % 1000);
 
-#ifdef CONFIG_DEBUG_FS
-	mlog(ML_NOTICE, "Here are some times that might help debug the "
-	     "situation: (Timer: %lld, Now %lld, DataReady %lld, Advance %lld-%lld, "
-	     "Key 0x%08x, Func %u, FuncTime %lld-%lld)\n",
-	     (long long)ktime_to_us(sc->sc_tv_timer), (long long)ktime_to_us(now),
-	     (long long)ktime_to_us(sc->sc_tv_data_ready),
-	     (long long)ktime_to_us(sc->sc_tv_advance_start),
-	     (long long)ktime_to_us(sc->sc_tv_advance_stop),
-	     sc->sc_msg_key, sc->sc_msg_type,
-	     (long long)ktime_to_us(sc->sc_tv_func_start),
-	     (long long)ktime_to_us(sc->sc_tv_func_stop));
-#endif
-
-	/*
-	 * Initialize the nn_timeout so that the next connection attempt
-	 * will continue in o2net_start_connect.
+	/* idle timerout happen, don't shutdown the connection, but
+	 * make fence decision. Maybe the connection can recover before
+	 * the decision is made.
 	 */
 	atomic_set(&nn->nn_timeout, 1);
+	o2quo_conn_err(o2net_num_from_nn(nn));
+	queue_delayed_work(o2net_wq, &nn->nn_still_up,
+			msecs_to_jiffies(O2NET_QUORUM_DELAY_MS));
 
-	o2net_sc_queue_work(sc, &sc->sc_shutdown_work);
+	o2net_sc_reset_idle_timer(sc);
+
 }
 
 static void o2net_sc_reset_idle_timer(struct o2net_sock_container *sc)
@@ -1583,6 +1522,15 @@ static void o2net_sc_reset_idle_timer(struct o2net_sock_container *sc)
 
 static void o2net_sc_postpone_idle(struct o2net_sock_container *sc)
 {
+	struct o2net_node *nn = o2net_nn_from_num(sc->sc_node->nd_num);
+
+	/* clear fence decision since the connection recover from timeout*/
+	if (atomic_read(&nn->nn_timeout)) {
+		o2quo_conn_up(o2net_num_from_nn(nn));
+		cancel_delayed_work(&nn->nn_still_up);
+		atomic_set(&nn->nn_timeout, 0);
+	}
+
 	/* Only push out an existing timer */
 	if (timer_pending(&sc->sc_idle_timeout))
 		o2net_sc_reset_idle_timer(sc);
@@ -1603,23 +1551,25 @@ static void o2net_start_connect(struct work_struct *work)
 	struct sockaddr_in myaddr = {0, }, remoteaddr = {0, };
 	int ret = 0, stop;
 	unsigned int timeout;
+	unsigned int nofs_flag;
 
+	/*
+	 * sock_create allocates the sock with GFP_KERNEL. We must
+	 * prevent the filesystem from being reentered by memory reclaim.
+	 */
+	nofs_flag = memalloc_nofs_save();
 	/* if we're greater we initiate tx, otherwise we accept */
 	if (o2nm_this_node() <= o2net_num_from_nn(nn))
 		goto out;
 
 	/* watch for racing with tearing a node down */
 	node = o2nm_get_node_by_num(o2net_num_from_nn(nn));
-	if (node == NULL) {
-		ret = 0;
+	if (node == NULL)
 		goto out;
-	}
 
 	mynode = o2nm_get_node_by_num(o2nm_this_node());
-	if (mynode == NULL) {
-		ret = 0;
+	if (mynode == NULL)
 		goto out;
-	}
 
 	spin_lock(&nn->nn_lock);
 	/*
@@ -1667,11 +1617,8 @@ static void o2net_start_connect(struct work_struct *work)
 		goto out;
 	}
 
-	ret = o2net_set_nodelay(sc->sc_sock);
-	if (ret) {
-		mlog(ML_ERROR, "setting TCP_NODELAY failed with %d\n", ret);
-		goto out;
-	}
+	tcp_sock_set_nodelay(sc->sc_sock->sk);
+	tcp_sock_set_user_timeout(sock->sk, O2NET_TCP_USER_TIMEOUT);
 
 	o2net_register_callbacks(sc->sc_sock->sk, sc);
 
@@ -1692,13 +1639,12 @@ static void o2net_start_connect(struct work_struct *work)
 		ret = 0;
 
 out:
-	if (ret) {
-		mlog(ML_NOTICE, "connect attempt to " SC_NODEF_FMT " failed "
-		     "with errno %d\n", SC_NODEF_ARGS(sc), ret);
+	if (ret && sc) {
+		printk(KERN_NOTICE "o2net: Connect attempt to " SC_NODEF_FMT
+		       " failed with errno %d\n", SC_NODEF_ARGS(sc), ret);
 		/* 0 err so that another will be queued and attempted
 		 * from set_nn_state */
-		if (sc)
-			o2net_ensure_shutdown(nn, sc, 0);
+		o2net_ensure_shutdown(nn, sc, 0);
 	}
 	if (sc)
 		sc_put(sc);
@@ -1707,6 +1653,7 @@ out:
 	if (mynode)
 		o2nm_node_put(mynode);
 
+	memalloc_nofs_restore(nofs_flag);
 	return;
 }
 
@@ -1717,13 +1664,14 @@ static void o2net_connect_expired(struct work_struct *work)
 
 	spin_lock(&nn->nn_lock);
 	if (!nn->nn_sc_valid) {
-		mlog(ML_ERROR, "no connection established with node %u after "
-		     "%u.%u seconds, giving up and returning errors.\n",
+		printk(KERN_NOTICE "o2net: No connection established with "
+		       "node %u after %u.%u seconds, check network and"
+		       " cluster configuration.\n",
 		     o2net_num_from_nn(nn),
 		     o2net_idle_timeout() / 1000,
 		     o2net_idle_timeout() % 1000);
 
-		o2net_set_nn_state(nn, NULL, 0, -ENOTCONN);
+		o2net_set_nn_state(nn, NULL, 0, 0);
 	}
 	spin_unlock(&nn->nn_lock);
 }
@@ -1784,7 +1732,7 @@ static void o2net_hb_node_up_cb(struct o2nm_node *node, int node_num,
 		(msecs_to_jiffies(o2net_reconnect_delay()) + 1);
 
 	if (node_num != o2nm_this_node()) {
-		/* believe it or not, accept and node hearbeating testing
+		/* believe it or not, accept and node heartbeating testing
 		 * can succeed for this node before we got here.. so
 		 * only use set_nn_state to clear the persistent error
 		 * if that hasn't already happened */
@@ -1823,17 +1771,25 @@ int o2net_register_hb_callbacks(void)
 
 /* ------------------------------------------------------------ */
 
-static int o2net_accept_one(struct socket *sock)
+static int o2net_accept_one(struct socket *sock, int *more)
 {
-	int ret, slen;
+	int ret;
 	struct sockaddr_in sin;
 	struct socket *new_sock = NULL;
 	struct o2nm_node *node = NULL;
 	struct o2nm_node *local_node = NULL;
 	struct o2net_sock_container *sc = NULL;
 	struct o2net_node *nn;
+	unsigned int nofs_flag;
+
+	/*
+	 * sock_create_lite allocates the sock with GFP_KERNEL. We must
+	 * prevent the filesystem from being reentered by memory reclaim.
+	 */
+	nofs_flag = memalloc_nofs_save();
 
 	BUG_ON(sock == NULL);
+	*more = 0;
 	ret = sock_create_lite(sock->sk->sk_family, sock->sk->sk_type,
 			       sock->sk->sk_protocol, &new_sock);
 	if (ret)
@@ -1841,41 +1797,41 @@ static int o2net_accept_one(struct socket *sock)
 
 	new_sock->type = sock->type;
 	new_sock->ops = sock->ops;
-	ret = sock->ops->accept(sock, new_sock, O_NONBLOCK);
+	ret = sock->ops->accept(sock, new_sock, O_NONBLOCK, false);
 	if (ret < 0)
 		goto out;
 
+	*more = 1;
 	new_sock->sk->sk_allocation = GFP_ATOMIC;
 
-	ret = o2net_set_nodelay(new_sock);
-	if (ret) {
-		mlog(ML_ERROR, "setting TCP_NODELAY failed with %d\n", ret);
-		goto out;
-	}
+	tcp_sock_set_nodelay(new_sock->sk);
+	tcp_sock_set_user_timeout(new_sock->sk, O2NET_TCP_USER_TIMEOUT);
 
-	slen = sizeof(sin);
-	ret = new_sock->ops->getname(new_sock, (struct sockaddr *) &sin,
-				       &slen, 1);
+	ret = new_sock->ops->getname(new_sock, (struct sockaddr *) &sin, 1);
 	if (ret < 0)
 		goto out;
 
 	node = o2nm_get_node_by_ip(sin.sin_addr.s_addr);
 	if (node == NULL) {
-		mlog(ML_NOTICE, "attempt to connect from unknown node at %pI4:%d\n",
-		     &sin.sin_addr.s_addr, ntohs(sin.sin_port));
+		printk(KERN_NOTICE "o2net: Attempt to connect from unknown "
+		       "node at %pI4:%d\n", &sin.sin_addr.s_addr,
+		       ntohs(sin.sin_port));
 		ret = -EINVAL;
 		goto out;
 	}
 
 	if (o2nm_this_node() >= node->nd_num) {
 		local_node = o2nm_get_node_by_num(o2nm_this_node());
-		mlog(ML_NOTICE, "unexpected connect attempt seen at node '%s' ("
-		     "%u, %pI4:%d) from node '%s' (%u, %pI4:%d)\n",
-		     local_node->nd_name, local_node->nd_num,
-		     &(local_node->nd_ipv4_address),
-		     ntohs(local_node->nd_ipv4_port),
-		     node->nd_name, node->nd_num, &sin.sin_addr.s_addr,
-		     ntohs(sin.sin_port));
+		if (local_node)
+			printk(KERN_NOTICE "o2net: Unexpected connect attempt "
+					"seen at node '%s' (%u, %pI4:%d) from "
+					"node '%s' (%u, %pI4:%d)\n",
+					local_node->nd_name, local_node->nd_num,
+					&(local_node->nd_ipv4_address),
+					ntohs(local_node->nd_ipv4_port),
+					node->nd_name,
+					node->nd_num, &sin.sin_addr.s_addr,
+					ntohs(sin.sin_port));
 		ret = -EINVAL;
 		goto out;
 	}
@@ -1900,10 +1856,10 @@ static int o2net_accept_one(struct socket *sock)
 		ret = 0;
 	spin_unlock(&nn->nn_lock);
 	if (ret) {
-		mlog(ML_NOTICE, "attempt to connect from node '%s' at "
-		     "%pI4:%d but it already has an open connection\n",
-		     node->nd_name, &sin.sin_addr.s_addr,
-		     ntohs(sin.sin_port));
+		printk(KERN_NOTICE "o2net: Attempt to connect from node '%s' "
+		       "at %pI4:%d but it already has an open connection\n",
+		       node->nd_name, &sin.sin_addr.s_addr,
+		       ntohs(sin.sin_port));
 		goto out;
 	}
 
@@ -1936,39 +1892,76 @@ out:
 		o2nm_node_put(local_node);
 	if (sc)
 		sc_put(sc);
+
+	memalloc_nofs_restore(nofs_flag);
 	return ret;
 }
+
+/*
+ * This function is invoked in response to one or more
+ * pending accepts at softIRQ level. We must drain the
+ * entire que before returning.
+ */
 
 static void o2net_accept_many(struct work_struct *work)
 {
 	struct socket *sock = o2net_listen_sock;
-	while (o2net_accept_one(sock) == 0)
+	int	more;
+
+	/*
+	 * It is critical to note that due to interrupt moderation
+	 * at the network driver level, we can't assume to get a
+	 * softIRQ for every single conn since tcp SYN packets
+	 * can arrive back-to-back, and therefore many pending
+	 * accepts may result in just 1 softIRQ. If we terminate
+	 * the o2net_accept_one() loop upon seeing an err, what happens
+	 * to the rest of the conns in the queue? If no new SYN
+	 * arrives for hours, no softIRQ  will be delivered,
+	 * and the connections will just sit in the queue.
+	 */
+
+	for (;;) {
+		o2net_accept_one(sock, &more);
+		if (!more)
+			break;
 		cond_resched();
+	}
 }
 
-static void o2net_listen_data_ready(struct sock *sk, int bytes)
+static void o2net_listen_data_ready(struct sock *sk)
 {
-	void (*ready)(struct sock *sk, int bytes);
+	void (*ready)(struct sock *sk);
 
-	read_lock(&sk->sk_callback_lock);
+	read_lock_bh(&sk->sk_callback_lock);
 	ready = sk->sk_user_data;
 	if (ready == NULL) { /* check for teardown race */
 		ready = sk->sk_data_ready;
 		goto out;
 	}
 
-	/* ->sk_data_ready is also called for a newly established child socket
-	 * before it has been accepted and the acceptor has set up their
-	 * data_ready.. we only want to queue listen work for our listening
-	 * socket */
+	/* This callback may called twice when a new connection
+	 * is  being established as a child socket inherits everything
+	 * from a parent LISTEN socket, including the data_ready cb of
+	 * the parent. This leads to a hazard. In o2net_accept_one()
+	 * we are still initializing the child socket but have not
+	 * changed the inherited data_ready callback yet when
+	 * data starts arriving.
+	 * We avoid this hazard by checking the state.
+	 * For the listening socket,  the state will be TCP_LISTEN; for the new
+	 * socket, will be  TCP_ESTABLISHED. Also, in this case,
+	 * sk->sk_user_data is not a valid function pointer.
+	 */
+
 	if (sk->sk_state == TCP_LISTEN) {
-		mlog(ML_TCP, "bytes: %d\n", bytes);
 		queue_work(o2net_wq, &o2net_listen_work);
+	} else {
+		ready = NULL;
 	}
 
 out:
-	read_unlock(&sk->sk_callback_lock);
-	ready(sk, bytes);
+	read_unlock_bh(&sk->sk_callback_lock);
+	if (ready != NULL)
+		ready(sk);
 }
 
 static int o2net_open_listening_sock(__be32 addr, __be16 port)
@@ -1983,7 +1976,7 @@ static int o2net_open_listening_sock(__be32 addr, __be16 port)
 
 	ret = sock_create(PF_INET, SOCK_STREAM, IPPROTO_TCP, &sock);
 	if (ret < 0) {
-		mlog(ML_ERROR, "unable to create socket, ret=%d\n", ret);
+		printk(KERN_ERR "o2net: Error %d while creating socket\n", ret);
 		goto out;
 	}
 
@@ -1997,19 +1990,18 @@ static int o2net_open_listening_sock(__be32 addr, __be16 port)
 	o2net_listen_sock = sock;
 	INIT_WORK(&o2net_listen_work, o2net_accept_many);
 
-	sock->sk->sk_reuse = 1;
+	sock->sk->sk_reuse = SK_CAN_REUSE;
 	ret = sock->ops->bind(sock, (struct sockaddr *)&sin, sizeof(sin));
 	if (ret < 0) {
-		mlog(ML_ERROR, "unable to bind socket at %pI4:%u, "
-		     "ret=%d\n", &addr, ntohs(port), ret);
+		printk(KERN_ERR "o2net: Error %d while binding socket at "
+		       "%pI4:%u\n", ret, &addr, ntohs(port)); 
 		goto out;
 	}
 
 	ret = sock->ops->listen(sock, 64);
-	if (ret < 0) {
-		mlog(ML_ERROR, "unable to listen on %pI4:%u, ret=%d\n",
-		     &addr, ntohs(port), ret);
-	}
+	if (ret < 0)
+		printk(KERN_ERR "o2net: Error %d while listening on %pI4:%u\n",
+		       ret, &addr, ntohs(port));
 
 out:
 	if (ret) {
@@ -2035,7 +2027,7 @@ int o2net_start_listening(struct o2nm_node *node)
 	BUG_ON(o2net_listen_sock != NULL);
 
 	mlog(ML_KTHREAD, "starting o2net thread...\n");
-	o2net_wq = create_singlethread_workqueue("o2net");
+	o2net_wq = alloc_ordered_workqueue("o2net", WQ_MEM_RECLAIM);
 	if (o2net_wq == NULL) {
 		mlog(ML_ERROR, "unable to launch o2net thread\n");
 		return -ENOMEM; /* ? */
@@ -2095,18 +2087,13 @@ int o2net_init(void)
 
 	o2quo_init();
 
-	if (o2net_debugfs_init())
-		return -ENOMEM;
+	o2net_debugfs_init();
 
 	o2net_hand = kzalloc(sizeof(struct o2net_handshake), GFP_KERNEL);
 	o2net_keep_req = kzalloc(sizeof(struct o2net_msg), GFP_KERNEL);
 	o2net_keep_resp = kzalloc(sizeof(struct o2net_msg), GFP_KERNEL);
-	if (!o2net_hand || !o2net_keep_req || !o2net_keep_resp) {
-		kfree(o2net_hand);
-		kfree(o2net_keep_req);
-		kfree(o2net_keep_resp);
-		return -ENOMEM;
-	}
+	if (!o2net_hand || !o2net_keep_req || !o2net_keep_resp)
+		goto out;
 
 	o2net_hand->protocol_version = cpu_to_be64(O2NET_PROTOCOL_VERSION);
 	o2net_hand->connector_id = cpu_to_be64(1);
@@ -2131,6 +2118,14 @@ int o2net_init(void)
 	}
 
 	return 0;
+
+out:
+	kfree(o2net_hand);
+	kfree(o2net_keep_req);
+	kfree(o2net_keep_resp);
+	o2net_debugfs_exit();
+	o2quo_exit();
+	return -ENOMEM;
 }
 
 void o2net_exit(void)

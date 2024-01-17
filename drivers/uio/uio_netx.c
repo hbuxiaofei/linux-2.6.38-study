@@ -1,11 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * UIO driver for Hilscher NetX based fieldbus cards (cifX, comX).
  * See http://www.hilscher.com for details.
  *
  * (C) 2007 Hans J. Koch <hjk@hansjkoch.de>
  * (C) 2008 Manuel Traut <manut@linutronix.de>
- *
- * Licensed under GPL version 2 only.
  *
  */
 
@@ -18,6 +17,9 @@
 
 #define PCI_VENDOR_ID_HILSCHER		0x15CF
 #define PCI_DEVICE_ID_HILSCHER_NETX	0x0000
+#define PCI_DEVICE_ID_HILSCHER_NETPLC	0x0010
+#define PCI_SUBDEVICE_ID_NETPLC_RAM	0x0000
+#define PCI_SUBDEVICE_ID_NETPLC_FLASH	0x0001
 #define PCI_SUBDEVICE_ID_NXSB_PCA	0x3235
 #define PCI_SUBDEVICE_ID_NXPCA		0x3335
 
@@ -45,18 +47,18 @@ static irqreturn_t netx_handler(int irq, struct uio_info *dev_info)
 	return IRQ_HANDLED;
 }
 
-static int __devinit netx_pci_probe(struct pci_dev *dev,
+static int netx_pci_probe(struct pci_dev *dev,
 					const struct pci_device_id *id)
 {
 	struct uio_info *info;
 	int bar;
 
-	info = kzalloc(sizeof(struct uio_info), GFP_KERNEL);
+	info = devm_kzalloc(&dev->dev, sizeof(struct uio_info), GFP_KERNEL);
 	if (!info)
 		return -ENOMEM;
 
 	if (pci_enable_device(dev))
-		goto out_free;
+		return -ENODEV;
 
 	if (pci_request_regions(dev, "netx"))
 		goto out_disable;
@@ -65,6 +67,10 @@ static int __devinit netx_pci_probe(struct pci_dev *dev,
 	case PCI_DEVICE_ID_HILSCHER_NETX:
 		bar = 0;
 		info->name = "netx";
+		break;
+	case PCI_DEVICE_ID_HILSCHER_NETPLC:
+		bar = 0;
+		info->name = "netplc";
 		break;
 	default:
 		bar = 2;
@@ -106,8 +112,6 @@ out_release:
 	pci_release_regions(dev);
 out_disable:
 	pci_disable_device(dev);
-out_free:
-	kfree(info);
 	return -ENODEV;
 }
 
@@ -120,10 +124,7 @@ static void netx_pci_remove(struct pci_dev *dev)
 	uio_unregister_device(info);
 	pci_release_regions(dev);
 	pci_disable_device(dev);
-	pci_set_drvdata(dev, NULL);
 	iounmap(info->mem[0].internal_addr);
-
-	kfree(info);
 }
 
 static struct pci_device_id netx_pci_ids[] = {
@@ -132,6 +133,18 @@ static struct pci_device_id netx_pci_ids[] = {
 		.device =	PCI_DEVICE_ID_HILSCHER_NETX,
 		.subvendor =	0,
 		.subdevice =	0,
+	},
+	{
+		.vendor =       PCI_VENDOR_ID_HILSCHER,
+		.device =       PCI_DEVICE_ID_HILSCHER_NETPLC,
+		.subvendor =    PCI_VENDOR_ID_HILSCHER,
+		.subdevice =    PCI_SUBDEVICE_ID_NETPLC_RAM,
+	},
+	{
+		.vendor =       PCI_VENDOR_ID_HILSCHER,
+		.device =       PCI_DEVICE_ID_HILSCHER_NETPLC,
+		.subvendor =    PCI_VENDOR_ID_HILSCHER,
+		.subdevice =    PCI_SUBDEVICE_ID_NETPLC_FLASH,
 	},
 	{
 		.vendor =	PCI_VENDOR_ID_PLX,
@@ -155,19 +168,7 @@ static struct pci_driver netx_pci_driver = {
 	.remove = netx_pci_remove,
 };
 
-static int __init netx_init_module(void)
-{
-	return pci_register_driver(&netx_pci_driver);
-}
-
-static void __exit netx_exit_module(void)
-{
-	pci_unregister_driver(&netx_pci_driver);
-}
-
-module_init(netx_init_module);
-module_exit(netx_exit_module);
-
+module_pci_driver(netx_pci_driver);
 MODULE_DEVICE_TABLE(pci, netx_pci_ids);
 MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR("Hans J. Koch, Manuel Traut");

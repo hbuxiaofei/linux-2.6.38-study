@@ -1,7 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) ST-Ericsson AB 2010
- * Author:	Sjur Brendeland/sjur.brandeland@stericsson.com
- * License terms: GNU General Public License (GPL) version 2
+ * Author:	Sjur Brendeland
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ":%s(): " fmt, __func__
@@ -13,12 +13,12 @@
 #include <net/caif/cfsrvl.h>
 #include <net/caif/cfpkt.h>
 
+
 #define container_obj(layr) ((struct cfsrvl *) layr)
 
 #define DGM_CMD_BIT  0x80
 #define DGM_FLOW_OFF 0x81
 #define DGM_FLOW_ON  0x80
-#define DGM_CTRL_PKT_SIZE 1
 #define DGM_MTU 1500
 
 static int cfdgml_receive(struct cflayer *layr, struct cfpkt *pkt);
@@ -26,18 +26,14 @@ static int cfdgml_transmit(struct cflayer *layr, struct cfpkt *pkt);
 
 struct cflayer *cfdgml_create(u8 channel_id, struct dev_info *dev_info)
 {
-	struct cfsrvl *dgm = kmalloc(sizeof(struct cfsrvl), GFP_ATOMIC);
-	if (!dgm) {
-		pr_warn("Out of memory\n");
+	struct cfsrvl *dgm = kzalloc(sizeof(struct cfsrvl), GFP_ATOMIC);
+	if (!dgm)
 		return NULL;
-	}
 	caif_assert(offsetof(struct cfsrvl, layer) == 0);
-	memset(dgm, 0, sizeof(struct cfsrvl));
 	cfsrvl_init(dgm, channel_id, dev_info, true);
 	dgm->layer.receive = cfdgml_receive;
 	dgm->layer.transmit = cfdgml_transmit;
-	snprintf(dgm->layer.name, CAIF_LAYER_NAME_SZ - 1, "dgm%d", channel_id);
-	dgm->layer.name[CAIF_LAYER_NAME_SZ - 1] = '\0';
+	snprintf(dgm->layer.name, CAIF_LAYER_NAME_SZ, "dgm%d", channel_id);
 	return &dgm->layer;
 }
 
@@ -84,18 +80,26 @@ static int cfdgml_receive(struct cflayer *layr, struct cfpkt *pkt)
 
 static int cfdgml_transmit(struct cflayer *layr, struct cfpkt *pkt)
 {
+	u8 packet_type;
 	u32 zero = 0;
 	struct caif_payload_info *info;
 	struct cfsrvl *service = container_obj(layr);
 	int ret;
-	if (!cfsrvl_ready(service, &ret))
+
+	if (!cfsrvl_ready(service, &ret)) {
+		cfpkt_destroy(pkt);
 		return ret;
+	}
 
 	/* STE Modem cannot handle more than 1500 bytes datagrams */
-	if (cfpkt_getlen(pkt) > DGM_MTU)
+	if (cfpkt_getlen(pkt) > DGM_MTU) {
+		cfpkt_destroy(pkt);
 		return -EMSGSIZE;
+	}
 
-	cfpkt_add_head(pkt, &zero, 4);
+	cfpkt_add_head(pkt, &zero, 3);
+	packet_type = 0x08; /* B9 set - UNCLASSIFIED */
+	cfpkt_add_head(pkt, &packet_type, 1);
 
 	/* Add info for MUX-layer to route the packet out. */
 	info = cfpkt_info(pkt);
@@ -105,10 +109,5 @@ static int cfdgml_transmit(struct cflayer *layr, struct cfpkt *pkt)
 	 */
 	info->hdr_len = 4;
 	info->dev_info = &service->dev_info;
-	ret = layr->dn->transmit(layr->dn, pkt);
-	if (ret < 0) {
-		u32 tmp32;
-		cfpkt_extr_head(pkt, &tmp32, 4);
-	}
-	return ret;
+	return layr->dn->transmit(layr->dn, pkt);
 }

@@ -1,9 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Driver for the Analog Devices digital potentiometers (I2C bus)
  *
- * Copyright (C) 2010 Michael Hennerich, Analog Devices Inc.
- *
- * Licensed under the GPL-2 or later.
+ * Copyright (C) 2010-2011 Michael Hennerich, Analog Devices Inc.
  */
 
 #include <linux/i2c.h>
@@ -11,7 +10,6 @@
 
 #include "ad525x_dpot.h"
 
-/* ------------------------------------------------------------------------- */
 /* I2C bus functions */
 static int write_d8(void *client, u8 val)
 {
@@ -52,17 +50,12 @@ static const struct ad_dpot_bus_ops bops = {
 	.write_r8d16	= write_r8d16,
 };
 
-static int __devinit ad_dpot_i2c_probe(struct i2c_client *client,
+static int ad_dpot_i2c_probe(struct i2c_client *client,
 				      const struct i2c_device_id *id)
 {
 	struct ad_dpot_bus_data bdata = {
 		.client = client,
 		.bops = &bops,
-	};
-
-	struct ad_dpot_id dpot_id = {
-		.name = (char *) &id->name,
-		.devid = id->driver_data,
 	};
 
 	if (!i2c_check_functionality(client->adapter,
@@ -71,12 +64,12 @@ static int __devinit ad_dpot_i2c_probe(struct i2c_client *client,
 		return -EIO;
 	}
 
-	return ad_dpot_probe(&client->dev, &bdata, &dpot_id);
+	return ad_dpot_probe(&client->dev, &bdata, id->driver_data, id->name);
 }
 
-static int __devexit ad_dpot_i2c_remove(struct i2c_client *client)
+static void ad_dpot_i2c_remove(struct i2c_client *client)
 {
-	return ad_dpot_remove(&client->dev);
+	ad_dpot_remove(&client->dev);
 }
 
 static const struct i2c_device_id ad_dpot_id[] = {
@@ -98,6 +91,7 @@ static const struct i2c_device_id ad_dpot_id[] = {
 	{"ad5282", AD5282_ID},
 	{"adn2860", ADN2860_ID},
 	{"ad5273", AD5273_ID},
+	{"ad5161", AD5161_ID},
 	{"ad5171", AD5171_ID},
 	{"ad5170", AD5170_ID},
 	{"ad5172", AD5172_ID},
@@ -111,26 +105,14 @@ MODULE_DEVICE_TABLE(i2c, ad_dpot_id);
 static struct i2c_driver ad_dpot_i2c_driver = {
 	.driver = {
 		.name	= "ad_dpot",
-		.owner	= THIS_MODULE,
 	},
 	.probe		= ad_dpot_i2c_probe,
-	.remove		= __devexit_p(ad_dpot_i2c_remove),
+	.remove		= ad_dpot_i2c_remove,
 	.id_table	= ad_dpot_id,
 };
 
-static int __init ad_dpot_i2c_init(void)
-{
-	return i2c_add_driver(&ad_dpot_i2c_driver);
-}
-module_init(ad_dpot_i2c_init);
+module_i2c_driver(ad_dpot_i2c_driver);
 
-static void __exit ad_dpot_i2c_exit(void)
-{
-	i2c_del_driver(&ad_dpot_i2c_driver);
-}
-module_exit(ad_dpot_i2c_exit);
-
-MODULE_AUTHOR("Michael Hennerich <hennerich@blackfin.uclinux.org>");
+MODULE_AUTHOR("Michael Hennerich <michael.hennerich@analog.com>");
 MODULE_DESCRIPTION("digital potentiometer I2C bus driver");
 MODULE_LICENSE("GPL");
-MODULE_ALIAS("i2c:ad_dpot");

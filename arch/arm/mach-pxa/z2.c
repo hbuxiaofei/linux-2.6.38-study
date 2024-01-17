@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  linux/arch/arm/mach-pxa/z2.c
  *
@@ -7,40 +8,37 @@
  *
  *  Based on research and code by: Ken McGuire
  *  Based on mainstone.c as modified for the Zipit Z2.
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License version 2 as
- *  published by the Free Software Foundation.
  */
 
 #include <linux/platform_device.h>
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/partitions.h>
+#include <linux/pwm.h>
 #include <linux/pwm_backlight.h>
 #include <linux/z2_battery.h>
 #include <linux/dma-mapping.h>
 #include <linux/spi/spi.h>
 #include <linux/spi/pxa2xx_spi.h>
 #include <linux/spi/libertas_spi.h>
-#include <linux/spi/lms283gf05.h>
 #include <linux/power_supply.h>
 #include <linux/mtd/physmap.h>
 #include <linux/gpio.h>
+#include <linux/gpio/machine.h>
 #include <linux/gpio_keys.h>
 #include <linux/delay.h>
 #include <linux/regulator/machine.h>
+#include <linux/platform_data/i2c-pxa.h>
 
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
 
-#include <mach/pxa27x.h>
-#include <mach/mfp-pxa27x.h>
-#include <mach/z2.h>
-#include <mach/pxafb.h>
-#include <mach/mmc.h>
-#include <plat/pxa27x_keypad.h>
-
-#include <plat/i2c.h>
+#include "pxa27x.h"
+#include "mfp-pxa27x.h"
+#include "z2.h"
+#include <linux/platform_data/video-pxafb.h>
+#include <linux/platform_data/mmc-pxamci.h>
+#include <linux/platform_data/keypad-pxa27x.h>
+#include "pm.h"
 
 #include "generic.h"
 #include "devices.h"
@@ -92,13 +90,13 @@ static unsigned long z2_pin_config[] = {
 	GPIO47_STUART_TXD,
 
 	/* Keypad */
-	GPIO100_KP_MKIN_0	| WAKEUP_ON_LEVEL_HIGH,
-	GPIO101_KP_MKIN_1	| WAKEUP_ON_LEVEL_HIGH,
-	GPIO102_KP_MKIN_2	| WAKEUP_ON_LEVEL_HIGH,
-	GPIO34_KP_MKIN_3	| WAKEUP_ON_LEVEL_HIGH,
-	GPIO38_KP_MKIN_4	| WAKEUP_ON_LEVEL_HIGH,
-	GPIO16_KP_MKIN_5	| WAKEUP_ON_LEVEL_HIGH,
-	GPIO17_KP_MKIN_6	| WAKEUP_ON_LEVEL_HIGH,
+	GPIO100_KP_MKIN_0,
+	GPIO101_KP_MKIN_1,
+	GPIO102_KP_MKIN_2,
+	GPIO34_KP_MKIN_3,
+	GPIO38_KP_MKIN_4,
+	GPIO16_KP_MKIN_5,
+	GPIO17_KP_MKIN_6,
 	GPIO103_KP_MKOUT_0,
 	GPIO104_KP_MKOUT_1,
 	GPIO105_KP_MKOUT_2,
@@ -139,8 +137,7 @@ static unsigned long z2_pin_config[] = {
 	GPIO1_GPIO,		/* Power button */
 	GPIO37_GPIO,		/* Headphone detect */
 	GPIO98_GPIO,		/* Lid switch */
-	GPIO14_GPIO,		/* WiFi Reset */
-	GPIO15_GPIO,		/* WiFi Power */
+	GPIO14_GPIO,		/* WiFi Power */
 	GPIO24_GPIO,		/* WiFi CS */
 	GPIO36_GPIO,		/* WiFi IRQ */
 	GPIO88_GPIO,		/* LCD CS */
@@ -200,20 +197,23 @@ static inline void z2_nor_init(void) {}
  * Backlight
  ******************************************************************************/
 #if defined(CONFIG_BACKLIGHT_PWM) || defined(CONFIG_BACKLIGHT_PWM_MODULE)
+static struct pwm_lookup z2_pwm_lookup[] = {
+	PWM_LOOKUP("pxa27x-pwm.1", 0, "pwm-backlight.0", NULL, 1260320,
+		   PWM_POLARITY_NORMAL),
+	PWM_LOOKUP("pxa27x-pwm.0", 1, "pwm-backlight.1", NULL, 1260320,
+		   PWM_POLARITY_NORMAL),
+};
+
 static struct platform_pwm_backlight_data z2_backlight_data[] = {
 	[0] = {
 		/* Keypad Backlight */
-		.pwm_id		= 1,
 		.max_brightness	= 1023,
-		.dft_brightness	= 512,
-		.pwm_period_ns	= 1260320,
+		.dft_brightness	= 0,
 	},
 	[1] = {
 		/* LCD Backlight */
-		.pwm_id		= 2,
 		.max_brightness	= 1023,
 		.dft_brightness	= 512,
-		.pwm_period_ns	= 1260320,
 	},
 };
 
@@ -235,6 +235,7 @@ static struct platform_device z2_backlight_devices[2] = {
 };
 static void __init z2_pwm_init(void)
 {
+	pwm_add_table(z2_pwm_lookup, ARRAY_SIZE(z2_pwm_lookup));
 	platform_device_register(&z2_backlight_devices[0]);
 	platform_device_register(&z2_backlight_devices[1]);
 }
@@ -272,7 +273,7 @@ static struct pxafb_mach_info z2_lcd_screen = {
 
 static void __init z2_lcd_init(void)
 {
-	set_pxa_fb_info(&z2_lcd_screen);
+	pxa_set_fb_info(NULL, &z2_lcd_screen);
 }
 #else
 static inline void z2_lcd_init(void) {}
@@ -284,14 +285,21 @@ static inline void z2_lcd_init(void) {}
 #if defined(CONFIG_MMC_PXA) || defined(CONFIG_MMC_PXA_MODULE)
 static struct pxamci_platform_data z2_mci_platform_data = {
 	.ocr_mask		= MMC_VDD_32_33 | MMC_VDD_33_34,
-	.gpio_card_detect	= GPIO96_ZIPITZ2_SD_DETECT,
-	.gpio_power		= -1,
-	.gpio_card_ro		= -1,
 	.detect_delay_ms	= 200,
+};
+
+static struct gpiod_lookup_table z2_mci_gpio_table = {
+	.dev_id = "pxa2xx-mci.0",
+	.table = {
+		GPIO_LOOKUP("gpio-pxa", GPIO96_ZIPITZ2_SD_DETECT,
+			    "cd", GPIO_ACTIVE_LOW),
+		{ },
+	},
 };
 
 static void __init z2_mmc_init(void)
 {
+	gpiod_add_lookup_table(&z2_mci_gpio_table);
 	pxa_set_mci_info(&z2_mci_platform_data);
 }
 #else
@@ -310,12 +318,12 @@ struct gpio_led z2_gpio_leds[] = {
 	.active_low		= 1,
 }, {
 	.name			= "z2:green:charged",
-	.default_trigger	= "none",
+	.default_trigger	= "mmc0",
 	.gpio			= GPIO85_ZIPITZ2_LED_CHARGED,
 	.active_low		= 1,
 }, {
 	.name			= "z2:amber:charging",
-	.default_trigger	= "none",
+	.default_trigger	= "Z2-charging-or-full",
 	.gpio			= GPIO83_ZIPITZ2_LED_CHARGING,
 	.active_low		= 1,
 },
@@ -346,7 +354,7 @@ static inline void z2_leds_init(void) {}
  * GPIO keyboard
  ******************************************************************************/
 #if defined(CONFIG_KEYBOARD_PXA27x) || defined(CONFIG_KEYBOARD_PXA27x_MODULE)
-static unsigned int z2_matrix_keys[] = {
+static const unsigned int z2_matrix_keys[] = {
 	KEY(0, 0, KEY_OPTION),
 	KEY(1, 0, KEY_UP),
 	KEY(2, 0, KEY_DOWN),
@@ -406,11 +414,15 @@ static unsigned int z2_matrix_keys[] = {
 	KEY(5, 7, KEY_DOT),
 };
 
+static struct matrix_keymap_data z2_matrix_keymap_data = {
+	.keymap			= z2_matrix_keys,
+	.keymap_size		= ARRAY_SIZE(z2_matrix_keys),
+};
+
 static struct pxa27x_keypad_platform_data z2_keypad_platform_data = {
 	.matrix_key_rows	= 7,
 	.matrix_key_cols	= 8,
-	.matrix_key_map		= z2_matrix_keys,
-	.matrix_key_map_size	= ARRAY_SIZE(z2_matrix_keys),
+	.matrix_keymap_data	= &z2_matrix_keymap_data,
 
 	.debounce_interval	= 30,
 };
@@ -428,8 +440,22 @@ static inline void z2_mkp_init(void) {}
  ******************************************************************************/
 #if defined(CONFIG_KEYBOARD_GPIO) || defined(CONFIG_KEYBOARD_GPIO_MODULE)
 static struct gpio_keys_button z2_pxa_buttons[] = {
-	{KEY_POWER, GPIO1_ZIPITZ2_POWER_BUTTON, 0, "Power Button" },
-	{KEY_CLOSE, GPIO98_ZIPITZ2_LID_BUTTON, 0, "Lid Button" },
+	{
+		.code		= KEY_POWER,
+		.gpio		= GPIO1_ZIPITZ2_POWER_BUTTON,
+		.active_low	= 0,
+		.desc		= "Power Button",
+		.wakeup		= 1,
+		.type		= EV_KEY,
+	},
+	{
+		.code		= SW_LID,
+		.gpio		= GPIO98_ZIPITZ2_LID_BUTTON,
+		.active_low	= 1,
+		.desc		= "Lid Switch",
+		.wakeup		= 0,
+		.type		= EV_SW,
+	},
 };
 
 static struct gpio_keys_platform_data z2_pxa_keys_data = {
@@ -461,18 +487,27 @@ static struct z2_battery_info batt_chip_info = {
 	.batt_I2C_bus	= 0,
 	.batt_I2C_addr	= 0x55,
 	.batt_I2C_reg	= 2,
-	.charge_gpio	= GPIO0_ZIPITZ2_AC_DETECT,
-	.min_voltage	= 2400000,
-	.max_voltage	= 3700000,
-	.batt_div	= 69,
+	.min_voltage	= 3475000,
+	.max_voltage	= 4190000,
+	.batt_div	= 59,
 	.batt_mult	= 1000000,
 	.batt_tech	= POWER_SUPPLY_TECHNOLOGY_LION,
 	.batt_name	= "Z2",
 };
 
+static struct gpiod_lookup_table z2_battery_gpio_table = {
+	.dev_id = "aer915",
+	.table = {
+		GPIO_LOOKUP("gpio-pxa", GPIO0_ZIPITZ2_AC_DETECT,
+			    NULL, GPIO_ACTIVE_HIGH),
+		{ },
+	},
+};
+
 static struct i2c_board_info __initdata z2_i2c_board_info[] = {
 	{
 		I2C_BOARD_INFO("aer915", 0x55),
+		.dev_name = "aer915",
 		.platform_data	= &batt_chip_info,
 	}, {
 		I2C_BOARD_INFO("wm8750", 0x1b),
@@ -483,6 +518,7 @@ static struct i2c_board_info __initdata z2_i2c_board_info[] = {
 static void __init z2_i2c_init(void)
 {
 	pxa_set_i2c_info(NULL);
+	gpiod_add_lookup_table(&z2_battery_gpio_table);
 	i2c_register_board_info(0, ARRAY_AND_SIZE(z2_i2c_board_info));
 }
 #else
@@ -498,26 +534,16 @@ static int z2_lbs_spi_setup(struct spi_device *spi)
 {
 	int ret = 0;
 
-	ret = gpio_request(GPIO15_ZIPITZ2_WIFI_POWER, "WiFi Power");
+	ret = gpio_request(GPIO14_ZIPITZ2_WIFI_POWER, "WiFi Power");
 	if (ret)
 		goto err;
 
-	ret = gpio_direction_output(GPIO15_ZIPITZ2_WIFI_POWER, 1);
+	ret = gpio_direction_output(GPIO14_ZIPITZ2_WIFI_POWER, 1);
 	if (ret)
 		goto err2;
 
-	ret = gpio_request(GPIO14_ZIPITZ2_WIFI_RESET, "WiFi Reset");
-	if (ret)
-		goto err2;
-
-	ret = gpio_direction_output(GPIO14_ZIPITZ2_WIFI_RESET, 0);
-	if (ret)
-		goto err3;
-
-	/* Reset the card */
+	/* Wait until card is powered on */
 	mdelay(180);
-	gpio_set_value(GPIO14_ZIPITZ2_WIFI_RESET, 1);
-	mdelay(20);
 
 	spi->bits_per_word = 16;
 	spi->mode = SPI_MODE_2,
@@ -526,29 +552,24 @@ static int z2_lbs_spi_setup(struct spi_device *spi)
 
 	return 0;
 
-err3:
-	gpio_free(GPIO14_ZIPITZ2_WIFI_RESET);
 err2:
-	gpio_free(GPIO15_ZIPITZ2_WIFI_POWER);
+	gpio_free(GPIO14_ZIPITZ2_WIFI_POWER);
 err:
 	return ret;
 };
 
 static int z2_lbs_spi_teardown(struct spi_device *spi)
 {
-	gpio_set_value(GPIO14_ZIPITZ2_WIFI_RESET, 0);
-	gpio_set_value(GPIO15_ZIPITZ2_WIFI_POWER, 0);
-	gpio_free(GPIO14_ZIPITZ2_WIFI_RESET);
-	gpio_free(GPIO15_ZIPITZ2_WIFI_POWER);
-	return 0;
+	gpio_set_value(GPIO14_ZIPITZ2_WIFI_POWER, 0);
+	gpio_free(GPIO14_ZIPITZ2_WIFI_POWER);
 
+	return 0;
 };
 
 static struct pxa2xx_spi_chip z2_lbs_chip_info = {
 	.rx_threshold	= 8,
 	.tx_threshold	= 8,
 	.timeout	= 1000,
-	.gpio_cs	= GPIO24_ZIPITZ2_WIFI_CS,
 };
 
 static struct libertas_spi_platform_data z2_lbs_pdata = {
@@ -562,11 +583,15 @@ static struct pxa2xx_spi_chip lms283_chip_info = {
 	.rx_threshold	= 1,
 	.tx_threshold	= 1,
 	.timeout	= 64,
-	.gpio_cs	= GPIO88_ZIPITZ2_LCD_CS,
 };
 
-static const struct lms283gf05_pdata lms283_pdata = {
-	.reset_gpio	= GPIO19_ZIPITZ2_LCD_RESET,
+static struct gpiod_lookup_table lms283_gpio_table = {
+	.dev_id = "spi2.0", /* SPI bus 2 chip select 0 */
+	.table = {
+		GPIO_LOOKUP("gpio-pxa", GPIO19_ZIPITZ2_LCD_RESET,
+			    "reset", GPIO_ACTIVE_LOW),
+		{ },
+	},
 };
 
 static struct spi_board_info spi_board_info[] __initdata = {
@@ -574,7 +599,7 @@ static struct spi_board_info spi_board_info[] __initdata = {
 	.modalias		= "libertas_spi",
 	.platform_data		= &z2_lbs_pdata,
 	.controller_data	= &z2_lbs_chip_info,
-	.irq			= gpio_to_irq(GPIO36_ZIPITZ2_WIFI_IRQ),
+	.irq			= PXA_GPIO_TO_IRQ(GPIO36_ZIPITZ2_WIFI_IRQ),
 	.max_speed_hz		= 13000000,
 	.bus_num		= 1,
 	.chip_select		= 0,
@@ -582,33 +607,58 @@ static struct spi_board_info spi_board_info[] __initdata = {
 {
 	.modalias		= "lms283gf05",
 	.controller_data	= &lms283_chip_info,
-	.platform_data		= &lms283_pdata,
 	.max_speed_hz		= 400000,
 	.bus_num		= 2,
 	.chip_select		= 0,
 },
 };
 
-static struct pxa2xx_spi_master pxa_ssp1_master_info = {
-	.clock_enable	= CKEN_SSP,
+static struct pxa2xx_spi_controller pxa_ssp1_master_info = {
 	.num_chipselect	= 1,
 	.enable_dma	= 1,
 };
 
-static struct pxa2xx_spi_master pxa_ssp2_master_info = {
-	.clock_enable	= CKEN_SSP2,
+static struct pxa2xx_spi_controller pxa_ssp2_master_info = {
 	.num_chipselect	= 1,
+};
+
+static struct gpiod_lookup_table pxa_ssp1_gpio_table = {
+	.dev_id = "spi1",
+	.table = {
+		GPIO_LOOKUP_IDX("gpio-pxa", GPIO24_ZIPITZ2_WIFI_CS, "cs", 0, GPIO_ACTIVE_LOW),
+		{ },
+	},
+};
+
+static struct gpiod_lookup_table pxa_ssp2_gpio_table = {
+	.dev_id = "spi2",
+	.table = {
+		GPIO_LOOKUP_IDX("gpio-pxa", GPIO88_ZIPITZ2_LCD_CS, "cs", 0, GPIO_ACTIVE_LOW),
+		{ },
+	},
 };
 
 static void __init z2_spi_init(void)
 {
+	gpiod_add_lookup_table(&pxa_ssp1_gpio_table);
+	gpiod_add_lookup_table(&pxa_ssp2_gpio_table);
 	pxa2xx_set_spi_info(1, &pxa_ssp1_master_info);
 	pxa2xx_set_spi_info(2, &pxa_ssp2_master_info);
+	gpiod_add_lookup_table(&lms283_gpio_table);
 	spi_register_board_info(spi_board_info, ARRAY_SIZE(spi_board_info));
 }
 #else
 static inline void z2_spi_init(void) {}
 #endif
+
+static struct gpiod_lookup_table z2_audio_gpio_table = {
+	.dev_id = "soc-audio",
+	.table = {
+		GPIO_LOOKUP("gpio-pxa", GPIO37_ZIPITZ2_HEADSET_DETECT,
+			    "hsdet-gpio", GPIO_ACTIVE_HIGH),
+		{ },
+	},
+};
 
 /******************************************************************************
  * Core power regulator
@@ -616,9 +666,7 @@ static inline void z2_spi_init(void) {}
 #if defined(CONFIG_REGULATOR_TPS65023) || \
 	defined(CONFIG_REGULATOR_TPS65023_MODULE)
 static struct regulator_consumer_supply z2_tps65021_consumers[] = {
-	{
-		.supply	= "vcc_core",
-	}
+	REGULATOR_SUPPLY("vcc_core", NULL),
 };
 
 static struct regulator_init_data z2_tps65021_info[] = {
@@ -679,6 +727,21 @@ static void __init z2_pmic_init(void)
 static inline void z2_pmic_init(void) {}
 #endif
 
+#ifdef CONFIG_PM
+static void z2_power_off(void)
+{
+	/* We're using deep sleep as poweroff, so clear PSPR to ensure that
+	 * bootloader will jump to its entry point in resume handler
+	 */
+	PSPR = 0x0;
+	local_irq_disable();
+	pxa27x_set_pwrmode(PWRMODE_DEEPSLEEP);
+	pxa27x_cpu_pm_enter(PM_SUSPEND_MEM);
+}
+#else
+#define z2_power_off   NULL
+#endif
+
 /******************************************************************************
  * Machine init
  ******************************************************************************/
@@ -700,12 +763,19 @@ static void __init z2_init(void)
 	z2_leds_init();
 	z2_keys_init();
 	z2_pmic_init();
+
+	gpiod_add_lookup_table(&z2_audio_gpio_table);
+
+	pm_power_off = z2_power_off;
 }
 
 MACHINE_START(ZIPIT2, "Zipit Z2")
-	.boot_params	= 0xa0000100,
+	.atag_offset	= 0x100,
 	.map_io		= pxa27x_map_io,
+	.nr_irqs	= PXA_NR_IRQS,
 	.init_irq	= pxa27x_init_irq,
-	.timer		= &pxa_timer,
+	.handle_irq	= pxa27x_handle_irq,
+	.init_time	= pxa_timer_init,
 	.init_machine	= z2_init,
+	.restart	= pxa_restart,
 MACHINE_END

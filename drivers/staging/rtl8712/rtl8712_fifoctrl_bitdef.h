@@ -1,3 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/******************************************************************************
+ *
+ * Copyright(c) 2007 - 2010 Realtek Corporation. All rights reserved.
+ *
+ ******************************************************************************/
 #ifndef __RTL8712_FIFOCTRL_BITDEF_H__
 #define __RTL8712_FIFOCTRL_BITDEF_H__
 
@@ -120,7 +126,6 @@
 
 /*TXFF_PG_NUM*/
 #define	_TXFF_PG_NUM_MSK	0x0FFF
-
 
 #endif	/*	__RTL8712_FIFOCTRL_BITDEF_H__ */
 

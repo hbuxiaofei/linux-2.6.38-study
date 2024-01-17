@@ -1,30 +1,95 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef IOCONTEXT_H
 #define IOCONTEXT_H
 
 #include <linux/radix-tree.h>
 #include <linux/rcupdate.h>
+#include <linux/workqueue.h>
 
-struct cfq_queue;
-struct cfq_io_context {
-	void *key;
+enum {
+	ICQ_EXITED		= 1 << 2,
+	ICQ_DESTROYED		= 1 << 3,
+};
 
-	struct cfq_queue *cfqq[2];
+/*
+ * An io_cq (icq) is association between an io_context (ioc) and a
+ * request_queue (q).  This is used by elevators which need to track
+ * information per ioc - q pair.
+ *
+ * Elevator can request use of icq by setting elevator_type->icq_size and
+ * ->icq_align.  Both size and align must be larger than that of struct
+ * io_cq and elevator can use the tail area for private information.  The
+ * recommended way to do this is defining a struct which contains io_cq as
+ * the first member followed by private members and using its size and
+ * align.  For example,
+ *
+ *	struct snail_io_cq {
+ *		struct io_cq	icq;
+ *		int		poke_snail;
+ *		int		feed_snail;
+ *	};
+ *
+ *	struct elevator_type snail_elv_type {
+ *		.ops =		{ ... },
+ *		.icq_size =	sizeof(struct snail_io_cq),
+ *		.icq_align =	__alignof__(struct snail_io_cq),
+ *		...
+ *	};
+ *
+ * If icq_size is set, block core will manage icq's.  All requests will
+ * have its ->elv.icq field set before elevator_ops->elevator_set_req_fn()
+ * is called and be holding a reference to the associated io_context.
+ *
+ * Whenever a new icq is created, elevator_ops->elevator_init_icq_fn() is
+ * called and, on destruction, ->elevator_exit_icq_fn().  Both functions
+ * are called with both the associated io_context and queue locks held.
+ *
+ * Elevator is allowed to lookup icq using ioc_lookup_icq() while holding
+ * queue lock but the returned icq is valid only until the queue lock is
+ * released.  Elevators can not and should not try to create or destroy
+ * icq's.
+ *
+ * As icq's are linked from both ioc and q, the locking rules are a bit
+ * complex.
+ *
+ * - ioc lock nests inside q lock.
+ *
+ * - ioc->icq_list and icq->ioc_node are protected by ioc lock.
+ *   q->icq_list and icq->q_node by q lock.
+ *
+ * - ioc->icq_tree and ioc->icq_hint are protected by ioc lock, while icq
+ *   itself is protected by q lock.  However, both the indexes and icq
+ *   itself are also RCU managed and lookup can be performed holding only
+ *   the q lock.
+ *
+ * - icq's are not reference counted.  They are destroyed when either the
+ *   ioc or q goes away.  Each request with icq set holds an extra
+ *   reference to ioc to ensure it stays until the request is completed.
+ *
+ * - Linking and unlinking icq's are performed while holding both ioc and q
+ *   locks.  Due to the lock ordering, q exit is simple but ioc exit
+ *   requires reverse-order double lock dance.
+ */
+struct io_cq {
+	struct request_queue	*q;
+	struct io_context	*ioc;
 
-	struct io_context *ioc;
+	/*
+	 * q_node and ioc_node link io_cq through icq_list of q and ioc
+	 * respectively.  Both fields are unused once ioc_exit_icq() is
+	 * called and shared with __rcu_icq_cache and __rcu_head which are
+	 * used for RCU free of io_cq.
+	 */
+	union {
+		struct list_head	q_node;
+		struct kmem_cache	*__rcu_icq_cache;
+	};
+	union {
+		struct hlist_node	ioc_node;
+		struct rcu_head		__rcu_head;
+	};
 
-	unsigned long last_end_request;
-
-	unsigned long ttime_total;
-	unsigned long ttime_samples;
-	unsigned long ttime_mean;
-
-	struct list_head queue_list;
-	struct hlist_node cic_list;
-
-	void (*dtor)(struct io_context *); /* destructor */
-	void (*exit)(struct io_context *); /* called on task exit */
-
-	struct rcu_head rcu_head;
+	unsigned int		flags;
 };
 
 /*
@@ -33,59 +98,41 @@ struct cfq_io_context {
  */
 struct io_context {
 	atomic_long_t refcount;
-	atomic_t nr_tasks;
+	atomic_t active_ref;
 
+	unsigned short ioprio;
+
+#ifdef CONFIG_BLK_ICQ
 	/* all the fields below are protected by this lock */
 	spinlock_t lock;
 
-	unsigned short ioprio;
-	unsigned short ioprio_changed;
+	struct radix_tree_root	icq_tree;
+	struct io_cq __rcu	*icq_hint;
+	struct hlist_head	icq_list;
 
-#if defined(CONFIG_BLK_CGROUP) || defined(CONFIG_BLK_CGROUP_MODULE)
-	unsigned short cgroup_changed;
-#endif
-
-	/*
-	 * For request batching
-	 */
-	int nr_batch_requests;     /* Number of requests left in the batch */
-	unsigned long last_waited; /* Time last woken after wait for request */
-
-	struct radix_tree_root radix_root;
-	struct hlist_head cic_list;
-	void __rcu *ioc_data;
+	struct work_struct release_work;
+#endif /* CONFIG_BLK_ICQ */
 };
-
-static inline struct io_context *ioc_task_link(struct io_context *ioc)
-{
-	/*
-	 * if ref count is zero, don't allow sharing (ioc is going away, it's
-	 * a race).
-	 */
-	if (ioc && atomic_long_inc_not_zero(&ioc->refcount)) {
-		atomic_inc(&ioc->nr_tasks);
-		return ioc;
-	}
-
-	return NULL;
-}
 
 struct task_struct;
 #ifdef CONFIG_BLOCK
-int put_io_context(struct io_context *ioc);
+void put_io_context(struct io_context *ioc);
 void exit_io_context(struct task_struct *task);
-struct io_context *get_io_context(gfp_t gfp_flags, int node);
-struct io_context *alloc_io_context(gfp_t gfp_flags, int node);
+int __copy_io(unsigned long clone_flags, struct task_struct *tsk);
+static inline int copy_io(unsigned long clone_flags, struct task_struct *tsk)
+{
+	if (!current->io_context)
+		return 0;
+	return __copy_io(clone_flags, tsk);
+}
 #else
-static inline void exit_io_context(struct task_struct *task)
-{
-}
-
 struct io_context;
-static inline int put_io_context(struct io_context *ioc)
+static inline void put_io_context(struct io_context *ioc) { }
+static inline void exit_io_context(struct task_struct *task) { }
+static inline int copy_io(unsigned long clone_flags, struct task_struct *tsk)
 {
-	return 1;
+	return 0;
 }
-#endif
+#endif /* CONFIG_BLOCK */
 
-#endif
+#endif /* IOCONTEXT_H */

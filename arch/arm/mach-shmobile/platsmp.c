@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * SMP support for R-Mobile / SH-Mobile
  *
@@ -5,66 +6,30 @@
  * Copyright (C) 2011  Paul Mundt
  *
  * Based on vexpress, Copyright (C) 2002 ARM Ltd, All Rights Reserved
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #include <linux/init.h>
-#include <linux/errno.h>
-#include <linux/delay.h>
-#include <linux/device.h>
-#include <linux/smp.h>
-#include <linux/io.h>
-#include <asm/localtimer.h>
-#include <asm/mach-types.h>
-#include <mach/common.h>
+#include <asm/cacheflush.h>
+#include <asm/smp_plat.h>
+#include "common.h"
 
-static unsigned int __init shmobile_smp_get_core_count(void)
+extern unsigned long shmobile_smp_fn[];
+extern unsigned long shmobile_smp_arg[];
+extern unsigned long shmobile_smp_mpidr[];
+
+void shmobile_smp_hook(unsigned int cpu, unsigned long fn, unsigned long arg)
 {
-	if (machine_is_ag5evm())
-		return sh73a0_get_core_count();
+	shmobile_smp_fn[cpu] = 0;
+	flush_cache_all();
 
-	return 1;
+	shmobile_smp_mpidr[cpu] = cpu_logical_map(cpu);
+	shmobile_smp_fn[cpu] = fn;
+	shmobile_smp_arg[cpu] = arg;
+	flush_cache_all();
 }
 
-static void __init shmobile_smp_prepare_cpus(void)
+#ifdef CONFIG_HOTPLUG_CPU
+bool shmobile_smp_cpu_can_disable(unsigned int cpu)
 {
-	if (machine_is_ag5evm())
-		sh73a0_smp_prepare_cpus();
+	return true; /* Hotplug of any CPU is supported */
 }
-
-void __cpuinit platform_secondary_init(unsigned int cpu)
-{
-	trace_hardirqs_off();
-
-	if (machine_is_ag5evm())
-		sh73a0_secondary_init(cpu);
-}
-
-int __cpuinit boot_secondary(unsigned int cpu, struct task_struct *idle)
-{
-	if (machine_is_ag5evm())
-		return sh73a0_boot_secondary(cpu);
-
-	return -ENOSYS;
-}
-
-void __init smp_init_cpus(void)
-{
-	unsigned int ncores = shmobile_smp_get_core_count();
-	unsigned int i;
-
-	for (i = 0; i < ncores; i++)
-		set_cpu_possible(i, true);
-}
-
-void __init platform_smp_prepare_cpus(unsigned int max_cpus)
-{
-	int i;
-
-	for (i = 0; i < max_cpus; i++)
-		set_cpu_present(i, true);
-
-	shmobile_smp_prepare_cpus();
-}
+#endif

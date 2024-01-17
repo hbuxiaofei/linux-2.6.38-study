@@ -1,20 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright 2007 Freescale Semiconductor, Inc. All Rights Reserved.
  * Copyright 2008 Juergen Beisert, kernel@pengutronix.de
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
- * MA 02110-1301, USA.
  */
 
 /*
@@ -22,40 +9,46 @@
  */
 
 #include <linux/io.h>
+#include <linux/of_address.h>
 #include <linux/module.h>
 
-#include <mach/hardware.h>
+#include "hardware.h"
 
-static int cpu_silicon_rev = -1;
-static int cpu_partnumber;
+static int mx27_cpu_rev = -1;
+static int mx27_cpu_partnumber;
 
 #define SYS_CHIP_ID             0x00    /* The offset of CHIP ID register */
+#define SYSCTRL_OFFSET		0x800	/* Offset from CCM base address */
 
-static void query_silicon_parameter(void)
+static int mx27_read_cpu_rev(void)
 {
+	void __iomem *ccm_base;
+	struct device_node *np;
 	u32 val;
+
+	np = of_find_compatible_node(NULL, NULL, "fsl,imx27-ccm");
+	ccm_base = of_iomap(np, 0);
+	of_node_put(np);
+	BUG_ON(!ccm_base);
 	/*
 	 * now we have access to the IO registers. As we need
 	 * the silicon revision very early we read it here to
 	 * avoid any further hooks
 	*/
-	val = __raw_readl(MX27_IO_ADDRESS(MX27_SYSCTRL_BASE_ADDR
-				+ SYS_CHIP_ID));
+	val = imx_readl(ccm_base + SYSCTRL_OFFSET + SYS_CHIP_ID);
+
+	mx27_cpu_partnumber = (int)((val >> 12) & 0xFFFF);
 
 	switch (val >> 28) {
 	case 0:
-		cpu_silicon_rev = IMX_CHIP_REVISION_1_0;
-		break;
+		return IMX_CHIP_REVISION_1_0;
 	case 1:
-		cpu_silicon_rev = IMX_CHIP_REVISION_2_0;
-		break;
+		return IMX_CHIP_REVISION_2_0;
 	case 2:
-		cpu_silicon_rev = IMX_CHIP_REVISION_2_1;
-		break;
+		return IMX_CHIP_REVISION_2_1;
 	default:
-		cpu_silicon_rev = IMX_CHIP_REVISION_UNKNOWN;
+		return IMX_CHIP_REVISION_UNKNOWN;
 	}
-	cpu_partnumber = (int)((val >> 12) & 0xFFFF);
 }
 
 /*
@@ -65,12 +58,12 @@ static void query_silicon_parameter(void)
  */
 int mx27_revision(void)
 {
-	if (cpu_silicon_rev == -1)
-		query_silicon_parameter();
+	if (mx27_cpu_rev == -1)
+		mx27_cpu_rev = mx27_read_cpu_rev();
 
-	if (cpu_partnumber != 0x8821)
+	if (mx27_cpu_partnumber != 0x8821)
 		return -EINVAL;
 
-	return cpu_silicon_rev;
+	return mx27_cpu_rev;
 }
 EXPORT_SYMBOL(mx27_revision);

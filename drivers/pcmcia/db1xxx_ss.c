@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * PCMCIA socket code for the Alchemy Db1xxx/Pb1xxx boards.
  *
@@ -7,7 +8,7 @@
 
 /* This is a fairly generic PCMCIA socket driver suitable for the
  * following Alchemy Development boards:
- *  Db1000, Db/Pb1500, Db/Pb1100, Db/Pb1550, Db/Pb1200.
+ *  Db1000, Db/Pb1500, Db/Pb1100, Db/Pb1550, Db/Pb1200, Db1300
  *
  * The Db1000 is used as a reference:  Per-socket card-, carddetect- and
  *  statuschange IRQs connected to SoC GPIOs, control and status register
@@ -18,12 +19,14 @@
  *	- Pb1100/Pb1500:  single socket only; voltage key bits VS are
  *			  at STATUS[5:4] (instead of STATUS[1:0]).
  *	- Au1200-based:	  additional card-eject irqs, irqs not gpios!
+ *	- Db1300:	  Db1200-like, no pwr ctrl, single socket (#1).
  */
 
 #include <linux/delay.h>
 #include <linux/gpio.h>
 #include <linux/interrupt.h>
 #include <linux/pm.h>
+#include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/resource.h>
 #include <linux/slab.h>
@@ -54,14 +57,21 @@ struct db1x_pcmcia_sock {
 	int	stschg_irq;	/* card-status-change irq */
 	int	card_irq;	/* card irq */
 	int	eject_irq;	/* db1200/pb1200 have these */
+	int	insert_gpio;	/* db1000 carddetect gpio */
 
 #define BOARD_TYPE_DEFAULT	0	/* most boards */
 #define BOARD_TYPE_DB1200	1	/* IRQs aren't gpios */
 #define BOARD_TYPE_PB1100	2	/* VS bits slightly different */
+#define BOARD_TYPE_DB1300	3	/* no power control */
 	int	board_type;
 };
 
 #define to_db1x_socket(x) container_of(x, struct db1x_pcmcia_sock, socket)
+
+static int db1300_card_inserted(struct db1x_pcmcia_sock *sock)
+{
+	return bcsr_read(BCSR_SIGSTAT) & (1 << 8);
+}
 
 /* DB/PB1200: check CPLD SIGSTATUS register bit 10/12 */
 static int db1200_card_inserted(struct db1x_pcmcia_sock *sock)
@@ -75,7 +85,7 @@ static int db1200_card_inserted(struct db1x_pcmcia_sock *sock)
 /* carddetect gpio: low-active */
 static int db1000_card_inserted(struct db1x_pcmcia_sock *sock)
 {
-	return !gpio_get_value(irq_to_gpio(sock->insert_irq));
+	return !gpio_get_value(sock->insert_gpio);
 }
 
 static int db1x_card_inserted(struct db1x_pcmcia_sock *sock)
@@ -83,6 +93,8 @@ static int db1x_card_inserted(struct db1x_pcmcia_sock *sock)
 	switch (sock->board_type) {
 	case BOARD_TYPE_DB1200:
 		return db1200_card_inserted(sock);
+	case BOARD_TYPE_DB1300:
+		return db1300_card_inserted(sock);
 	default:
 		return db1000_card_inserted(sock);
 	}
@@ -120,22 +132,27 @@ static irqreturn_t db1000_pcmcia_stschgirq(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
+/* Db/Pb1200 have separate per-socket insertion and ejection
+ * interrupts which stay asserted as long as the card is
+ * inserted/missing.  The one which caused us to be called
+ * needs to be disabled and the other one enabled.
+ */
 static irqreturn_t db1200_pcmcia_cdirq(int irq, void *data)
+{
+	disable_irq_nosync(irq);
+	return IRQ_WAKE_THREAD;
+}
+
+static irqreturn_t db1200_pcmcia_cdirq_fn(int irq, void *data)
 {
 	struct db1x_pcmcia_sock *sock = data;
 
-	/* Db/Pb1200 have separate per-socket insertion and ejection
-	 * interrupts which stay asserted as long as the card is
-	 * inserted/missing.  The one which caused us to be called
-	 * needs to be disabled and the other one enabled.
-	 */
-	if (irq == sock->insert_irq) {
-		disable_irq_nosync(sock->insert_irq);
+	/* Wait a bit for the signals to stop bouncing. */
+	msleep(100);
+	if (irq == sock->insert_irq)
 		enable_irq(sock->eject_irq);
-	} else {
-		disable_irq_nosync(sock->eject_irq);
+	else
 		enable_irq(sock->insert_irq);
-	}
 
 	pcmcia_parse_events(&sock->socket, SS_DETECT);
 
@@ -159,21 +176,22 @@ static int db1x_pcmcia_setup_irqs(struct db1x_pcmcia_sock *sock)
 	 * ejection handler have been registered and the currently
 	 * active one disabled.
 	 */
-	if (sock->board_type == BOARD_TYPE_DB1200) {
-		ret = request_irq(sock->insert_irq, db1200_pcmcia_cdirq,
-				  IRQF_DISABLED, "pcmcia_insert", sock);
+	if ((sock->board_type == BOARD_TYPE_DB1200) ||
+	    (sock->board_type == BOARD_TYPE_DB1300)) {
+		ret = request_threaded_irq(sock->insert_irq, db1200_pcmcia_cdirq,
+			db1200_pcmcia_cdirq_fn, 0, "pcmcia_insert", sock);
 		if (ret)
 			goto out1;
 
-		ret = request_irq(sock->eject_irq, db1200_pcmcia_cdirq,
-				  IRQF_DISABLED, "pcmcia_eject", sock);
+		ret = request_threaded_irq(sock->eject_irq, db1200_pcmcia_cdirq,
+			db1200_pcmcia_cdirq_fn, 0, "pcmcia_eject", sock);
 		if (ret) {
 			free_irq(sock->insert_irq, sock);
 			goto out1;
 		}
 
 		/* enable the currently silent one */
-		if (db1200_card_inserted(sock))
+		if (db1x_card_inserted(sock))
 			enable_irq(sock->eject_irq);
 		else
 			enable_irq(sock->insert_irq);
@@ -181,7 +199,7 @@ static int db1x_pcmcia_setup_irqs(struct db1x_pcmcia_sock *sock)
 		/* all other (older) Db1x00 boards use a GPIO to show
 		 * card detection status:  use both-edge triggers.
 		 */
-		set_irq_type(sock->insert_irq, IRQ_TYPE_EDGE_BOTH);
+		irq_set_irq_type(sock->insert_irq, IRQ_TYPE_EDGE_BOTH);
 		ret = request_irq(sock->insert_irq, db1000_pcmcia_cdirq,
 				  0, "pcmcia_carddetect", sock);
 
@@ -237,8 +255,10 @@ static int db1x_pcmcia_configure(struct pcmcia_socket *skt,
 	switch (state->Vcc) {
 	case 50:
 		++v;
+		fallthrough;
 	case 33:
 		++v;
+		fallthrough;
 	case 0:
 		break;
 	default:
@@ -249,9 +269,11 @@ static int db1x_pcmcia_configure(struct pcmcia_socket *skt,
 	switch (state->Vpp) {
 	case 12:
 		++p;
+		fallthrough;
 	case 33:
 	case 50:
 		++p;
+		fallthrough;
 	case 0:
 		break;
 	default:
@@ -269,7 +291,8 @@ static int db1x_pcmcia_configure(struct pcmcia_socket *skt,
 	}
 
 	/* create new voltage code */
-	cr_set |= ((v << 2) | p) << (sock->nr * 8);
+	if (sock->board_type != BOARD_TYPE_DB1300)
+		cr_set |= ((v << 2) | p) << (sock->nr * 8);
 
 	changed = state->flags ^ sock->old_flags;
 
@@ -333,6 +356,7 @@ static int db1x_pcmcia_get_status(struct pcmcia_socket *skt,
 	case 0:
 	case 2:
 		status |= SS_3VCARD;	/* 3V card */
+		break;
 	case 3:
 		break;			/* 5V card: set nothing */
 	default:
@@ -341,6 +365,10 @@ static int db1x_pcmcia_get_status(struct pcmcia_socket *skt,
 
 	/* if Vcc is not zero, we have applied power to a card */
 	status |= GET_VCC(cr, sock->nr) ? SS_POWERON : 0;
+
+	/* DB1300: power always on, but don't tell when no card present */
+	if ((sock->board_type == BOARD_TYPE_DB1300) && (status & SS_DETECT))
+		status = SS_POWERON | SS_3VCARD | SS_DETECT;
 
 	/* reset de-asserted? then we're ready */
 	status |= (GET_RESET(cr, sock->nr)) ? SS_READY : SS_RESET;
@@ -393,7 +421,7 @@ static struct pccard_operations db1x_pcmcia_operations = {
 	.set_mem_map		= au1x00_pcmcia_set_mem_map,
 };
 
-static int __devinit db1x_pcmcia_socket_probe(struct platform_device *pdev)
+static int db1x_pcmcia_socket_probe(struct platform_device *pdev)
 {
 	struct db1x_pcmcia_sock *sock;
 	struct resource *r;
@@ -418,11 +446,14 @@ static int __devinit db1x_pcmcia_socket_probe(struct platform_device *pdev)
 	case BCSR_WHOAMI_PB1200 ... BCSR_WHOAMI_DB1200:
 		sock->board_type = BOARD_TYPE_DB1200;
 		break;
+	case BCSR_WHOAMI_DB1300:
+		sock->board_type = BOARD_TYPE_DB1300;
+		break;
 	default:
 		printk(KERN_INFO "db1xxx-ss: unknown board %d!\n", bid);
 		ret = -ENODEV;
 		goto out0;
-	};
+	}
 
 	/*
 	 * gather resources necessary and optional nice-to-haves to
@@ -438,9 +469,15 @@ static int __devinit db1x_pcmcia_socket_probe(struct platform_device *pdev)
 	r = platform_get_resource_byname(pdev, IORESOURCE_IRQ, "card");
 	sock->card_irq = r ? r->start : 0;
 
-	/* insert: irq which triggers on card insertion/ejection */
+	/* insert: irq which triggers on card insertion/ejection
+	 * BIG FAT NOTE: on DB1000/1100/1500/1550 we pass a GPIO here!
+	 */
 	r = platform_get_resource_byname(pdev, IORESOURCE_IRQ, "insert");
 	sock->insert_irq = r ? r->start : -1;
+	if (sock->board_type == BOARD_TYPE_DEFAULT) {
+		sock->insert_gpio = r ? r->start : -1;
+		sock->insert_irq = r ? gpio_to_irq(r->start) : -1;
+	}
 
 	/* stschg: irq which trigger on card status change (optional) */
 	r = platform_get_resource_byname(pdev, IORESOURCE_IRQ, "stschg");
@@ -540,7 +577,7 @@ out0:
 	return ret;
 }
 
-static int __devexit db1x_pcmcia_socket_remove(struct platform_device *pdev)
+static int db1x_pcmcia_socket_remove(struct platform_device *pdev)
 {
 	struct db1x_pcmcia_sock *sock = platform_get_drvdata(pdev);
 
@@ -555,24 +592,12 @@ static int __devexit db1x_pcmcia_socket_remove(struct platform_device *pdev)
 static struct platform_driver db1x_pcmcia_socket_driver = {
 	.driver	= {
 		.name	= "db1xxx_pcmcia",
-		.owner	= THIS_MODULE,
 	},
 	.probe		= db1x_pcmcia_socket_probe,
-	.remove		= __devexit_p(db1x_pcmcia_socket_remove),
+	.remove		= db1x_pcmcia_socket_remove,
 };
 
-int __init db1x_pcmcia_socket_load(void)
-{
-	return platform_driver_register(&db1x_pcmcia_socket_driver);
-}
-
-void  __exit db1x_pcmcia_socket_unload(void)
-{
-	platform_driver_unregister(&db1x_pcmcia_socket_driver);
-}
-
-module_init(db1x_pcmcia_socket_load);
-module_exit(db1x_pcmcia_socket_unload);
+module_platform_driver(db1x_pcmcia_socket_driver);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("PCMCIA Socket Services for Alchemy Db/Pb1x00 boards");

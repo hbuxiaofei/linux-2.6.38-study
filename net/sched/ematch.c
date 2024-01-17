@@ -1,10 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * net/sched/ematch.c		Extended Match API
- *
- *		This program is free software; you can redistribute it and/or
- *		modify it under the terms of the GNU General Public License
- *		as published by the Free Software Foundation; either version
- *		2 of the License, or (at your option) any later version.
  *
  * Authors:	Thomas Graf <tgraf@suug.ch>
  *
@@ -93,7 +89,7 @@
 static LIST_HEAD(ematch_ops);
 static DEFINE_RWLOCK(ematch_mod_lock);
 
-static inline struct tcf_ematch_ops * tcf_em_lookup(u16 kind)
+static struct tcf_ematch_ops *tcf_em_lookup(u16 kind)
 {
 	struct tcf_ematch_ops *e = NULL;
 
@@ -145,7 +141,7 @@ errout:
 EXPORT_SYMBOL(tcf_em_register);
 
 /**
- * tcf_em_unregister - unregster and extended match
+ * tcf_em_unregister - unregister and extended match
  *
  * @ops: ematch operations lookup table
  *
@@ -163,8 +159,8 @@ void tcf_em_unregister(struct tcf_ematch_ops *ops)
 }
 EXPORT_SYMBOL(tcf_em_unregister);
 
-static inline struct tcf_ematch * tcf_em_get_match(struct tcf_ematch_tree *tree,
-						   int index)
+static inline struct tcf_ematch *tcf_em_get_match(struct tcf_ematch_tree *tree,
+						  int index)
 {
 	return &tree->matches[index];
 }
@@ -178,13 +174,15 @@ static int tcf_em_validate(struct tcf_proto *tp,
 	struct tcf_ematch_hdr *em_hdr = nla_data(nla);
 	int data_len = nla_len(nla) - sizeof(*em_hdr);
 	void *data = (void *) em_hdr + sizeof(*em_hdr);
+	struct net *net = tp->chain->block->net;
 
 	if (!TCF_EM_REL_VALID(em_hdr->flags))
 		goto errout;
 
 	if (em_hdr->kind == TCF_EM_CONTAINER) {
 		/* Special ematch called "container", carries an index
-		 * referencing an external ematch sequence. */
+		 * referencing an external ematch sequence.
+		 */
 		u32 ref;
 
 		if (data_len < sizeof(ref))
@@ -195,7 +193,8 @@ static int tcf_em_validate(struct tcf_proto *tp,
 			goto errout;
 
 		/* We do not allow backward jumps to avoid loops and jumps
-		 * to our own position are of course illegal. */
+		 * to our own position are of course illegal.
+		 */
 		if (ref <= idx)
 			goto errout;
 
@@ -208,7 +207,8 @@ static int tcf_em_validate(struct tcf_proto *tp,
 		 * which automatically releases the reference again, therefore
 		 * the module MUST not be given back under any circumstances
 		 * here. Be aware, the destroy function assumes that the
-		 * module is held if the ops field is non zero. */
+		 * module is held if the ops field is non zero.
+		 */
 		em->ops = tcf_em_lookup(em_hdr->kind);
 
 		if (em->ops == NULL) {
@@ -221,8 +221,10 @@ static int tcf_em_validate(struct tcf_proto *tp,
 			if (em->ops) {
 				/* We dropped the RTNL mutex in order to
 				 * perform the module load. Tell the caller
-				 * to replay the request. */
+				 * to replay the request.
+				 */
 				module_put(em->ops->owner);
+				em->ops = NULL;
 				err = -EAGAIN;
 			}
 #endif
@@ -230,12 +232,16 @@ static int tcf_em_validate(struct tcf_proto *tp,
 		}
 
 		/* ematch module provides expected length of data, so we
-		 * can do a basic sanity check. */
+		 * can do a basic sanity check.
+		 */
 		if (em->ops->datalen && data_len < em->ops->datalen)
 			goto errout;
 
 		if (em->ops->change) {
-			err = em->ops->change(tp, data, data_len, em);
+			err = -EINVAL;
+			if (em_hdr->flags & TCF_EM_SIMPLE)
+				goto errout;
+			err = em->ops->change(net, data, data_len, em);
 			if (err < 0)
 				goto errout;
 		} else if (data_len > 0) {
@@ -246,8 +252,11 @@ static int tcf_em_validate(struct tcf_proto *tp,
 			 * TCF_EM_SIMPLE may be specified stating that the
 			 * data only consists of a u32 integer and the module
 			 * does not expected a memory reference but rather
-			 * the value carried. */
+			 * the value carried.
+			 */
 			if (em_hdr->flags & TCF_EM_SIMPLE) {
+				if (em->ops->datalen > 0)
+					goto errout;
 				if (data_len < sizeof(u32))
 					goto errout;
 				em->data = *(u32 *) data;
@@ -259,12 +268,13 @@ static int tcf_em_validate(struct tcf_proto *tp,
 				}
 				em->data = (unsigned long) v;
 			}
+			em->datalen = data_len;
 		}
 	}
 
 	em->matchid = em_hdr->matchid;
 	em->flags = em_hdr->flags;
-	em->datalen = data_len;
+	em->net = net;
 
 	err = 0;
 errout:
@@ -305,7 +315,8 @@ int tcf_em_tree_validate(struct tcf_proto *tp, struct nlattr *nla,
 	if (!nla)
 		return 0;
 
-	err = nla_parse_nested(tb, TCA_EMATCH_TREE_MAX, nla, em_policy);
+	err = nla_parse_nested_deprecated(tb, TCA_EMATCH_TREE_MAX, nla,
+					  em_policy, NULL);
 	if (err < 0)
 		goto errout;
 
@@ -334,7 +345,8 @@ int tcf_em_tree_validate(struct tcf_proto *tp, struct nlattr *nla,
 	 * The array of rt attributes is parsed in the order as they are
 	 * provided, their type must be incremental from 1 to n. Even
 	 * if it does not serve any real purpose, a failure of sticking
-	 * to this policy will result in parsing failure. */
+	 * to this policy will result in parsing failure.
+	 */
 	for (idx = 0; nla_ok(rt_match, list_len); idx++) {
 		err = -EINVAL;
 
@@ -359,7 +371,8 @@ int tcf_em_tree_validate(struct tcf_proto *tp, struct nlattr *nla,
 	/* Check if the number of matches provided by userspace actually
 	 * complies with the array of matches. The number was used for
 	 * the validation of references and a mismatch could lead to
-	 * undefined references during the matching process. */
+	 * undefined references during the matching process.
+	 */
 	if (idx != tree_hdr->nmatches) {
 		err = -EINVAL;
 		goto errout_abort;
@@ -370,7 +383,7 @@ errout:
 	return err;
 
 errout_abort:
-	tcf_em_tree_destroy(tp, tree);
+	tcf_em_tree_destroy(tree);
 	return err;
 }
 EXPORT_SYMBOL(tcf_em_tree_validate);
@@ -378,14 +391,13 @@ EXPORT_SYMBOL(tcf_em_tree_validate);
 /**
  * tcf_em_tree_destroy - destroy an ematch tree
  *
- * @tp: classifier kind handle
  * @tree: ematch tree to be deleted
  *
  * This functions destroys an ematch tree previously created by
  * tcf_em_tree_validate()/tcf_em_tree_change(). You must ensure that
  * the ematch tree is not in use before calling this function.
  */
-void tcf_em_tree_destroy(struct tcf_proto *tp, struct tcf_ematch_tree *tree)
+void tcf_em_tree_destroy(struct tcf_ematch_tree *tree)
 {
 	int i;
 
@@ -397,7 +409,7 @@ void tcf_em_tree_destroy(struct tcf_proto *tp, struct tcf_ematch_tree *tree)
 
 		if (em->ops) {
 			if (em->ops->destroy)
-				em->ops->destroy(tp, em);
+				em->ops->destroy(em);
 			else if (!tcf_em_is_simple(em))
 				kfree((void *) em->data);
 			module_put(em->ops->owner);
@@ -414,7 +426,7 @@ EXPORT_SYMBOL(tcf_em_tree_destroy);
  * tcf_em_tree_dump - dump ematch tree into a rtnl message
  *
  * @skb: skb holding the rtnl message
- * @t: ematch tree to be dumped
+ * @tree: ematch tree to be dumped
  * @tlv: TLV type to be used to encapsulate the tree
  *
  * This function dumps a ematch tree into a rtnl message. It is valid to
@@ -429,13 +441,14 @@ int tcf_em_tree_dump(struct sk_buff *skb, struct tcf_ematch_tree *tree, int tlv)
 	struct nlattr *top_start;
 	struct nlattr *list_start;
 
-	top_start = nla_nest_start(skb, tlv);
+	top_start = nla_nest_start_noflag(skb, tlv);
 	if (top_start == NULL)
 		goto nla_put_failure;
 
-	NLA_PUT(skb, TCA_EMATCH_TREE_HDR, sizeof(tree->hdr), &tree->hdr);
+	if (nla_put(skb, TCA_EMATCH_TREE_HDR, sizeof(tree->hdr), &tree->hdr))
+		goto nla_put_failure;
 
-	list_start = nla_nest_start(skb, TCA_EMATCH_TREE_LIST);
+	list_start = nla_nest_start_noflag(skb, TCA_EMATCH_TREE_LIST);
 	if (list_start == NULL)
 		goto nla_put_failure;
 
@@ -449,7 +462,8 @@ int tcf_em_tree_dump(struct sk_buff *skb, struct tcf_ematch_tree *tree, int tlv)
 			.flags = em->flags
 		};
 
-		NLA_PUT(skb, i+1, sizeof(em_hdr), &em_hdr);
+		if (nla_put(skb, i + 1, sizeof(em_hdr), &em_hdr))
+			goto nla_put_failure;
 
 		if (em->ops && em->ops->dump) {
 			if (em->ops->dump(skb, em) < 0)
@@ -478,6 +492,7 @@ static inline int tcf_em_match(struct sk_buff *skb, struct tcf_ematch *em,
 			       struct tcf_pkt_info *info)
 {
 	int r = em->ops->match(skb, em, info);
+
 	return tcf_em_is_inverted(em) ? !r : r;
 }
 
@@ -515,9 +530,12 @@ pop_stack:
 		match_idx = stack[--stackp];
 		cur_match = tcf_em_get_match(tree, match_idx);
 
-		if (tcf_em_early_end(cur_match, res))
+		if (tcf_em_is_inverted(cur_match))
+			res = !res;
+
+		if (tcf_em_early_end(cur_match, res)) {
 			goto pop_stack;
-		else {
+		} else {
 			match_idx++;
 			goto proceed;
 		}
@@ -526,9 +544,7 @@ pop_stack:
 	return res;
 
 stack_overflow:
-	if (net_ratelimit())
-		printk(KERN_WARNING "tc ematch: local stack overflow,"
-			" increase NET_EMATCH_STACK\n");
+	net_warn_ratelimited("tc ematch: local stack overflow, increase NET_EMATCH_STACK\n");
 	return -1;
 }
 EXPORT_SYMBOL(__tcf_em_tree_match);

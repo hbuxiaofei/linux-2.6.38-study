@@ -1,3 +1,16 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/******************************************************************************
+ *
+ * Copyright(c) 2007 - 2010 Realtek Corporation. All rights reserved.
+ *
+ * Modifications for inclusion into the Linux staging tree are
+ * Copyright(c) 2010 Larry Finger. All rights reserved.
+ *
+ * Contact information:
+ * WLAN FAE <wlanfae@realtek.com>
+ * Larry Finger <Larry.Finger@lwfinger.net>
+ *
+ ******************************************************************************/
 #ifndef __RTL8712_GP_BITDEF_H__
 #define __RTL8712_GP_BITDEF_H__
 
@@ -39,13 +52,14 @@
 
 #define		GPIOMUX_EN	BIT(3)	/* When this bit is set to "1",
 					 * GPIO PINs will switch to MAC
-					 * GPIO Function*/
+					 * GPIO Function
+					 */
 #define		GPIOSEL_GPIO	0	/* UART or JTAG or pure GPIO*/
 #define		GPIOSEL_PHYDBG	1	/* PHYDBG*/
 #define		GPIOSEL_BT	2	/* BT_coex*/
 #define		GPIOSEL_WLANDBG	3	/* WLANDBG*/
-#define		GPIOSEL_GPIO_MASK	(~(BIT(0)|BIT(1)))
-/* HW Readio OFF switch (GPIO BIT) */
+#define		GPIOSEL_GPIO_MASK	(~(BIT(0) | BIT(1)))
+/* HW Radio OFF switch (GPIO BIT) */
 #define		HAL_8192S_HW_GPIO_OFF_BIT	BIT(3)
 #define		HAL_8192S_HW_GPIO_OFF_MASK	0xF7
 #define		HAL_8192S_HW_GPIO_WPS_BIT	BIT(4)

@@ -1,9 +1,21 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /* Copyright 2002 Andi Kleen */
 
 #include <linux/linkage.h>
+#include <linux/cfi_types.h>
+#include <asm/errno.h>
+#include <asm/cpufeatures.h>
+#include <asm/alternative.h>
+#include <asm/export.h>
 
-#include <asm/cpufeature.h>
-#include <asm/dwarf2.h>
+.pushsection .noinstr.text, "ax"
+
+/*
+ * We build a jump to memcpy_orig by default which gets NOPped out on
+ * the majority of x86 CPUs which set REP_GOOD. In addition, CPUs which
+ * have the enhanced REP MOVSB/STOSB feature (ERMS), change those NOPs
+ * to a jmp to memcpy_erms which does the REP; MOVSB mem copy.
+ */
 
 /*
  * memcpy - Copy a memory block.
@@ -16,45 +28,48 @@
  * Output:
  * rax original destination
  */
+SYM_TYPED_FUNC_START(__memcpy)
+	ALTERNATIVE_2 "jmp memcpy_orig", "", X86_FEATURE_REP_GOOD, \
+		      "jmp memcpy_erms", X86_FEATURE_ERMS
 
-/*
- * memcpy_c() - fast string ops (REP MOVSQ) based variant.
- *
- * This gets patched over the unrolled variant (below) via the
- * alternative instructions framework:
- */
-	.section .altinstr_replacement, "ax", @progbits
-.Lmemcpy_c:
 	movq %rdi, %rax
-
-	movl %edx, %ecx
-	shrl $3, %ecx
+	movq %rdx, %rcx
+	shrq $3, %rcx
 	andl $7, %edx
 	rep movsq
 	movl %edx, %ecx
 	rep movsb
-	ret
-.Lmemcpy_e:
-	.previous
+	RET
+SYM_FUNC_END(__memcpy)
+EXPORT_SYMBOL(__memcpy)
 
-ENTRY(__memcpy)
-ENTRY(memcpy)
-	CFI_STARTPROC
+SYM_FUNC_ALIAS_WEAK(memcpy, __memcpy)
+EXPORT_SYMBOL(memcpy)
+
+/*
+ * memcpy_erms() - enhanced fast string memcpy. This is faster and
+ * simpler than memcpy. Use memcpy_erms when possible.
+ */
+SYM_FUNC_START_LOCAL(memcpy_erms)
+	movq %rdi, %rax
+	movq %rdx, %rcx
+	rep movsb
+	RET
+SYM_FUNC_END(memcpy_erms)
+
+SYM_FUNC_START_LOCAL(memcpy_orig)
 	movq %rdi, %rax
 
-	/*
-	 * Use 32bit CMP here to avoid long NOP padding.
-	 */
-	cmp  $0x20, %edx
+	cmpq $0x20, %rdx
 	jb .Lhandle_tail
 
 	/*
-	 * We check whether memory false dependece could occur,
+	 * We check whether memory false dependence could occur,
 	 * then jump to corresponding copy mode.
 	 */
 	cmp  %dil, %sil
 	jl .Lcopy_backward
-	subl $0x20, %edx
+	subq $0x20, %rdx
 .Lcopy_forward_loop:
 	subq $0x20,	%rdx
 
@@ -73,7 +88,7 @@ ENTRY(memcpy)
 	movq %r11,	3*8(%rdi)
 	leaq 4*8(%rdi),	%rdi
 	jae  .Lcopy_forward_loop
-	addq $0x20,	%rdx
+	addl $0x20,	%edx
 	jmp  .Lhandle_tail
 
 .Lcopy_backward:
@@ -85,7 +100,7 @@ ENTRY(memcpy)
 	subq $0x20,	%rdx
 	/*
 	 * At most 3 ALU operations in one cycle,
-	 * so append NOPS in the same 16bytes trunk.
+	 * so append NOPS in the same 16 bytes trunk.
 	 */
 	.p2align 4
 .Lcopy_backward_loop:
@@ -105,11 +120,11 @@ ENTRY(memcpy)
 	/*
 	 * Calculate copy position to head.
 	 */
-	addq $0x20,	%rdx
+	addl $0x20,	%edx
 	subq %rdx,	%rsi
 	subq %rdx,	%rdi
 .Lhandle_tail:
-	cmpq $16,	%rdx
+	cmpl $16,	%edx
 	jb   .Lless_16bytes
 
 	/*
@@ -123,10 +138,10 @@ ENTRY(memcpy)
 	movq %r9,	1*8(%rdi)
 	movq %r10,	-2*8(%rdi, %rdx)
 	movq %r11,	-1*8(%rdi, %rdx)
-	retq
+	RET
 	.p2align 4
 .Lless_16bytes:
-	cmpq $8,	%rdx
+	cmpl $8,	%edx
 	jb   .Lless_8bytes
 	/*
 	 * Move data from 8 bytes to 15 bytes.
@@ -135,10 +150,10 @@ ENTRY(memcpy)
 	movq -1*8(%rsi, %rdx),	%r9
 	movq %r8,	0*8(%rdi)
 	movq %r9,	-1*8(%rdi, %rdx)
-	retq
+	RET
 	.p2align 4
 .Lless_8bytes:
-	cmpq $4,	%rdx
+	cmpl $4,	%edx
 	jb   .Lless_3bytes
 
 	/*
@@ -148,44 +163,25 @@ ENTRY(memcpy)
 	movl -4(%rsi, %rdx), %r8d
 	movl %ecx, (%rdi)
 	movl %r8d, -4(%rdi, %rdx)
-	retq
+	RET
 	.p2align 4
 .Lless_3bytes:
-	cmpl $0, %edx
-	je .Lend
+	subl $1, %edx
+	jb .Lend
 	/*
 	 * Move data from 1 bytes to 3 bytes.
 	 */
-.Lloop_1:
-	movb (%rsi), %r8b
-	movb %r8b, (%rdi)
-	incq %rdi
-	incq %rsi
-	decl %edx
-	jnz .Lloop_1
+	movzbl (%rsi), %ecx
+	jz .Lstore_1byte
+	movzbq 1(%rsi), %r8
+	movzbq (%rsi, %rdx), %r9
+	movb %r8b, 1(%rdi)
+	movb %r9b, (%rdi, %rdx)
+.Lstore_1byte:
+	movb %cl, (%rdi)
 
 .Lend:
-	retq
-	CFI_ENDPROC
-ENDPROC(memcpy)
-ENDPROC(__memcpy)
+	RET
+SYM_FUNC_END(memcpy_orig)
 
-	/*
-	 * Some CPUs run faster using the string copy instructions.
-	 * It is also a lot simpler. Use this when possible:
-	 */
-
-	.section .altinstructions, "a"
-	.align 8
-	.quad memcpy
-	.quad .Lmemcpy_c
-	.word X86_FEATURE_REP_GOOD
-
-	/*
-	 * Replace only beginning, memcpy is used to apply alternatives,
-	 * so it is silly to overwrite itself with nops - reboot is the
-	 * only outcome...
-	 */
-	.byte .Lmemcpy_e - .Lmemcpy_c
-	.byte .Lmemcpy_e - .Lmemcpy_c
-	.previous
+.popsection

@@ -17,8 +17,8 @@
 #define PCI_DEVICE_ID_SI_662	0x0662
 #define PCI_DEVICE_ID_SI_671	0x0671
 
-static int __devinitdata agp_sis_force_delay = 0;
-static int __devinitdata agp_sis_agp_spec = -1;
+static bool agp_sis_force_delay = 0;
+static int agp_sis_agp_spec = -1;
 
 static int sis_fetch_size(void)
 {
@@ -50,13 +50,12 @@ static void sis_tlbflush(struct agp_memory *mem)
 
 static int sis_configure(void)
 {
-	u32 temp;
 	struct aper_size_info_8 *current_size;
 
 	current_size = A_SIZE_8(agp_bridge->current_size);
 	pci_write_config_byte(agp_bridge->dev, SIS_TLBCNTRL, 0x05);
-	pci_read_config_dword(agp_bridge->dev, AGP_APBASE, &temp);
-	agp_bridge->gart_bus_addr = (temp & PCI_BASE_ADDRESS_MEM_MASK);
+	agp_bridge->gart_bus_addr = pci_bus_address(agp_bridge->dev,
+						    AGP_APERTURE_BAR);
 	pci_write_config_dword(agp_bridge->dev, SIS_ATTBASE,
 			       agp_bridge->gatt_bus_addr);
 	pci_write_config_byte(agp_bridge->dev, SIS_APSIZE,
@@ -148,13 +147,13 @@ static struct agp_bridge_driver sis_driver = {
 };
 
 // chipsets that require the 'delay hack'
-static int sis_broken_chipsets[] __devinitdata = {
+static int sis_broken_chipsets[] = {
 	PCI_DEVICE_ID_SI_648,
 	PCI_DEVICE_ID_SI_746,
 	0 // terminator
 };
 
-static void __devinit sis_get_driver(struct agp_bridge_data *bridge)
+static void sis_get_driver(struct agp_bridge_data *bridge)
 {
 	int i;
 
@@ -180,8 +179,7 @@ static void __devinit sis_get_driver(struct agp_bridge_data *bridge)
 }
 
 
-static int __devinit agp_sis_probe(struct pci_dev *pdev,
-				   const struct pci_device_id *ent)
+static int agp_sis_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
 	struct agp_bridge_data *bridge;
 	u8 cap_ptr;
@@ -211,7 +209,7 @@ static int __devinit agp_sis_probe(struct pci_dev *pdev,
 	return agp_add_bridge(bridge);
 }
 
-static void __devexit agp_sis_remove(struct pci_dev *pdev)
+static void agp_sis_remove(struct pci_dev *pdev)
 {
 	struct agp_bridge_data *bridge = pci_get_drvdata(pdev);
 
@@ -219,27 +217,15 @@ static void __devexit agp_sis_remove(struct pci_dev *pdev)
 	agp_put_bridge(bridge);
 }
 
-#ifdef CONFIG_PM
+#define agp_sis_suspend NULL
 
-static int agp_sis_suspend(struct pci_dev *pdev, pm_message_t state)
+static int __maybe_unused agp_sis_resume(
+	__attribute__((unused)) struct device *dev)
 {
-	pci_save_state(pdev);
-	pci_set_power_state(pdev, pci_choose_state(pdev, state));
-
-	return 0;
-}
-
-static int agp_sis_resume(struct pci_dev *pdev)
-{
-	pci_set_power_state(pdev, PCI_D0);
-	pci_restore_state(pdev);
-
 	return sis_driver.configure();
 }
 
-#endif /* CONFIG_PM */
-
-static struct pci_device_id agp_sis_pci_table[] = {
+static const struct pci_device_id agp_sis_pci_table[] = {
 	{
 		.class		= (PCI_CLASS_BRIDGE_HOST << 8),
 		.class_mask	= ~0,
@@ -421,15 +407,14 @@ static struct pci_device_id agp_sis_pci_table[] = {
 
 MODULE_DEVICE_TABLE(pci, agp_sis_pci_table);
 
+static SIMPLE_DEV_PM_OPS(agp_sis_pm_ops, agp_sis_suspend, agp_sis_resume);
+
 static struct pci_driver agp_sis_pci_driver = {
 	.name		= "agpgart-sis",
 	.id_table	= agp_sis_pci_table,
 	.probe		= agp_sis_probe,
 	.remove		= agp_sis_remove,
-#ifdef CONFIG_PM
-	.suspend	= agp_sis_suspend,
-	.resume		= agp_sis_resume,
-#endif
+	.driver.pm      = &agp_sis_pm_ops,
 };
 
 static int __init agp_sis_init(void)

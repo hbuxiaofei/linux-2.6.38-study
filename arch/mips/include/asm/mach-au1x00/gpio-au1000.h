@@ -12,18 +12,35 @@
 #include <asm/mach-au1x00/au1000.h>
 
 /* The default GPIO numberspace as documented in the Alchemy manuals.
- * GPIO0-31 from GPIO1 block,   GPIO200-215 from GPIO2 block.
+ * GPIO0-31 from GPIO1 block,	GPIO200-215 from GPIO2 block.
  */
 #define ALCHEMY_GPIO1_BASE	0
 #define ALCHEMY_GPIO2_BASE	200
 
 #define ALCHEMY_GPIO1_NUM	32
 #define ALCHEMY_GPIO2_NUM	16
-#define ALCHEMY_GPIO1_MAX 	(ALCHEMY_GPIO1_BASE + ALCHEMY_GPIO1_NUM - 1)
+#define ALCHEMY_GPIO1_MAX	(ALCHEMY_GPIO1_BASE + ALCHEMY_GPIO1_NUM - 1)
 #define ALCHEMY_GPIO2_MAX	(ALCHEMY_GPIO2_BASE + ALCHEMY_GPIO2_NUM - 1)
 
 #define MAKE_IRQ(intc, off)	(AU1000_INTC##intc##_INT_BASE + (off))
 
+/* GPIO1 registers within SYS_ area */
+#define AU1000_SYS_TRIOUTRD	0x100
+#define AU1000_SYS_TRIOUTCLR	0x100
+#define AU1000_SYS_OUTPUTRD	0x108
+#define AU1000_SYS_OUTPUTSET	0x108
+#define AU1000_SYS_OUTPUTCLR	0x10C
+#define AU1000_SYS_PINSTATERD	0x110
+#define AU1000_SYS_PININPUTEN	0x110
+
+/* register offsets within GPIO2 block */
+#define AU1000_GPIO2_DIR	0x00
+#define AU1000_GPIO2_OUTPUT	0x08
+#define AU1000_GPIO2_PINSTATE	0x0C
+#define AU1000_GPIO2_INTENABLE	0x10
+#define AU1000_GPIO2_ENABLE	0x14
+
+struct gpio;
 
 static inline int au1000_gpio1_to_irq(int gpio)
 {
@@ -50,7 +67,7 @@ static inline int au1500_gpio1_to_irq(int gpio)
 	switch (gpio) {
 	case 0 ... 15:
 	case 20:
-	case 23 ... 28:	return MAKE_IRQ(1, gpio);
+	case 23 ... 28: return MAKE_IRQ(1, gpio);
 	}
 
 	return -ENXIO;
@@ -122,8 +139,8 @@ static inline int au1550_gpio1_to_irq(int gpio)
 
 	switch (gpio) {
 	case 0 ... 15:
-	case 20 ... 28:	return MAKE_IRQ(1, gpio);
-	case 16 ... 17:	return MAKE_IRQ(1, 18 + gpio - 16);
+	case 20 ... 28: return MAKE_IRQ(1, gpio);
+	case 16 ... 17: return MAKE_IRQ(1, 18 + gpio - 16);
 	}
 
 	return -ENXIO;
@@ -135,9 +152,9 @@ static inline int au1550_gpio2_to_irq(int gpio)
 
 	switch (gpio) {
 	case 0:		return MAKE_IRQ(1, 16);
-	case 1 ... 5:	return MAKE_IRQ(1, 17);	/* shared GPIO201_205 */
+	case 1 ... 5:	return MAKE_IRQ(1, 17); /* shared GPIO201_205 */
 	case 6 ... 7:	return MAKE_IRQ(1, 29 + gpio - 6);
-	case 8 ... 15:	return MAKE_IRQ(1, 31);	/* shared GPIO208_215 */
+	case 8 ... 15:	return MAKE_IRQ(1, 31); /* shared GPIO208_215 */
 	}
 
 	return -ENXIO;
@@ -173,7 +190,7 @@ static inline int au1200_gpio2_to_irq(int gpio)
 	case 0 ... 2:	return MAKE_IRQ(0, 5 + gpio - 0);
 	case 3:		return MAKE_IRQ(0, 22);
 	case 4 ... 7:	return MAKE_IRQ(0, 24 + gpio - 4);
-	case 8 ... 15:	return MAKE_IRQ(0, 28);	/* shared GPIO208_215 */
+	case 8 ... 15:	return MAKE_IRQ(0, 28); /* shared GPIO208_215 */
 	}
 
 	return -ENXIO;
@@ -201,22 +218,20 @@ static inline int au1200_irq_to_gpio(int irq)
 static inline void alchemy_gpio1_set_value(int gpio, int v)
 {
 	unsigned long mask = 1 << (gpio - ALCHEMY_GPIO1_BASE);
-	unsigned long r = v ? SYS_OUTPUTSET : SYS_OUTPUTCLR;
-	au_writel(mask, r);
-	au_sync();
+	unsigned long r = v ? AU1000_SYS_OUTPUTSET : AU1000_SYS_OUTPUTCLR;
+	alchemy_wrsys(mask, r);
 }
 
 static inline int alchemy_gpio1_get_value(int gpio)
 {
 	unsigned long mask = 1 << (gpio - ALCHEMY_GPIO1_BASE);
-	return au_readl(SYS_PINSTATERD) & mask;
+	return alchemy_rdsys(AU1000_SYS_PINSTATERD) & mask;
 }
 
 static inline int alchemy_gpio1_direction_input(int gpio)
 {
 	unsigned long mask = 1 << (gpio - ALCHEMY_GPIO1_BASE);
-	au_writel(mask, SYS_TRIOUTCLR);
-	au_sync();
+	alchemy_wrsys(mask, AU1000_SYS_TRIOUTCLR);
 	return 0;
 }
 
@@ -251,33 +266,49 @@ static inline int alchemy_gpio1_to_irq(int gpio)
 	return -ENXIO;
 }
 
+/* On Au1000, Au1500 and Au1100 GPIOs won't work as inputs before
+ * SYS_PININPUTEN is written to at least once.  On Au1550/Au1200/Au1300 this
+ * register enables use of GPIOs as wake source.
+ */
+static inline void alchemy_gpio1_input_enable(void)
+{
+	void __iomem *base = (void __iomem *)KSEG1ADDR(AU1000_SYS_PHYS_ADDR);
+	__raw_writel(0, base + 0x110);		/* the write op is key */
+	wmb();
+}
+
 /*
  * GPIO2 block macros for common linux GPIO functions. The 'gpio'
  * parameter must be in range of ALCHEMY_GPIO2_BASE..ALCHEMY_GPIO2_MAX.
  */
 static inline void __alchemy_gpio2_mod_dir(int gpio, int to_out)
 {
+	void __iomem *base = (void __iomem *)KSEG1ADDR(AU1500_GPIO2_PHYS_ADDR);
 	unsigned long mask = 1 << (gpio - ALCHEMY_GPIO2_BASE);
-	unsigned long d = au_readl(GPIO2_DIR);
+	unsigned long d = __raw_readl(base + AU1000_GPIO2_DIR);
+
 	if (to_out)
 		d |= mask;
 	else
 		d &= ~mask;
-	au_writel(d, GPIO2_DIR);
-	au_sync();
+	__raw_writel(d, base + AU1000_GPIO2_DIR);
+	wmb();
 }
 
 static inline void alchemy_gpio2_set_value(int gpio, int v)
 {
+	void __iomem *base = (void __iomem *)KSEG1ADDR(AU1500_GPIO2_PHYS_ADDR);
 	unsigned long mask;
 	mask = ((v) ? 0x00010001 : 0x00010000) << (gpio - ALCHEMY_GPIO2_BASE);
-	au_writel(mask, GPIO2_OUTPUT);
-	au_sync();
+	__raw_writel(mask, base + AU1000_GPIO2_OUTPUT);
+	wmb();
 }
 
 static inline int alchemy_gpio2_get_value(int gpio)
 {
-	return au_readl(GPIO2_PINSTATE) & (1 << (gpio - ALCHEMY_GPIO2_BASE));
+	void __iomem *base = (void __iomem *)KSEG1ADDR(AU1500_GPIO2_PHYS_ADDR);
+	return __raw_readl(base + AU1000_GPIO2_PINSTATE) &
+				(1 << (gpio - ALCHEMY_GPIO2_BASE));
 }
 
 static inline int alchemy_gpio2_direction_input(int gpio)
@@ -323,27 +354,18 @@ static inline int alchemy_gpio2_to_irq(int gpio)
 
 /**********************************************************************/
 
-/* On Au1000, Au1500 and Au1100 GPIOs won't work as inputs before
- * SYS_PININPUTEN is written to at least once.  On Au1550/Au1200 this
- * register enables use of GPIOs as wake source.
- */
-static inline void alchemy_gpio1_input_enable(void)
-{
-	au_writel(0, SYS_PININPUTEN);	/* the write op is key */
-	au_sync();
-}
-
 /* GPIO2 shared interrupts and control */
 
 static inline void __alchemy_gpio2_mod_int(int gpio2, int en)
 {
-	unsigned long r = au_readl(GPIO2_INTENABLE);
+	void __iomem *base = (void __iomem *)KSEG1ADDR(AU1500_GPIO2_PHYS_ADDR);
+	unsigned long r = __raw_readl(base + AU1000_GPIO2_INTENABLE);
 	if (en)
 		r |= 1 << gpio2;
 	else
 		r &= ~(1 << gpio2);
-	au_writel(r, GPIO2_INTENABLE);
-	au_sync();
+	__raw_writel(r, base + AU1000_GPIO2_INTENABLE);
+	wmb();
 }
 
 /**
@@ -413,15 +435,16 @@ static inline void alchemy_gpio2_disable_int(int gpio2)
 /**
  * alchemy_gpio2_enable -  Activate GPIO2 block.
  *
- * The GPIO2 block must be enabled excplicitly to work.  On systems
+ * The GPIO2 block must be enabled excplicitly to work.	 On systems
  * where this isn't done by the bootloader, this macro can be used.
  */
 static inline void alchemy_gpio2_enable(void)
 {
-	au_writel(3, GPIO2_ENABLE);	/* reset, clock enabled */
-	au_sync();
-	au_writel(1, GPIO2_ENABLE);	/* clock enabled */
-	au_sync();
+	void __iomem *base = (void __iomem *)KSEG1ADDR(AU1500_GPIO2_PHYS_ADDR);
+	__raw_writel(3, base + AU1000_GPIO2_ENABLE);	/* reset, clock enabled */
+	wmb();
+	__raw_writel(1, base + AU1000_GPIO2_ENABLE);	/* clock enabled */
+	wmb();
 }
 
 /**
@@ -431,8 +454,9 @@ static inline void alchemy_gpio2_enable(void)
  */
 static inline void alchemy_gpio2_disable(void)
 {
-	au_writel(2, GPIO2_ENABLE);	/* reset, clock disabled */
-	au_sync();
+	void __iomem *base = (void __iomem *)KSEG1ADDR(AU1500_GPIO2_PHYS_ADDR);
+	__raw_writel(2, base + AU1000_GPIO2_ENABLE);	/* reset, clock disabled */
+	wmb();
 }
 
 /**********************************************************************/
@@ -504,108 +528,5 @@ static inline int alchemy_irq_to_gpio(int irq)
 	}
 	return -ENXIO;
 }
-
-/**********************************************************************/
-
-/* Linux gpio framework integration.
- *
- * 4 use cases of Au1000-Au1200 GPIOS:
- *(1) GPIOLIB=y, ALCHEMY_GPIO_INDIRECT=y:
- *	Board must register gpiochips.
- *(2) GPIOLIB=y, ALCHEMY_GPIO_INDIRECT=n:
- *	2 (1 for Au1000) gpio_chips are registered.
- *
- *(3) GPIOLIB=n, ALCHEMY_GPIO_INDIRECT=y:
- *	the boards' gpio.h must provide	the linux gpio wrapper functions,
- *
- *(4) GPIOLIB=n, ALCHEMY_GPIO_INDIRECT=n:
- *	inlinable gpio functions are provided which enable access to the
- *	Au1000 gpios only by using the numbers straight out of the data-
- *	sheets.
-
- * Cases 1 and 3 are intended for boards which want to provide their own
- * GPIO namespace and -operations (i.e. for example you have 8 GPIOs
- * which are in part provided by spare Au1000 GPIO pins and in part by
- * an external FPGA but you still want them to be accssible in linux
- * as gpio0-7. The board can of course use the alchemy_gpioX_* functions
- * as required).
- */
-
-#ifndef CONFIG_GPIOLIB
-
-
-#ifndef CONFIG_ALCHEMY_GPIO_INDIRECT	/* case (4) */
-
-static inline int gpio_direction_input(int gpio)
-{
-	return alchemy_gpio_direction_input(gpio);
-}
-
-static inline int gpio_direction_output(int gpio, int v)
-{
-	return alchemy_gpio_direction_output(gpio, v);
-}
-
-static inline int gpio_get_value(int gpio)
-{
-	return alchemy_gpio_get_value(gpio);
-}
-
-static inline void gpio_set_value(int gpio, int v)
-{
-	alchemy_gpio_set_value(gpio, v);
-}
-
-static inline int gpio_is_valid(int gpio)
-{
-	return alchemy_gpio_is_valid(gpio);
-}
-
-static inline int gpio_cansleep(int gpio)
-{
-	return alchemy_gpio_cansleep(gpio);
-}
-
-static inline int gpio_to_irq(int gpio)
-{
-	return alchemy_gpio_to_irq(gpio);
-}
-
-static inline int irq_to_gpio(int irq)
-{
-	return alchemy_irq_to_gpio(irq);
-}
-
-static inline int gpio_request(unsigned gpio, const char *label)
-{
-	return 0;
-}
-
-static inline void gpio_free(unsigned gpio)
-{
-}
-
-#endif	/* !CONFIG_ALCHEMY_GPIO_INDIRECT */
-
-
-#else	/* CONFIG GPIOLIB */
-
-
- /* using gpiolib to provide up to 2 gpio_chips for on-chip gpios */
-#ifndef CONFIG_ALCHEMY_GPIO_INDIRECT	/* case (2) */
-
-/* get everything through gpiolib */
-#define gpio_to_irq	__gpio_to_irq
-#define gpio_get_value	__gpio_get_value
-#define gpio_set_value	__gpio_set_value
-#define gpio_cansleep	__gpio_cansleep
-#define irq_to_gpio	alchemy_irq_to_gpio
-
-#include <asm-generic/gpio.h>
-
-#endif	/* !CONFIG_ALCHEMY_GPIO_INDIRECT */
-
-
-#endif	/* !CONFIG_GPIOLIB */
 
 #endif /* _ALCHEMY_GPIO_AU1000_H_ */

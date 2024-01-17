@@ -10,6 +10,7 @@
 #include <linux/mm.h>
 #include <linux/pagemap.h>
 #include <linux/vmalloc.h>
+#include <linux/export.h>
 #include <linux/slab.h>
 #include <linux/dm-io.h>
 
@@ -51,12 +52,12 @@ static int transient_prepare_exception(struct dm_exception_store *store,
 }
 
 static void transient_commit_exception(struct dm_exception_store *store,
-				       struct dm_exception *e,
+				       struct dm_exception *e, int valid,
 				       void (*callback) (void *, int success),
 				       void *callback_context)
 {
 	/* Just succeed */
-	callback(callback_context, 1);
+	callback(callback_context, valid);
 }
 
 static void transient_usage(struct dm_exception_store *store,
@@ -69,8 +70,7 @@ static void transient_usage(struct dm_exception_store *store,
 	*metadata_sectors = 0;
 }
 
-static int transient_ctr(struct dm_exception_store *store,
-			 unsigned argc, char **argv)
+static int transient_ctr(struct dm_exception_store *store, char *options)
 {
 	struct transient_c *tc;
 
@@ -84,17 +84,21 @@ static int transient_ctr(struct dm_exception_store *store,
 	return 0;
 }
 
-static unsigned transient_status(struct dm_exception_store *store,
+static unsigned int transient_status(struct dm_exception_store *store,
 				 status_type_t status, char *result,
-				 unsigned maxlen)
+				 unsigned int maxlen)
 {
-	unsigned sz = 0;
+	unsigned int sz = 0;
 
 	switch (status) {
 	case STATUSTYPE_INFO:
 		break;
 	case STATUSTYPE_TABLE:
 		DMEMIT(" N %llu", (unsigned long long)store->chunk_size);
+		break;
+	case STATUSTYPE_IMA:
+		*result = '\0';
+		break;
 	}
 
 	return sz;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * sbus.c: UltraSparc SBUS controller support.
  *
@@ -9,10 +10,12 @@
 #include <linux/mm.h>
 #include <linux/spinlock.h>
 #include <linux/slab.h>
+#include <linux/export.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
+#include <linux/numa.h>
 
 #include <asm/page.h>
 #include <asm/io.h>
@@ -65,8 +68,8 @@ void sbus_set_sbus64(struct device *dev, int bursts)
 
 	regs = of_get_property(op->dev.of_node, "reg", NULL);
 	if (!regs) {
-		printk(KERN_ERR "sbus_set_sbus64: Cannot find regs for %s\n",
-		       op->dev.of_node->full_name);
+		printk(KERN_ERR "sbus_set_sbus64: Cannot find regs for %pOF\n",
+		       op->dev.of_node);
 		return;
 	}
 	slot = regs->which_io;
@@ -97,7 +100,7 @@ void sbus_set_sbus64(struct device *dev, int bursts)
 
 	default:
 		return;
-	};
+	}
 
 	val = upa_readq(cfg_reg);
 	if (val & (1UL << 14UL)) {
@@ -244,7 +247,7 @@ static unsigned int sbus_build_irq(struct platform_device *op, unsigned int ino)
 		case 3:
 			iclr = reg_base + SYSIO_ICLR_SLOT3;
 			break;
-		};
+		}
 
 		iclr += ((unsigned long)sbus_level - 1UL) * 8UL;
 	}
@@ -553,15 +556,13 @@ static void __init sbus_iommu_init(struct platform_device *op)
 	regs = pr->phys_addr;
 
 	iommu = kzalloc(sizeof(*iommu), GFP_ATOMIC);
-	if (!iommu)
-		goto fatal_memory_error;
 	strbuf = kzalloc(sizeof(*strbuf), GFP_ATOMIC);
-	if (!strbuf)
+	if (!iommu || !strbuf)
 		goto fatal_memory_error;
 
 	op->dev.archdata.iommu = iommu;
 	op->dev.archdata.stc = strbuf;
-	op->dev.archdata.numa_node = -1;
+	op->dev.archdata.numa_node = NUMA_NO_NODE;
 
 	reg_base = regs + SYSIO_IOMMUREG_BASE;
 	iommu->iommu_control = reg_base + IOMMU_CONTROL;
@@ -655,6 +656,8 @@ static void __init sbus_iommu_init(struct platform_device *op)
 	return;
 
 fatal_memory_error:
+	kfree(iommu);
+	kfree(strbuf);
 	prom_printf("sbus_iommu_init: Fatal memory allocation error.\n");
 }
 

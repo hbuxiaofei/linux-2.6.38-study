@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * linux/arch/m68k/kernel/sys_m68k.c
  *
@@ -22,12 +23,15 @@
 #include <linux/ipc.h>
 
 #include <asm/setup.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/cachectl.h>
 #include <asm/traps.h>
 #include <asm/page.h>
 #include <asm/unistd.h>
-#include <linux/elf.h>
+#include <asm/cacheflush.h>
+
+#ifdef CONFIG_MMU
+
 #include <asm/tlb.h>
 
 asmlinkage int do_page_fault(struct pt_regs *regs, unsigned long address,
@@ -42,7 +46,7 @@ asmlinkage long sys_mmap2(unsigned long addr, unsigned long len,
 	 * so we need to shift the argument down by 1; m68k mmap64(3)
 	 * (in libc) expects the last argument of mmap2 in 4Kb units.
 	 */
-	return sys_mmap_pgoff(addr, len, prot, flags, fd, pgoff);
+	return ksys_mmap_pgoff(addr, len, prot, flags, fd, pgoff);
 }
 
 /* Convert virtual (user) address VADDR to physical address PADDR */
@@ -373,7 +377,6 @@ cache_flush_060 (unsigned long addr, int scope, int cache, unsigned long len)
 asmlinkage int
 sys_cacheflush (unsigned long addr, int scope, int cache, unsigned long len)
 {
-	struct vm_area_struct *vma;
 	int ret = -EINVAL;
 
 	if (scope < FLUSH_SCOPE_LINE || scope > FLUSH_SCOPE_ALL ||
@@ -385,18 +388,23 @@ sys_cacheflush (unsigned long addr, int scope, int cache, unsigned long len)
 		ret = -EPERM;
 		if (!capable(CAP_SYS_ADMIN))
 			goto out;
+
+		mmap_read_lock(current->mm);
 	} else {
+		struct vm_area_struct *vma;
+
+		/* Check for overflow.  */
+		if (addr + len < addr)
+			goto out;
+
 		/*
 		 * Verify that the specified address region actually belongs
 		 * to this process.
 		 */
-		vma = find_vma (current->mm, addr);
-		ret = -EINVAL;
-		/* Check for overflow.  */
-		if (addr + len < addr)
-			goto out;
-		if (vma == NULL || addr < vma->vm_start || addr + len > vma->vm_end)
-			goto out;
+		mmap_read_lock(current->mm);
+		vma = vma_lookup(current->mm, addr);
+		if (!vma || addr + len > vma->vm_end)
+			goto out_unlock;
 	}
 
 	if (CPU_IS_020_OR_030) {
@@ -426,7 +434,7 @@ sys_cacheflush (unsigned long addr, int scope, int cache, unsigned long len)
 			__asm__ __volatile__ ("movec %0, %%cacr" : : "r" (cacr));
 		}
 		ret = 0;
-		goto out;
+		goto out_unlock;
 	} else {
 	    /*
 	     * 040 or 060: don't blindly trust 'scope', someone could
@@ -443,41 +451,10 @@ sys_cacheflush (unsigned long addr, int scope, int cache, unsigned long len)
 		ret = cache_flush_060 (addr, scope, cache, len);
 	    }
 	}
+out_unlock:
+	mmap_read_unlock(current->mm);
 out:
 	return ret;
-}
-
-asmlinkage int sys_getpagesize(void)
-{
-	return PAGE_SIZE;
-}
-
-/*
- * Do a system call from kernel instead of calling sys_execve so we
- * end up with proper pt_regs.
- */
-int kernel_execve(const char *filename,
-		  const char *const argv[],
-		  const char *const envp[])
-{
-	register long __res asm ("%d0") = __NR_execve;
-	register long __a asm ("%d1") = (long)(filename);
-	register long __b asm ("%d2") = (long)(argv);
-	register long __c asm ("%d3") = (long)(envp);
-	asm volatile ("trap  #0" : "+d" (__res)
-			: "d" (__a), "d" (__b), "d" (__c));
-	return __res;
-}
-
-asmlinkage unsigned long sys_get_thread_area(void)
-{
-	return current_thread_info()->tp_value;
-}
-
-asmlinkage int sys_set_thread_area(unsigned long tp)
-{
-	current_thread_info()->tp_value = tp;
-	return 0;
 }
 
 /* This syscall gets its arguments in A0 (mem), D2 (oldval) and
@@ -490,16 +467,24 @@ sys_atomic_cmpxchg_32(unsigned long newval, int oldval, int d3, int d4, int d5,
 	for (;;) {
 		struct mm_struct *mm = current->mm;
 		pgd_t *pgd;
+		p4d_t *p4d;
+		pud_t *pud;
 		pmd_t *pmd;
 		pte_t *pte;
 		spinlock_t *ptl;
 		unsigned long mem_value;
 
-		down_read(&mm->mmap_sem);
+		mmap_read_lock(mm);
 		pgd = pgd_offset(mm, (unsigned long)mem);
 		if (!pgd_present(*pgd))
 			goto bad_access;
-		pmd = pmd_offset(pgd, (unsigned long)mem);
+		p4d = p4d_offset(pgd, (unsigned long)mem);
+		if (!p4d_present(*p4d))
+			goto bad_access;
+		pud = pud_offset(p4d, (unsigned long)mem);
+		if (!pud_present(*pud))
+			goto bad_access;
+		pmd = pmd_offset(pud, (unsigned long)mem);
 		if (!pmd_present(*pmd))
 			goto bad_access;
 		pte = pte_offset_map_lock(mm, pmd, (unsigned long)mem, &ptl);
@@ -509,16 +494,20 @@ sys_atomic_cmpxchg_32(unsigned long newval, int oldval, int d3, int d4, int d5,
 			goto bad_access;
 		}
 
-		mem_value = *mem;
+		/*
+		 * No need to check for EFAULT; we know that the page is
+		 * present and writable.
+		 */
+		__get_user(mem_value, mem);
 		if (mem_value == oldval)
-			*mem = newval;
+			__put_user(newval, mem);
 
 		pte_unmap_unlock(pte, ptl);
-		up_read(&mm->mmap_sem);
+		mmap_read_unlock(mm);
 		return mem_value;
 
 	      bad_access:
-		up_read(&mm->mmap_sem);
+		mmap_read_unlock(mm);
 		/* This is not necessarily a bad access, we can get here if
 		   a memory we're trying to write to should be copied-on-write.
 		   Make the kernel do the necessary page stuff, then re-iterate.
@@ -537,6 +526,53 @@ sys_atomic_cmpxchg_32(unsigned long newval, int oldval, int d3, int d4, int d5,
 				return 0xdeadbeef;
 		}
 	}
+}
+
+#else
+
+/* sys_cacheflush -- flush (part of) the processor cache.  */
+asmlinkage int
+sys_cacheflush (unsigned long addr, int scope, int cache, unsigned long len)
+{
+	flush_cache_all();
+	return 0;
+}
+
+/* This syscall gets its arguments in A0 (mem), D2 (oldval) and
+   D1 (newval).  */
+asmlinkage int
+sys_atomic_cmpxchg_32(unsigned long newval, int oldval, int d3, int d4, int d5,
+		      unsigned long __user * mem)
+{
+	struct mm_struct *mm = current->mm;
+	unsigned long mem_value;
+
+	mmap_read_lock(mm);
+
+	mem_value = *mem;
+	if (mem_value == oldval)
+		*mem = newval;
+
+	mmap_read_unlock(mm);
+	return mem_value;
+}
+
+#endif /* CONFIG_MMU */
+
+asmlinkage int sys_getpagesize(void)
+{
+	return PAGE_SIZE;
+}
+
+asmlinkage unsigned long sys_get_thread_area(void)
+{
+	return current_thread_info()->tp_value;
+}
+
+asmlinkage int sys_set_thread_area(unsigned long tp)
+{
+	current_thread_info()->tp_value = tp;
+	return 0;
 }
 
 asmlinkage int sys_atomic_barrier(void)

@@ -1,26 +1,10 @@
-/* -*- mode: c; c-basic-offset: 8; -*-
- * vim: noexpandtab sw=8 ts=8 sts=0:
- *
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+/*
  * ocfs2.h
  *
  * Defines macros and structures used in OCFS2
  *
  * Copyright (C) 2002, 2004 Oracle.  All rights reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public
- * License as published by the Free Software Foundation; either
- * version 2 of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public
- * License along with this program; if not, write to the
- * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
- * Boston, MA 021110-1307, USA.
  */
 
 #ifndef OCFS2_H
@@ -30,6 +14,7 @@
 #include <linux/sched.h>
 #include <linux/wait.h>
 #include <linux/list.h>
+#include <linux/llist.h>
 #include <linux/rbtree.h>
 #include <linux/workqueue.h>
 #include <linux/kref.h>
@@ -48,6 +33,8 @@
 #include "blockcheck.h"
 
 #include "reservations.h"
+
+#include "filecheck.h"
 
 /* Caching of metadata buffers */
 
@@ -143,9 +130,27 @@ enum ocfs2_unlock_action {
 						     * before the upconvert
 						     * has completed */
 
+#define OCFS2_LOCK_NONBLOCK_FINISHED (0x00001000) /* NONBLOCK cluster
+						   * lock has already
+						   * returned, do not block
+						   * dc thread from
+						   * downconverting */
+
 struct ocfs2_lock_res_ops;
 
 typedef void (*ocfs2_lock_callback)(int status, unsigned long data);
+
+#ifdef CONFIG_OCFS2_FS_STATS
+struct ocfs2_lock_stats {
+	u64		ls_total;	/* Total wait in NSEC */
+	u32		ls_gets;	/* Num acquires */
+	u32		ls_fail;	/* Num failed acquires */
+
+	/* Storing max wait in usecs saves 24 bytes per inode */
+	u32		ls_max;		/* Max wait in USEC */
+	u64		ls_last;	/* Last unlock time in USEC */
+};
+#endif
 
 struct ocfs2_lock_res {
 	void                    *l_priv;
@@ -154,6 +159,7 @@ struct ocfs2_lock_res {
 
 	struct list_head         l_blocked_list;
 	struct list_head         l_mask_waiters;
+	struct list_head	 l_holders;
 
 	unsigned long		 l_flags;
 	char                     l_name[OCFS2_LOCK_ID_MAX_LEN];
@@ -182,19 +188,19 @@ struct ocfs2_lock_res {
 	struct list_head         l_debug_list;
 
 #ifdef CONFIG_OCFS2_FS_STATS
-	unsigned long long	 l_lock_num_prmode; 	   /* PR acquires */
-	unsigned long long 	 l_lock_num_exmode; 	   /* EX acquires */
-	unsigned int		 l_lock_num_prmode_failed; /* Failed PR gets */
-	unsigned int		 l_lock_num_exmode_failed; /* Failed EX gets */
-	unsigned long long	 l_lock_total_prmode; 	   /* Tot wait for PR */
-	unsigned long long	 l_lock_total_exmode; 	   /* Tot wait for EX */
-	unsigned int		 l_lock_max_prmode; 	   /* Max wait for PR */
-	unsigned int		 l_lock_max_exmode; 	   /* Max wait for EX */
-	unsigned int		 l_lock_refresh;	   /* Disk refreshes */
+	struct ocfs2_lock_stats  l_lock_prmode;		/* PR mode stats */
+	u32                      l_lock_refresh;	/* Disk refreshes */
+	u64                      l_lock_wait;	/* First lock wait time */
+	struct ocfs2_lock_stats  l_lock_exmode;		/* EX mode stats */
 #endif
 #ifdef CONFIG_DEBUG_LOCK_ALLOC
 	struct lockdep_map	 l_lockdep_map;
 #endif
+};
+
+enum ocfs2_orphan_reco_type {
+	ORPHAN_NO_NEED_TRUNCATE = 0,
+	ORPHAN_NEED_TRUNCATE,
 };
 
 enum ocfs2_orphan_scan_state {
@@ -207,7 +213,7 @@ struct ocfs2_orphan_scan {
 	struct ocfs2_super 	*os_osb;
 	struct ocfs2_lock_res 	os_lockres;     /* lock to synchronize scans */
 	struct delayed_work 	os_orphan_scan_work;
-	struct timespec		os_scantime;  /* time this node ran the scan */
+	time64_t		os_scantime;  /* time this node ran the scan */
 	u32			os_count;      /* tracks node specific scans */
 	u32  			os_seqno;       /* tracks cluster wide scans */
 	atomic_t		os_state;              /* ACTIVE or INACTIVE */
@@ -215,7 +221,7 @@ struct ocfs2_orphan_scan {
 
 struct ocfs2_dlm_debug {
 	struct kref d_refcnt;
-	struct dentry *d_locking_state;
+	u32 d_filter_secs;
 	struct list_head d_lockres_tracking;
 };
 
@@ -267,21 +273,22 @@ enum ocfs2_mount_options
 						     writes */
 	OCFS2_MOUNT_HB_NONE = 1 << 13, /* No heartbeat */
 	OCFS2_MOUNT_HB_GLOBAL = 1 << 14, /* Global heartbeat */
+
+	OCFS2_MOUNT_JOURNAL_ASYNC_COMMIT = 1 << 15,  /* Journal Async Commit */
+	OCFS2_MOUNT_ERRORS_CONT = 1 << 16, /* Return EIO to the calling process on error */
+	OCFS2_MOUNT_ERRORS_ROFS = 1 << 17, /* Change filesystem to read-only on error */
 };
 
-#define OCFS2_OSB_SOFT_RO			0x0001
-#define OCFS2_OSB_HARD_RO			0x0002
-#define OCFS2_OSB_ERROR_FS			0x0004
-#define OCFS2_OSB_DROP_DENTRY_LOCK_IMMED	0x0008
-
-#define OCFS2_DEFAULT_ATIME_QUANTUM		60
+#define OCFS2_OSB_SOFT_RO	0x0001
+#define OCFS2_OSB_HARD_RO	0x0002
+#define OCFS2_OSB_ERROR_FS	0x0004
+#define OCFS2_DEFAULT_ATIME_QUANTUM	60
 
 struct ocfs2_journal;
 struct ocfs2_slot_info;
 struct ocfs2_recovery_map;
 struct ocfs2_replay_map;
 struct ocfs2_quota_recovery;
-struct ocfs2_dentry_lock;
 struct ocfs2_super
 {
 	struct task_struct *commit_task;
@@ -301,7 +308,6 @@ struct ocfs2_super
 	u64 system_dir_blkno;
 	u64 bitmap_blkno;
 	u32 bitmap_cpg;
-	u8 *uuid;
 	char *uuid_str;
 	u32 uuid_hash;
 	u8 *vol_label;
@@ -318,8 +324,8 @@ struct ocfs2_super
 	spinlock_t osb_lock;
 	u32 s_next_generation;
 	unsigned long osb_flags;
-	s16 s_inode_steal_slot;
-	s16 s_meta_steal_slot;
+	u16 s_inode_steal_slot;
+	u16 s_meta_steal_slot;
 	atomic_t s_num_inodes_stolen;
 	atomic_t s_num_meta_stolen;
 
@@ -342,14 +348,13 @@ struct ocfs2_super
 	struct task_struct *recovery_thread_task;
 	int disable_recovery;
 	wait_queue_head_t checkpoint_event;
-	atomic_t needs_checkpoint;
 	struct ocfs2_journal *journal;
 	unsigned long osb_commit_interval;
 
 	struct delayed_work		la_enable_wq;
 
 	/*
-	 * Must hold local alloc i_mutex and osb->osb_lock to change
+	 * Must hold local alloc i_rwsem and osb->osb_lock to change
 	 * local_alloc_bits. Reads can be done under either lock.
 	 */
 	unsigned int local_alloc_bits;
@@ -370,9 +375,8 @@ struct ocfs2_super
 	unsigned int	osb_resv_level;
 	unsigned int	osb_dir_resv_level;
 
-	/* Next three fields are for local node slot recovery during
+	/* Next two fields are for local node slot recovery during
 	 * mount. */
-	int dirty;
 	struct ocfs2_dinode *local_alloc_copy;
 	struct ocfs2_quota_recovery *quota_rec;
 
@@ -383,14 +387,17 @@ struct ocfs2_super
 	u8 osb_stackflags;
 
 	char osb_cluster_stack[OCFS2_STACK_LABEL_LEN + 1];
+	char osb_cluster_name[OCFS2_CLUSTER_NAME_LEN + 1];
 	struct ocfs2_cluster_connection *cconn;
 	struct ocfs2_lock_res osb_super_lockres;
 	struct ocfs2_lock_res osb_rename_lockres;
 	struct ocfs2_lock_res osb_nfs_sync_lockres;
+	struct rw_semaphore nfs_sync_rwlock;
+	struct ocfs2_lock_res osb_trim_fs_lockres;
+	struct mutex obs_trim_fs_mutex;
 	struct ocfs2_dlm_debug *osb_dlm_debug;
 
 	struct dentry *osb_debug_root;
-	struct dentry *osb_ctxt;
 
 	wait_queue_head_t recovery_event;
 
@@ -409,10 +416,9 @@ struct ocfs2_super
 	struct list_head blocked_lock_list;
 	unsigned long blocked_lock_count;
 
-	/* List of dentry locks to release. Anyone can add locks to
-	 * the list, ocfs2_wq processes the list  */
-	struct ocfs2_dentry_lock *dentry_lock_list;
-	struct work_struct dentry_lock_work;
+	/* List of dquot structures to drop last reference to */
+	struct llist_head dquot_drop_list;
+	struct work_struct dquot_drop_work;
 
 	wait_queue_head_t		osb_mount_event;
 
@@ -420,9 +426,10 @@ struct ocfs2_super
 	struct inode			*osb_tl_inode;
 	struct buffer_head		*osb_tl_bh;
 	struct delayed_work		osb_truncate_log_wq;
+	atomic_t			osb_tl_disable;
 	/*
 	 * How many clusters in our truncate log.
-	 * It must be protected by osb_tl_inode->i_mutex.
+	 * It must be protected by osb_tl_inode->i_rwsem.
 	 */
 	unsigned int truncated_clusters;
 
@@ -444,6 +451,22 @@ struct ocfs2_super
 	/* rb tree root for refcount lock. */
 	struct rb_root	osb_rf_lock_tree;
 	struct ocfs2_refcount_tree *osb_ref_tree_lru;
+
+	struct mutex system_file_mutex;
+
+	/*
+	 * OCFS2 needs to schedule several different types of work which
+	 * require cluster locking, disk I/O, recovery waits, etc. Since these
+	 * types of work tend to be heavy we avoid using the kernel events
+	 * workqueue and schedule on our own.
+	 */
+	struct workqueue_struct *ocfs2_wq;
+
+	/* sysfs directory per partition */
+	struct kset *osb_dev_kset;
+
+	/* file check related stuff */
+	struct ocfs2_filecheck_sysfs_entry osb_fc_ent;
 };
 
 #define OCFS2_SB(sb)	    ((struct ocfs2_super *)(sb)->s_fs_info)
@@ -481,6 +504,14 @@ static inline int ocfs2_writes_unwritten_extents(struct ocfs2_super *osb)
 		return 1;
 	return 0;
 }
+
+static inline int ocfs2_supports_append_dio(struct ocfs2_super *osb)
+{
+	if (osb->s_feature_incompat & OCFS2_FEATURE_INCOMPAT_APPEND_DIO)
+		return 1;
+	return 0;
+}
+
 
 static inline int ocfs2_supports_inline_data(struct ocfs2_super *osb)
 {
@@ -572,18 +603,6 @@ static inline void ocfs2_set_osb_flag(struct ocfs2_super *osb,
 	spin_lock(&osb->osb_lock);
 	osb->osb_flags |= flag;
 	spin_unlock(&osb->osb_lock);
-}
-
-
-static inline unsigned long  ocfs2_test_osb_flag(struct ocfs2_super *osb,
-						 unsigned long flag)
-{
-	unsigned long ret;
-
-	spin_lock(&osb->osb_lock);
-	ret = osb->osb_flags & flag;
-	spin_unlock(&osb->osb_lock);
-	return ret;
 }
 
 static inline void ocfs2_set_ro_flag(struct ocfs2_super *osb,
@@ -703,6 +722,16 @@ static inline u64 ocfs2_clusters_to_blocks(struct super_block *sb,
 	return (u64)clusters << c_to_b_bits;
 }
 
+static inline u32 ocfs2_clusters_for_blocks(struct super_block *sb,
+		u64 blocks)
+{
+	int b_to_c_bits = OCFS2_SB(sb)->s_clustersize_bits -
+			sb->s_blocksize_bits;
+
+	blocks += (1 << b_to_c_bits) - 1;
+	return (u32)(blocks >> b_to_c_bits);
+}
+
 static inline u32 ocfs2_blocks_to_clusters(struct super_block *sb,
 					   u64 blocks)
 {
@@ -722,6 +751,16 @@ static inline unsigned int ocfs2_clusters_for_bytes(struct super_block *sb,
 	/* OCFS2 just cannot have enough clusters to overflow this */
 	clusters = (unsigned int)(bytes >> cl_bits);
 
+	return clusters;
+}
+
+static inline unsigned int ocfs2_bytes_to_clusters(struct super_block *sb,
+		u64 bytes)
+{
+	int cl_bits = OCFS2_SB(sb)->s_clustersize_bits;
+	unsigned int clusters;
+
+	clusters = (unsigned int)(bytes >> cl_bits);
 	return clusters;
 }
 
@@ -778,10 +817,10 @@ static inline unsigned int ocfs2_page_index_to_clusters(struct super_block *sb,
 	u32 clusters = pg_index;
 	unsigned int cbits = OCFS2_SB(sb)->s_clustersize_bits;
 
-	if (unlikely(PAGE_CACHE_SHIFT > cbits))
-		clusters = pg_index << (PAGE_CACHE_SHIFT - cbits);
-	else if (PAGE_CACHE_SHIFT < cbits)
-		clusters = pg_index >> (cbits - PAGE_CACHE_SHIFT);
+	if (unlikely(PAGE_SHIFT > cbits))
+		clusters = pg_index << (PAGE_SHIFT - cbits);
+	else if (PAGE_SHIFT < cbits)
+		clusters = pg_index >> (cbits - PAGE_SHIFT);
 
 	return clusters;
 }
@@ -795,10 +834,10 @@ static inline pgoff_t ocfs2_align_clusters_to_page_index(struct super_block *sb,
 	unsigned int cbits = OCFS2_SB(sb)->s_clustersize_bits;
         pgoff_t index = clusters;
 
-	if (PAGE_CACHE_SHIFT > cbits) {
-		index = (pgoff_t)clusters >> (PAGE_CACHE_SHIFT - cbits);
-	} else if (PAGE_CACHE_SHIFT < cbits) {
-		index = (pgoff_t)clusters << (cbits - PAGE_CACHE_SHIFT);
+	if (PAGE_SHIFT > cbits) {
+		index = (pgoff_t)clusters >> (PAGE_SHIFT - cbits);
+	} else if (PAGE_SHIFT < cbits) {
+		index = (pgoff_t)clusters << (cbits - PAGE_SHIFT);
 	}
 
 	return index;
@@ -809,8 +848,8 @@ static inline unsigned int ocfs2_pages_per_cluster(struct super_block *sb)
 	unsigned int cbits = OCFS2_SB(sb)->s_clustersize_bits;
 	unsigned int pages_per_cluster = 1;
 
-	if (PAGE_CACHE_SHIFT < cbits)
-		pages_per_cluster = 1 << (cbits - PAGE_CACHE_SHIFT);
+	if (PAGE_SHIFT < cbits)
+		pages_per_cluster = 1 << (cbits - PAGE_SHIFT);
 
 	return pages_per_cluster;
 }
@@ -831,18 +870,65 @@ static inline unsigned int ocfs2_clusters_to_megabytes(struct super_block *sb,
 
 static inline void _ocfs2_set_bit(unsigned int bit, unsigned long *bitmap)
 {
-	ext2_set_bit(bit, bitmap);
+	__set_bit_le(bit, bitmap);
 }
 #define ocfs2_set_bit(bit, addr) _ocfs2_set_bit((bit), (unsigned long *)(addr))
 
 static inline void _ocfs2_clear_bit(unsigned int bit, unsigned long *bitmap)
 {
-	ext2_clear_bit(bit, bitmap);
+	__clear_bit_le(bit, bitmap);
 }
 #define ocfs2_clear_bit(bit, addr) _ocfs2_clear_bit((bit), (unsigned long *)(addr))
 
-#define ocfs2_test_bit ext2_test_bit
-#define ocfs2_find_next_zero_bit ext2_find_next_zero_bit
-#define ocfs2_find_next_bit ext2_find_next_bit
+#define ocfs2_test_bit test_bit_le
+#define ocfs2_find_next_zero_bit find_next_zero_bit_le
+#define ocfs2_find_next_bit find_next_bit_le
+
+static inline void *correct_addr_and_bit_unaligned(int *bit, void *addr)
+{
+#if BITS_PER_LONG == 64
+	*bit += ((unsigned long) addr & 7UL) << 3;
+	addr = (void *) ((unsigned long) addr & ~7UL);
+#elif BITS_PER_LONG == 32
+	*bit += ((unsigned long) addr & 3UL) << 3;
+	addr = (void *) ((unsigned long) addr & ~3UL);
+#else
+#error "how many bits you are?!"
+#endif
+	return addr;
+}
+
+static inline void ocfs2_set_bit_unaligned(int bit, void *bitmap)
+{
+	bitmap = correct_addr_and_bit_unaligned(&bit, bitmap);
+	ocfs2_set_bit(bit, bitmap);
+}
+
+static inline void ocfs2_clear_bit_unaligned(int bit, void *bitmap)
+{
+	bitmap = correct_addr_and_bit_unaligned(&bit, bitmap);
+	ocfs2_clear_bit(bit, bitmap);
+}
+
+static inline int ocfs2_test_bit_unaligned(int bit, void *bitmap)
+{
+	bitmap = correct_addr_and_bit_unaligned(&bit, bitmap);
+	return ocfs2_test_bit(bit, bitmap);
+}
+
+static inline int ocfs2_find_next_zero_bit_unaligned(void *bitmap, int max,
+							int start)
+{
+	int fix = 0, ret, tmpmax;
+	bitmap = correct_addr_and_bit_unaligned(&fix, bitmap);
+	tmpmax = max + fix;
+	start += fix;
+
+	ret = ocfs2_find_next_zero_bit(bitmap, tmpmax, start) - fix;
+	if (ret > max)
+		return max;
+	return ret;
+}
+
 #endif  /* OCFS2_H */
 

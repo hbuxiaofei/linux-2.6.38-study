@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *	linux/arch/alpha/kernel/sys_rx164.c
  *
@@ -17,12 +18,10 @@
 #include <linux/bitops.h>
 
 #include <asm/ptrace.h>
-#include <asm/system.h>
 #include <asm/dma.h>
 #include <asm/irq.h>
 #include <asm/mmu_context.h>
 #include <asm/io.h>
-#include <asm/pgtable.h>
 #include <asm/core_polaris.h>
 #include <asm/tlbflush.h>
 
@@ -99,14 +98,15 @@ rx164_init_irq(void)
 
 	rx164_update_irq_hw(0);
 	for (i = 16; i < 40; ++i) {
-		set_irq_chip_and_handler(i, &rx164_irq_type, handle_level_irq);
+		irq_set_chip_and_handler(i, &rx164_irq_type, handle_level_irq);
 		irq_set_status_flags(i, IRQ_LEVEL);
 	}
 
 	init_i8259a_irqs();
 	common_init_isa_dma();
 
-	setup_irq(16+20, &isa_cascade_irqaction);
+	if (request_irq(16 + 20, no_action, 0, "isa-cascade", NULL))
+		pr_err("Failed to register isa-cascade interrupt\n");
 }
 
 
@@ -143,8 +143,8 @@ rx164_init_irq(void)
  * 
  */
 
-static int __init
-rx164_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+static int
+rx164_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
 #if 0
 	static char irq_tab_pass1[6][5] __initdata = {
@@ -157,7 +157,7 @@ rx164_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 	  { 16+1, 16+1, 16+6, 16+11, 16+16},      /* IdSel 10, slot 4 */
 	};
 #else
-	static char irq_tab[6][5] __initdata = {
+	static char irq_tab[6][5] = {
 	  /*INT   INTA  INTB  INTC   INTD */
 	  { 16+0, 16+0, 16+6, 16+11, 16+16},      /* IdSel 5,  slot 0 */
 	  { 16+1, 16+1, 16+7, 16+12, 16+17},      /* IdSel 6,  slot 1 */

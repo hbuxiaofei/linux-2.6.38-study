@@ -46,15 +46,15 @@
 
 /* PowerSurge are the first generation of PCI Pmacs. This include
  * all of the Grand-Central based machines. We currently don't
- * differenciate most of them.
+ * differentiate most of them.
  */
 #define PMAC_TYPE_PSURGE		0x10	/* PowerSurge */
 #define PMAC_TYPE_ANS			0x11	/* Apple Network Server */
 
 /* Here is the infamous serie of OHare based machines
  */
-#define PMAC_TYPE_COMET			0x20	/* Beleived to be PowerBook 2400 */
-#define PMAC_TYPE_HOOPER		0x21	/* Beleived to be PowerBook 3400 */
+#define PMAC_TYPE_COMET			0x20	/* Believed to be PowerBook 2400 */
+#define PMAC_TYPE_HOOPER		0x21	/* Believed to be PowerBook 3400 */
 #define PMAC_TYPE_KANGA			0x22	/* PowerBook 3500 (first G3) */
 #define PMAC_TYPE_ALCHEMY		0x23	/* Alchemy motherboard base */
 #define PMAC_TYPE_GAZELLE		0x24	/* Spartacus, some 5xxx/6xxx */
@@ -210,7 +210,7 @@ static inline long pmac_call_feature(int selector, struct device_node* node,
 
 /* PMAC_FTR_SOUND_CHIP_ENABLE	(struct device_node* node, 0, int value)
  * enable/disable the sound chip, whatever it is and provided it can
- * acually be controlled
+ * actually be controlled
  */
 #define PMAC_FTR_SOUND_CHIP_ENABLE	PMAC_FTR_DEF(9)
 
@@ -400,6 +400,18 @@ extern u32 __iomem *uninorth_base;
  * 4 = U4
  */
 extern int pmac_get_uninorth_variant(void);
+
+/*
+ * Power macintoshes have either a CUDA, PMU or SMU controlling
+ * system reset, power, NVRAM, RTC.
+ */
+typedef enum sys_ctrler_kind {
+	SYS_CTRLER_UNKNOWN = 0,
+	SYS_CTRLER_CUDA = 1,
+	SYS_CTRLER_PMU = 2,
+	SYS_CTRLER_SMU = 3,
+} sys_ctrler_t;
+extern sys_ctrler_t sys_ctrler;
 
 #endif /* __ASM_POWERPC_PMAC_FEATURE_H */
 #endif /* __KERNEL__ */

@@ -1,17 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * lib/btree.c	- Simple In-memory B+Tree
  *
- * As should be obvious for Linux kernel code, license is GPLv2
- *
- * Copyright (c) 2007-2008 Joern Engel <joern@logfs.org>
+ * Copyright (c) 2007-2008 Joern Engel <joern@purestorage.com>
  * Bits and pieces stolen from Peter Zijlstra's code, which is
- * Copyright 2007, Red Hat Inc. Peter Zijlstra <pzijlstr@redhat.com>
- * GPLv2
+ * Copyright 2007, Red Hat Inc. Peter Zijlstra
  *
  * see http://programming.kicks-ass.net/kernel-patches/vma_lookup/btree.patch
  *
  * A relatively simple B+Tree implementation.  I have written it as a learning
- * excercise to understand how B+Trees work.  Turned out to be useful as well.
+ * exercise to understand how B+Trees work.  Turned out to be useful as well.
  *
  * B+Trees can be used similar to Linux radix trees (which don't have anything
  * in common with textbook radix trees, beware).  Prerequisite for them working
@@ -75,6 +73,8 @@ struct btree_geo btree_geo128 = {
 	.no_longs = 2 * LONG_PER_U64 * (NODESIZE / sizeof(long) / (1 + 2 * LONG_PER_U64)),
 };
 EXPORT_SYMBOL_GPL(btree_geo128);
+
+#define MAX_KEYLEN	(2 * LONG_PER_U64)
 
 static struct kmem_cache *btree_cachep;
 
@@ -198,6 +198,7 @@ EXPORT_SYMBOL_GPL(btree_init);
 
 void btree_destroy(struct btree_head *head)
 {
+	mempool_free(head->node, head->mempool);
 	mempool_destroy(head->mempool);
 	head->mempool = NULL;
 }
@@ -237,7 +238,7 @@ static int keyzero(struct btree_geo *geo, unsigned long *key)
 	return 1;
 }
 
-void *btree_lookup(struct btree_head *head, struct btree_geo *geo,
+static void *btree_lookup_node(struct btree_head *head, struct btree_geo *geo,
 		unsigned long *key)
 {
 	int i, height = head->height;
@@ -256,7 +257,16 @@ void *btree_lookup(struct btree_head *head, struct btree_geo *geo,
 		if (!node)
 			return NULL;
 	}
+	return node;
+}
 
+void *btree_lookup(struct btree_head *head, struct btree_geo *geo,
+		unsigned long *key)
+{
+	int i;
+	unsigned long *node;
+
+	node = btree_lookup_node(head, geo, key);
 	if (!node)
 		return NULL;
 
@@ -270,23 +280,10 @@ EXPORT_SYMBOL_GPL(btree_lookup);
 int btree_update(struct btree_head *head, struct btree_geo *geo,
 		 unsigned long *key, void *val)
 {
-	int i, height = head->height;
-	unsigned long *node = head->node;
+	int i;
+	unsigned long *node;
 
-	if (height == 0)
-		return -ENOENT;
-
-	for ( ; height > 1; height--) {
-		for (i = 0; i < geo->no_pairs; i++)
-			if (keycmp(geo, node, i, key) <= 0)
-				break;
-		if (i == geo->no_pairs)
-			return -ENOENT;
-		node = bval(geo, node, i);
-		if (!node)
-			return -ENOENT;
-	}
-
+	node = btree_lookup_node(head, geo, key);
 	if (!node)
 		return -ENOENT;
 
@@ -312,15 +309,15 @@ void *btree_get_prev(struct btree_head *head, struct btree_geo *geo,
 {
 	int i, height;
 	unsigned long *node, *oldnode;
-	unsigned long *retry_key = NULL, key[geo->keylen];
+	unsigned long *retry_key = NULL, key[MAX_KEYLEN];
 
 	if (keyzero(geo, __key))
 		return NULL;
 
 	if (head->height == 0)
 		return NULL;
-retry:
 	longcpy(key, __key, geo->keylen);
+retry:
 	dec_key(geo, key);
 
 	node = head->node;
@@ -351,12 +348,13 @@ retry:
 	}
 miss:
 	if (retry_key) {
-		__key = retry_key;
+		longcpy(key, retry_key, geo->keylen);
 		retry_key = NULL;
 		goto retry;
 	}
 	return NULL;
 }
+EXPORT_SYMBOL_GPL(btree_get_prev);
 
 static int getpos(struct btree_geo *geo, unsigned long *node,
 		unsigned long *key)
@@ -508,6 +506,7 @@ retry:
 int btree_insert(struct btree_head *head, struct btree_geo *geo,
 		unsigned long *key, void *val, gfp_t gfp)
 {
+	BUG_ON(!val);
 	return btree_insert_level(head, geo, key, val, 1, gfp);
 }
 EXPORT_SYMBOL_GPL(btree_insert);
@@ -541,7 +540,7 @@ static void rebalance(struct btree_head *head, struct btree_geo *geo,
 	int i, no_left, no_right;
 
 	if (fill == 0) {
-		/* Because we don't steal entries from a neigbour, this case
+		/* Because we don't steal entries from a neighbour, this case
 		 * can happen.  Parent node contains a single child, this
 		 * node, so merging with a sibling never happens.
 		 */
@@ -636,8 +635,8 @@ EXPORT_SYMBOL_GPL(btree_remove);
 int btree_merge(struct btree_head *target, struct btree_head *victim,
 		struct btree_geo *geo, gfp_t gfp)
 {
-	unsigned long key[geo->keylen];
-	unsigned long dup[geo->keylen];
+	unsigned long key[MAX_KEYLEN];
+	unsigned long dup[MAX_KEYLEN];
 	void *val;
 	int err;
 

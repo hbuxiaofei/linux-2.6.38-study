@@ -1,13 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * linux/arch/arm/mach-omap1/serial.c
  *
  * OMAP1 serial support.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
-
+#include <linux/gpio.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
@@ -22,12 +19,10 @@
 
 #include <asm/mach-types.h>
 
-#include <plat/board.h>
-#include <plat/mux.h>
-#include <mach/gpio.h>
-#include <plat/fpga.h>
-
+#include "serial.h"
+#include "mux.h"
 #include "pm.h"
+#include "soc.h"
 
 static struct clk * uart1_ck;
 static struct clk * uart2_ck;
@@ -146,7 +141,7 @@ void __init omap_serial_init(void)
 			if (IS_ERR(uart1_ck))
 				printk("Could not get uart1_ck\n");
 			else {
-				clk_enable(uart1_ck);
+				clk_prepare_enable(uart1_ck);
 				if (cpu_is_omap15xx())
 					clk_set_rate(uart1_ck, 12000000);
 			}
@@ -156,7 +151,7 @@ void __init omap_serial_init(void)
 			if (IS_ERR(uart2_ck))
 				printk("Could not get uart2_ck\n");
 			else {
-				clk_enable(uart2_ck);
+				clk_prepare_enable(uart2_ck);
 				if (cpu_is_omap15xx())
 					clk_set_rate(uart2_ck, 12000000);
 				else
@@ -168,7 +163,7 @@ void __init omap_serial_init(void)
 			if (IS_ERR(uart3_ck))
 				printk("Could not get uart3_ck\n");
 			else {
-				clk_enable(uart3_ck);
+				clk_prepare_enable(uart3_ck);
 				if (cpu_is_omap15xx())
 					clk_set_rate(uart3_ck, 12000000);
 			}
@@ -238,7 +233,7 @@ static void __init omap_serial_set_port_wakeup(int gpio_nr)
 	enable_irq_wake(gpio_to_irq(gpio_nr));
 }
 
-static int __init omap_serial_wakeup_init(void)
+int __init omap_serial_wakeup_init(void)
 {
 	if (!cpu_is_omap16xx())
 		return 0;
@@ -252,7 +247,6 @@ static int __init omap_serial_wakeup_init(void)
 
 	return 0;
 }
-late_initcall(omap_serial_wakeup_init);
 
 #endif	/* CONFIG_OMAP_SERIAL_WAKE */
 

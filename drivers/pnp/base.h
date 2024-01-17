@@ -1,11 +1,11 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Copyright (C) 2008 Hewlett-Packard Development Company, L.P.
  *	Bjorn Helgaas <bjorn.helgaas@hp.com>
  */
 
-extern spinlock_t pnp_lock;
-extern struct device_attribute pnp_interface_attrs[];
-void *pnp_alloc(long size);
+extern struct mutex pnp_lock;
+extern const struct attribute_group *pnp_dev_groups[];
 
 int pnp_register_protocol(struct pnp_protocol *protocol);
 void pnp_unregister_protocol(struct pnp_protocol *protocol);
@@ -142,7 +142,9 @@ void __pnp_remove_device(struct pnp_dev *dev);
 int pnp_check_port(struct pnp_dev *dev, struct resource *res);
 int pnp_check_mem(struct pnp_dev *dev, struct resource *res);
 int pnp_check_irq(struct pnp_dev *dev, struct resource *res);
+#ifdef CONFIG_ISA_DMA_API
 int pnp_check_dma(struct pnp_dev *dev, struct resource *res);
+#endif
 
 char *pnp_resource_type_name(struct resource *res);
 void dbg_pnp_show_resources(struct pnp_dev *dev, char *desc);
@@ -157,6 +159,8 @@ struct pnp_resource {
 
 void pnp_free_resource(struct pnp_resource *pnp_res);
 
+struct pnp_resource *pnp_add_resource(struct pnp_dev *dev,
+				      struct resource *res);
 struct pnp_resource *pnp_add_irq_resource(struct pnp_dev *dev, int irq,
 					  int flags);
 struct pnp_resource *pnp_add_dma_resource(struct pnp_dev *dev, int dma,

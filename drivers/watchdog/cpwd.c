@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /* cpwd.c - driver implementation for hardware watchdog
  * timers found on Sun Microsystems CP1400 and CP1500 boards.
  *
@@ -5,25 +6,27 @@
  * interface and Solaris-compatible ioctls as best it is
  * able.
  *
- * NOTE: 	CP1400 systems appear to have a defective intr_mask
- * 			register on the PLD, preventing the disabling of
- * 			timer interrupts.  We use a timer to periodically
- * 			reset 'stopped' watchdogs on affected platforms.
+ * NOTE:	CP1400 systems appear to have a defective intr_mask
+ *			register on the PLD, preventing the disabling of
+ *			timer interrupts.  We use a timer to periodically
+ *			reset 'stopped' watchdogs on affected platforms.
  *
  * Copyright (c) 2000 Eric Brower (ebrower@usa.net)
  * Copyright (C) 2008 David S. Miller <davem@davemloft.net>
  */
+
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/fs.h>
 #include <linux/errno.h>
 #include <linux/major.h>
-#include <linux/init.h>
 #include <linux/miscdevice.h>
 #include <linux/interrupt.h>
 #include <linux/ioport.h>
 #include <linux/timer.h>
+#include <linux/compat.h>
 #include <linux/slab.h>
 #include <linux/mutex.h>
 #include <linux/io.h>
@@ -35,7 +38,6 @@
 #include <asm/watchdog.h>
 
 #define DRIVER_NAME	"cpwd"
-#define PFX		DRIVER_NAME ": "
 
 #define WD_OBPNAME	"watchdog"
 #define WD_BADMODEL	"SUNW,501-5336"
@@ -107,13 +109,13 @@ static struct cpwd *cpwd_device;
  * -------------------
  * |-  counter val  -|
  * -------------------
- * dcntr - 	Current 16-bit downcounter value.
- * 			When downcounter reaches '0' watchdog expires.
- * 			Reading this register resets downcounter with
- * 			'limit' value.
- * limit - 	16-bit countdown value in 1/10th second increments.
- * 			Writing this register begins countdown with input value.
- * 			Reading from this register does not affect counter.
+ * dcntr -	Current 16-bit downcounter value.
+ *			When downcounter reaches '0' watchdog expires.
+ *			Reading this register resets downcounter with
+ *			'limit' value.
+ * limit -	16-bit countdown value in 1/10th second increments.
+ *			Writing this register begins countdown with input value.
+ *			Reading from this register does not affect counter.
  * NOTES:	After watchdog reset, dcntr and limit contain '1'
  *
  * status register (byte access):
@@ -123,7 +125,7 @@ static struct cpwd *cpwd_device;
  * |-   UNUSED  -| EXP | RUN |
  * ---------------------------
  * status-	Bit 0 - Watchdog is running
- * 			Bit 1 - Watchdog has expired
+ *			Bit 1 - Watchdog has expired
  *
  *** PLD register block definition (struct wd_pld_regblk)
  *
@@ -170,7 +172,6 @@ MODULE_PARM_DESC(wd2_timeout, "Default watchdog2 timeout in 1/10secs");
 MODULE_AUTHOR("Eric Brower <ebrower@usa.net>");
 MODULE_DESCRIPTION("Hardware watchdog driver for Sun Microsystems CP1400/1500");
 MODULE_LICENSE("GPL");
-MODULE_SUPPORTED_DEVICE("watchdog");
 
 static void cpwd_writew(u16 val, void __iomem *addr)
 {
@@ -197,7 +198,7 @@ static u8 cpwd_readb(void __iomem *addr)
  * Because of the CP1400 defect this should only be
  * called during initialzation or by wd_[start|stop]timer()
  *
- * index 	- sub-device index, or -1 for 'all'
+ * index	- sub-device index, or -1 for 'all'
  * enable	- non-zero to enable interrupts, zero to disable
  */
 static void cpwd_toggleintr(struct cpwd *p, int index, int enable)
@@ -230,9 +231,9 @@ static void cpwd_resetbrokentimer(struct cpwd *p, int index)
  * interrupts within the PLD so me must continually
  * reset the timers ad infinitum.
  */
-static void cpwd_brokentimer(unsigned long data)
+static void cpwd_brokentimer(struct timer_list *unused)
 {
-	struct cpwd *p = (struct cpwd *) data;
+	struct cpwd *p = cpwd_device;
 	int id, tripped = 0;
 
 	/* kill a running timer instance, in case we
@@ -275,7 +276,7 @@ static void cpwd_stoptimer(struct cpwd *p, int index)
 
 		if (p->broken) {
 			p->devs[index].runstatus |= WD_STAT_BSTOP;
-			cpwd_brokentimer((unsigned long) p);
+			cpwd_brokentimer(NULL);
 		}
 	}
 }
@@ -317,13 +318,13 @@ static int cpwd_getstatus(struct cpwd *p, int index)
 		} else {
 			/* Fudge WD_EXPIRED status for defective CP1400--
 			 * IF timer is running
-			 * 	AND brokenstop is set
-			 * 	AND an interrupt has been serviced
+			 *	AND brokenstop is set
+			 *	AND an interrupt has been serviced
 			 * we are WD_EXPIRED.
 			 *
 			 * IF timer is running
-			 * 	AND brokenstop is set
-			 * 	AND no interrupt has been serviced
+			 *	AND brokenstop is set
+			 *	AND no interrupt has been serviced
 			 * we are WD_FREERUN.
 			 */
 			if (p->broken &&
@@ -385,8 +386,7 @@ static int cpwd_open(struct inode *inode, struct file *f)
 	if (!p->initialized) {
 		if (request_irq(p->irq, &cpwd_interrupt,
 				IRQF_SHARED, DRIVER_NAME, p)) {
-			printk(KERN_ERR PFX "Cannot register IRQ %d\n",
-				p->irq);
+			pr_err("Cannot register IRQ %d\n", p->irq);
 			mutex_unlock(&cpwd_mutex);
 			return -EBUSY;
 		}
@@ -395,7 +395,7 @@ static int cpwd_open(struct inode *inode, struct file *f)
 
 	mutex_unlock(&cpwd_mutex);
 
-	return nonseekable_open(inode, f);
+	return stream_open(inode, f);
 }
 
 static int cpwd_release(struct inode *inode, struct file *file)
@@ -411,7 +411,7 @@ static long cpwd_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		.identity		= DRIVER_NAME,
 	};
 	void __user *argp = (void __user *)arg;
-	struct inode *inode = file->f_path.dentry->d_inode;
+	struct inode *inode = file_inode(file);
 	int index = iminor(inode) - WD0_MINOR;
 	struct cpwd *p = cpwd_device;
 	int setopt = 0;
@@ -473,33 +473,15 @@ static long cpwd_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	return 0;
 }
 
-static long cpwd_compat_ioctl(struct file *file, unsigned int cmd,
-			      unsigned long arg)
+static long cpwd_compat_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
-	int rval = -ENOIOCTLCMD;
-
-	switch (cmd) {
-	/* solaris ioctls are specific to this driver */
-	case WIOCSTART:
-	case WIOCSTOP:
-	case WIOCGSTAT:
-		mutex_lock(&cpwd_mutex);
-		rval = cpwd_ioctl(file, cmd, arg);
-		mutex_unlock(&cpwd_mutex);
-		break;
-
-	/* everything else is handled by the generic compat layer */
-	default:
-		break;
-	}
-
-	return rval;
+	return cpwd_ioctl(file, cmd, (unsigned long)compat_ptr(arg));
 }
 
 static ssize_t cpwd_write(struct file *file, const char __user *buf,
 			  size_t count, loff_t *ppos)
 {
-	struct inode *inode = file->f_path.dentry->d_inode;
+	struct inode *inode = file_inode(file);
 	struct cpwd *p = cpwd_device;
 	int index = iminor(inode);
 
@@ -528,8 +510,7 @@ static const struct file_operations cpwd_fops = {
 	.llseek =		no_llseek,
 };
 
-static int __devinit cpwd_probe(struct platform_device *op,
-				const struct of_device_id *match)
+static int cpwd_probe(struct platform_device *op)
 {
 	struct device_node *options;
 	const char *str_prop;
@@ -540,12 +521,9 @@ static int __devinit cpwd_probe(struct platform_device *op,
 	if (cpwd_device)
 		return -EINVAL;
 
-	p = kzalloc(sizeof(*p), GFP_KERNEL);
-	err = -ENOMEM;
-	if (!p) {
-		printk(KERN_ERR PFX "Unable to allocate struct cpwd.\n");
-		goto out;
-	}
+	p = devm_kzalloc(&op->dev, sizeof(*p), GFP_KERNEL);
+	if (!p)
+		return -ENOMEM;
 
 	p->irq = op->archdata.irqs[0];
 
@@ -554,14 +532,14 @@ static int __devinit cpwd_probe(struct platform_device *op,
 	p->regs = of_ioremap(&op->resource[0], 0,
 			     4 * WD_TIMER_REGSZ, DRIVER_NAME);
 	if (!p->regs) {
-		printk(KERN_ERR PFX "Unable to map registers.\n");
-		goto out_free;
+		pr_err("Unable to map registers\n");
+		return -ENOMEM;
 	}
 
 	options = of_find_node_by_path("/options");
-	err = -ENODEV;
 	if (!options) {
-		printk(KERN_ERR PFX "Unable to find /options node.\n");
+		err = -ENODEV;
+		pr_err("Unable to find /options node\n");
 		goto out_iounmap;
 	}
 
@@ -574,6 +552,8 @@ static int __devinit cpwd_probe(struct platform_device *op,
 	str_prop = of_get_property(options, "watchdog-timeout", NULL);
 	if (str_prop)
 		p->timeout = simple_strtoul(str_prop, NULL, 10);
+
+	of_node_put(options);
 
 	/* CP1400s seem to have broken PLD implementations-- the
 	 * interrupt_mask register cannot be written, so no timer
@@ -606,28 +586,23 @@ static int __devinit cpwd_probe(struct platform_device *op,
 
 		err = misc_register(&p->devs[i].misc);
 		if (err) {
-			printk(KERN_ERR "Could not register misc device for "
-			       "dev %d\n", i);
+			pr_err("Could not register misc device for dev %d\n",
+			       i);
 			goto out_unregister;
 		}
 	}
 
 	if (p->broken) {
-		init_timer(&cpwd_timer);
-		cpwd_timer.function 	= cpwd_brokentimer;
-		cpwd_timer.data		= (unsigned long) p;
+		timer_setup(&cpwd_timer, cpwd_brokentimer, 0);
 		cpwd_timer.expires	= WD_BTIMEOUT;
 
-		printk(KERN_INFO PFX "PLD defect workaround enabled for "
-		       "model " WD_BADMODEL ".\n");
+		pr_info("PLD defect workaround enabled for model %s\n",
+			WD_BADMODEL);
 	}
 
-	dev_set_drvdata(&op->dev, p);
+	platform_set_drvdata(op, p);
 	cpwd_device = p;
-	err = 0;
-
-out:
-	return err;
+	return 0;
 
 out_unregister:
 	for (i--; i >= 0; i--)
@@ -636,14 +611,12 @@ out_unregister:
 out_iounmap:
 	of_iounmap(&op->resource[0], p->regs, 4 * WD_TIMER_REGSZ);
 
-out_free:
-	kfree(p);
-	goto out;
+	return err;
 }
 
-static int __devexit cpwd_remove(struct platform_device *op)
+static int cpwd_remove(struct platform_device *op)
 {
-	struct cpwd *p = dev_get_drvdata(&op->dev);
+	struct cpwd *p = platform_get_drvdata(op);
 	int i;
 
 	for (i = 0; i < WD_NUMDEVS; i++) {
@@ -663,7 +636,6 @@ static int __devexit cpwd_remove(struct platform_device *op)
 		free_irq(p->irq, p);
 
 	of_iounmap(&op->resource[0], p->regs, 4 * WD_TIMER_REGSZ);
-	kfree(p);
 
 	cpwd_device = NULL;
 
@@ -678,25 +650,13 @@ static const struct of_device_id cpwd_match[] = {
 };
 MODULE_DEVICE_TABLE(of, cpwd_match);
 
-static struct of_platform_driver cpwd_driver = {
+static struct platform_driver cpwd_driver = {
 	.driver = {
 		.name = DRIVER_NAME,
-		.owner = THIS_MODULE,
 		.of_match_table = cpwd_match,
 	},
 	.probe		= cpwd_probe,
-	.remove		= __devexit_p(cpwd_remove),
+	.remove		= cpwd_remove,
 };
 
-static int __init cpwd_init(void)
-{
-	return of_register_platform_driver(&cpwd_driver);
-}
-
-static void __exit cpwd_exit(void)
-{
-	of_unregister_platform_driver(&cpwd_driver);
-}
-
-module_init(cpwd_init);
-module_exit(cpwd_exit);
+module_platform_driver(cpwd_driver);

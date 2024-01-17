@@ -1,19 +1,17 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * arch/arm/mach-lpc32xx/pm.c
  *
  * Original authors: Vitaly Wool, Dmitry Chigirev <source@mvista.com>
  * Modified by Kevin Wells <kevin.wells@nxp.com>
  *
- * 2005 (c) MontaVista Software, Inc. This file is licensed under
- * the terms of the GNU General Public License version 2. This program
- * is licensed "as is" without any warranty of any kind, whether express
- * or implied.
+ * 2005 (c) MontaVista Software, Inc.
  */
 
 /*
  * LPC32XX CPU and system power management
  *
- * The LCP32XX has three CPU modes for controlling system power: run,
+ * The LPC32XX has three CPU modes for controlling system power: run,
  * direct-run, and halt modes. When switching between halt and run modes,
  * the CPU transistions through direct-run mode. For Linux, direct-run
  * mode is not used in normal operation. Halt mode is used when the
@@ -41,7 +39,7 @@
  * DRAM clocking and refresh are slightly different for systems with DDR
  * DRAM or regular SDRAM devices. If SDRAM is used in the system, the
  * SDRAM will still be accessible in direct-run mode. In DDR based systems,
- * a transistion to direct-run mode will stop all DDR accesses (no clocks).
+ * a transition to direct-run mode will stop all DDR accesses (no clocks).
  * Because of this, the code to switch power modes and the code to enter
  * and exit DRAM self-refresh modes must not be executed in DRAM. A small
  * section of IRAM is used instead for this.
@@ -70,10 +68,8 @@
 
 #include <asm/cacheflush.h>
 
-#include <mach/hardware.h>
-#include <mach/platform.h>
+#include "lpc32xx.h"
 #include "common.h"
-#include "clock.h"
 
 #define TEMP_IRAM_AREA  IO_ADDRESS(LPC32XX_IRAM_BASE)
 
@@ -87,17 +83,10 @@ static int lpc32xx_pm_enter(suspend_state_t state)
 	void *iram_swap_area;
 
 	/* Allocate some space for temporary IRAM storage */
-	iram_swap_area = kmalloc(lpc32xx_sys_suspend_sz, GFP_KERNEL);
-	if (!iram_swap_area) {
-		printk(KERN_ERR
-		       "PM Suspend: cannot allocate memory to save portion "
-			"of SRAM\n");
+	iram_swap_area = kmemdup((void *)TEMP_IRAM_AREA,
+				 lpc32xx_sys_suspend_sz, GFP_KERNEL);
+	if (!iram_swap_area)
 		return -ENOMEM;
-	}
-
-	/* Backup a small area of IRAM used for the suspend code */
-	memcpy(iram_swap_area, (void *) TEMP_IRAM_AREA,
-		lpc32xx_sys_suspend_sz);
 
 	/*
 	 * Copy code to suspend system into IRAM. The suspend code

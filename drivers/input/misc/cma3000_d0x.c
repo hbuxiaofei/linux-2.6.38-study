@@ -1,20 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * VTI CMA3000_D0x Accelerometer driver
  *
  * Copyright (C) 2010 Texas Instruments
  * Author: Hemanth V <hemanthv@ti.com>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along with
- * this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <linux/types.h>
@@ -23,6 +12,7 @@
 #include <linux/slab.h>
 #include <linux/input.h>
 #include <linux/input/cma3000.h>
+#include <linux/module.h>
 
 #include "cma3000_d0x.h"
 
@@ -57,7 +47,7 @@
 
 /*
  * Bit weights in mg for bit 0, other bits need
- * multipy factor 2^n. Eight bit is the sign bit.
+ * multiply factor 2^n. Eight bit is the sign bit.
  */
 #define BIT_TO_2G  18
 #define BIT_TO_8G  71
@@ -114,8 +104,8 @@ static void decode_mg(struct cma3000_accl_data *data, int *datax,
 static irqreturn_t cma3000_thread_irq(int irq, void *dev_id)
 {
 	struct cma3000_accl_data *data = dev_id;
-	int datax, datay, dataz;
-	u8 ctrl, mode, range, intr_status;
+	int datax, datay, dataz, intr_status;
+	u8 ctrl, mode, range;
 
 	intr_status = CMA3000_READ(data, CMA3000_INTSTATUS, "interrupt status");
 	if (intr_status < 0)
@@ -283,7 +273,7 @@ EXPORT_SYMBOL(cma3000_resume);
 struct cma3000_accl_data *cma3000_init(struct device *dev, int irq,
 				       const struct cma3000_bus_ops *bops)
 {
-	const struct cma3000_platform_data *pdata = dev->platform_data;
+	const struct cma3000_platform_data *pdata = dev_get_platdata(dev);
 	struct cma3000_accl_data *data;
 	struct input_dev *input_dev;
 	int rev;
@@ -317,7 +307,7 @@ struct cma3000_accl_data *cma3000_init(struct device *dev, int irq,
 	mutex_init(&data->mutex);
 
 	data->mode = pdata->mode;
-	if (data->mode < CMAMODE_DEFAULT || data->mode > CMAMODE_POFF) {
+	if (data->mode > CMAMODE_POFF) {
 		data->mode = CMAMODE_MOTDET;
 		dev_warn(dev,
 			 "Invalid mode specified, assuming Motion Detect\n");

@@ -1,22 +1,20 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Suspend/resume support
  *
  * Copyright 2009  MontaVista Software, Inc.
  *
  * Author: Anton Vorontsov <avorontsov@ru.mvista.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 
 #include <linux/init.h>
 #include <linux/types.h>
 #include <linux/errno.h>
+#include <linux/export.h>
 #include <linux/suspend.h>
 #include <linux/delay.h>
 #include <linux/device.h>
+#include <linux/of_address.h>
 #include <linux/of_platform.h>
 
 struct pmc_regs {
@@ -58,8 +56,7 @@ static const struct platform_suspend_ops pmc_suspend_ops = {
 	.enter = pmc_suspend_enter,
 };
 
-static int pmc_probe(struct platform_device *ofdev,
-		     const struct of_device_id *id)
+static int pmc_probe(struct platform_device *ofdev)
 {
 	pmc_regs = of_iomap(ofdev->dev.of_node, 0);
 	if (!pmc_regs)
@@ -76,17 +73,12 @@ static const struct of_device_id pmc_ids[] = {
 	{ },
 };
 
-static struct of_platform_driver pmc_driver = {
+static struct platform_driver pmc_driver = {
 	.driver = {
 		.name = "fsl-pmc",
-		.owner = THIS_MODULE,
 		.of_match_table = pmc_ids,
 	},
 	.probe = pmc_probe,
 };
 
-static int __init pmc_init(void)
-{
-	return of_register_platform_driver(&pmc_driver);
-}
-device_initcall(pmc_init);
+builtin_platform_driver(pmc_driver);

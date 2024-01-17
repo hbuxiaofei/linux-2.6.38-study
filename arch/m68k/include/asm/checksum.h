@@ -1,7 +1,12 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _M68K_CHECKSUM_H
 #define _M68K_CHECKSUM_H
 
 #include <linux/in6.h>
+
+#ifdef CONFIG_GENERIC_CSUM
+#include <asm-generic/checksum.h>
+#else
 
 /*
  * computes the checksum of a memory block at buff, length len,
@@ -25,38 +30,14 @@ __wsum csum_partial(const void *buff, int len, __wsum sum);
  * better 64-bit) boundary
  */
 
-extern __wsum csum_partial_copy_from_user(const void __user *src,
+#define _HAVE_ARCH_COPY_AND_CSUM_FROM_USER
+#define _HAVE_ARCH_CSUM_AND_COPY
+extern __wsum csum_and_copy_from_user(const void __user *src,
 						void *dst,
-						int len, __wsum sum,
-						int *csum_err);
+						int len);
 
 extern __wsum csum_partial_copy_nocheck(const void *src,
-					      void *dst, int len,
-					      __wsum sum);
-
-
-#ifdef CONFIG_COLDFIRE
-
-/*
- *	The ColdFire cores don't support all the 68k instructions used
- *	in the optimized checksum code below. So it reverts back to using
- *	more standard C coded checksums. The fast checksum code is
- *	significantly larger than the optimized version, so it is not
- *	inlined here.
- */
-__sum16 ip_fast_csum(const void *iph, unsigned int ihl);
-
-static inline __sum16 csum_fold(__wsum sum)
-{
-	unsigned int tmp = (__force u32)sum;
-
-	tmp = (tmp & 0xffff) + (tmp >> 16);
-	tmp = (tmp & 0xffff) + (tmp >> 16);
-
-	return (__force __sum16)~tmp;
-}
-
-#else
+					      void *dst, int len);
 
 /*
  *	This is a version of ip_fast_csum() optimized for IP headers,
@@ -96,8 +77,6 @@ static inline __sum16 csum_fold(__wsum sum)
 
 	return (__force __sum16)~sum;
 }
-
-#endif /* CONFIG_COLDFIRE */
 
 static inline __wsum
 csum_tcpudp_nofold(__be32 saddr, __be32 daddr, unsigned short len,
@@ -139,7 +118,7 @@ static inline __sum16 ip_compute_csum(const void *buff, int len)
 #define _HAVE_ARCH_IPV6_CSUM
 static __inline__ __sum16
 csum_ipv6_magic(const struct in6_addr *saddr, const struct in6_addr *daddr,
-		__u32 len, unsigned short proto, __wsum sum)
+		__u32 len, __u8 proto, __wsum sum)
 {
 	register unsigned long tmp;
 	__asm__("addl %2@,%0\n\t"
@@ -167,4 +146,5 @@ csum_ipv6_magic(const struct in6_addr *saddr, const struct in6_addr *daddr,
 	return csum_fold(sum);
 }
 
+#endif /* CONFIG_GENERIC_CSUM */
 #endif /* _M68K_CHECKSUM_H */

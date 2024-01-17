@@ -1,5 +1,7 @@
-#include "linux/types.h"
-#include "linux/module.h"
+// SPDX-License-Identifier: GPL-2.0
+#define __NO_FORTIFY
+#include <linux/types.h>
+#include <linux/module.h>
 
 /* Some of this are builtin function (some are not but could in the future),
  * so I *must* declare good prototypes for them and then EXPORT them.
@@ -26,10 +28,10 @@ EXPORT_SYMBOL(strstr);
 #ifndef __x86_64__
 extern void *memcpy(void *, const void *, size_t);
 EXPORT_SYMBOL(memcpy);
-#endif
-
 EXPORT_SYMBOL(memmove);
 EXPORT_SYMBOL(memset);
+#endif
+
 EXPORT_SYMBOL(printf);
 
 /* Here, instead, I can provide a fake prototype. Yes, someone cares: genksyms.
@@ -45,7 +47,7 @@ EXPORT_SYMBOL(readdir64);
 extern void truncate64(void) __attribute__((weak));
 EXPORT_SYMBOL(truncate64);
 
-#ifdef SUBARCH_i386
+#ifdef CONFIG_ARCH_REUSE_HOST_VSYSCALL_AREA
 EXPORT_SYMBOL(vsyscall_ehdr);
 EXPORT_SYMBOL(vsyscall_end);
 #endif
@@ -113,3 +115,8 @@ EXPORT_SYMBOL(__stack_smash_handler);
 
 extern long __guard __attribute__((weak));
 EXPORT_SYMBOL(__guard);
+
+#ifdef _FORTIFY_SOURCE
+extern int __sprintf_chk(char *str, int flag, size_t strlen, const char *format);
+EXPORT_SYMBOL(__sprintf_chk);
+#endif

@@ -1,18 +1,20 @@
+// SPDX-License-Identifier: GPL-2.0
 #include <linux/string.h>
 #include <linux/kernel.h>
 #include <linux/of.h>
 #include <linux/init.h>
-#include <linux/module.h>
 #include <linux/mod_devicetable.h>
 #include <linux/slab.h>
 #include <linux/errno.h>
 #include <linux/irq.h>
 #include <linux/of_device.h>
 #include <linux/of_platform.h>
+#include <linux/dma-mapping.h>
 #include <asm/leon.h>
 #include <asm/leon_amba.h>
 
 #include "of_device_common.h"
+#include "irq.h"
 
 /*
  * PCI bus specific translator
@@ -20,7 +22,7 @@
 
 static int of_bus_pci_match(struct device_node *np)
 {
-	if (!strcmp(np->type, "pci") || !strcmp(np->type, "pciex")) {
+	if (of_node_is_type(np, "pci") || of_node_is_type(np, "pciex")) {
 		/* Do not do PCI specific frobbing if the
 		 * PCI bridge lacks a ranges property.  We
 		 * want to pass it through up to the next
@@ -105,7 +107,7 @@ static unsigned long of_bus_sbus_get_flags(const u32 *addr, unsigned long flags)
 
 static int of_bus_ambapp_match(struct device_node *np)
 {
-	return !strcmp(np->type, "ambapp");
+	return of_node_is_type(np, "ambapp");
 }
 
 static void of_bus_ambapp_count_cells(struct device_node *child,
@@ -230,10 +232,10 @@ static int __init use_1to1_mapping(struct device_node *pp)
 	 * But, we should still pass the translation work up
 	 * to the SBUS itself.
 	 */
-	if (!strcmp(pp->name, "dma") ||
-	    !strcmp(pp->name, "espdma") ||
-	    !strcmp(pp->name, "ledma") ||
-	    !strcmp(pp->name, "lebuffer"))
+	if (of_node_name_eq(pp, "dma") ||
+	    of_node_name_eq(pp, "espdma") ||
+	    of_node_name_eq(pp, "ledma") ||
+	    of_node_name_eq(pp, "lebuffer"))
 		return 0;
 
 	return 1;
@@ -322,8 +324,8 @@ static void __init build_device_resources(struct platform_device *op,
 		memset(r, 0, sizeof(*r));
 
 		if (of_resource_verbose)
-			printk("%s reg[%d] -> %llx\n",
-			       op->dev.of_node->full_name, index,
+			printk("%pOF reg[%d] -> %llx\n",
+			       op->dev.of_node, index,
 			       result);
 
 		if (result != OF_BAD_ADDR) {
@@ -331,7 +333,7 @@ static void __init build_device_resources(struct platform_device *op,
 			r->end = result + size - 1;
 			r->flags = flags | ((result >> 32ULL) & 0xffUL);
 		}
-		r->name = op->dev.of_node->name;
+		r->name = op->dev.of_node->full_name;
 	}
 }
 
@@ -355,7 +357,8 @@ static struct platform_device * __init scan_one_device(struct device_node *dp,
 	if (intr) {
 		op->archdata.num_irqs = len / sizeof(struct linux_prom_irqs);
 		for (i = 0; i < op->archdata.num_irqs; i++)
-			op->archdata.irqs[i] = intr[i].pri;
+			op->archdata.irqs[i] =
+			    sparc_config.build_device_irq(op, intr[i].pri);
 	} else {
 		const unsigned int *irq =
 			of_get_property(dp, "interrupts", &len);
@@ -363,64 +366,13 @@ static struct platform_device * __init scan_one_device(struct device_node *dp,
 		if (irq) {
 			op->archdata.num_irqs = len / sizeof(unsigned int);
 			for (i = 0; i < op->archdata.num_irqs; i++)
-				op->archdata.irqs[i] = irq[i];
+				op->archdata.irqs[i] =
+				    sparc_config.build_device_irq(op, irq[i]);
 		} else {
 			op->archdata.num_irqs = 0;
 		}
 	}
-	if (sparc_cpu_model == sun4d) {
-		static int pil_to_sbus[] = {
-			0, 0, 1, 2, 0, 3, 0, 4, 0, 5, 0, 6, 0, 7, 0, 0,
-		};
-		struct device_node *io_unit, *sbi = dp->parent;
-		const struct linux_prom_registers *regs;
-		int board, slot;
 
-		while (sbi) {
-			if (!strcmp(sbi->name, "sbi"))
-				break;
-
-			sbi = sbi->parent;
-		}
-		if (!sbi)
-			goto build_resources;
-
-		regs = of_get_property(dp, "reg", NULL);
-		if (!regs)
-			goto build_resources;
-
-		slot = regs->which_io;
-
-		/* If SBI's parent is not io-unit or the io-unit lacks
-		 * a "board#" property, something is very wrong.
-		 */
-		if (!sbi->parent || strcmp(sbi->parent->name, "io-unit")) {
-			printk("%s: Error, parent is not io-unit.\n",
-			       sbi->full_name);
-			goto build_resources;
-		}
-		io_unit = sbi->parent;
-		board = of_getintprop_default(io_unit, "board#", -1);
-		if (board == -1) {
-			printk("%s: Error, lacks board# property.\n",
-			       io_unit->full_name);
-			goto build_resources;
-		}
-
-		for (i = 0; i < op->archdata.num_irqs; i++) {
-			int this_irq = op->archdata.irqs[i];
-			int sbusl = pil_to_sbus[this_irq];
-
-			if (sbusl)
-				this_irq = (((board + 1) << 5) +
-					    (sbusl << 2) +
-					    slot);
-
-			op->archdata.irqs[i] = this_irq;
-		}
-	}
-
-build_resources:
 	build_device_resources(op, parent);
 
 	op->dev.parent = parent;
@@ -430,9 +382,11 @@ build_resources:
 	else
 		dev_set_name(&op->dev, "%08x", dp->phandle);
 
+	op->dev.coherent_dma_mask = DMA_BIT_MASK(32);
+	op->dev.dma_mask = &op->dev.coherent_dma_mask;
+
 	if (of_device_register(op)) {
-		printk("%s: Could not register of device.\n",
-		       dp->full_name);
+		printk("%pOF: Could not register of device.\n", dp);
 		kfree(op);
 		op = NULL;
 	}

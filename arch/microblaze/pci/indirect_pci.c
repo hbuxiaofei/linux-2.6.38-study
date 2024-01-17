@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Support for indirect PCI bridges.
  *
  * Copyright (C) 1998 Gabriel Paubert.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 
 #include <linux/kernel.h>
@@ -15,8 +11,7 @@
 #include <linux/string.h>
 #include <linux/init.h>
 
-#include <asm/io.h>
-#include <asm/prom.h>
+#include <linux/io.h>
 #include <asm/pci-bridge.h>
 
 static int
@@ -108,7 +103,7 @@ indirect_write_config(struct pci_bus *bus, unsigned int devfn, int offset,
 		out_le32(hose->cfg_addr, (0x80000000 | (bus_no << 16) |
 			 (devfn << 8) | reg | cfg_type));
 
-	/* surpress setting of PCI_PRIMARY_BUS */
+	/* suppress setting of PCI_PRIMARY_BUS */
 	if (hose->indirect_type & INDIRECT_TYPE_SURPRESS_PRIMARY_BUS)
 		if ((offset == PCI_PRIMARY_BUS) &&
 			(bus->number == hose->first_busno))

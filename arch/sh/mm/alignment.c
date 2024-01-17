@@ -13,6 +13,7 @@
 #include <linux/seq_file.h>
 #include <linux/proc_fs.h>
 #include <linux/uaccess.h>
+#include <linux/ratelimit.h>
 #include <asm/alignment.h>
 #include <asm/processor.h>
 
@@ -95,13 +96,13 @@ int set_unalign_ctl(struct task_struct *tsk, unsigned int val)
 void unaligned_fixups_notify(struct task_struct *tsk, insn_size_t insn,
 			     struct pt_regs *regs)
 {
-	if (user_mode(regs) && (se_usermode & UM_WARN) && printk_ratelimit())
-		pr_notice("Fixing up unaligned userspace access "
+	if (user_mode(regs) && (se_usermode & UM_WARN))
+		pr_notice_ratelimited("Fixing up unaligned userspace access "
 			  "in \"%s\" pid=%d pc=0x%p ins=0x%04hx\n",
 			  tsk->comm, task_pid_nr(tsk),
 			  (void *)instruction_pointer(regs), insn);
-	else if (se_kernmode_warn && printk_ratelimit())
-		pr_notice("Fixing up unaligned kernel access "
+	else if (se_kernmode_warn)
+		pr_notice_ratelimited("Fixing up unaligned kernel access "
 			  "in \"%s\" pid=%d pc=0x%p ins=0x%04hx\n",
 			  tsk->comm, task_pid_nr(tsk),
 			  (void *)instruction_pointer(regs), insn);
@@ -139,7 +140,7 @@ static int alignment_proc_open(struct inode *inode, struct file *file)
 static ssize_t alignment_proc_write(struct file *file,
 		const char __user *buffer, size_t count, loff_t *pos)
 {
-	int *data = PDE(file->f_path.dentry->d_inode)->data;
+	int *data = pde_data(file_inode(file));
 	char mode;
 
 	if (count > 0) {
@@ -151,17 +152,16 @@ static ssize_t alignment_proc_write(struct file *file,
 	return count;
 }
 
-static const struct file_operations alignment_proc_fops = {
-	.owner		= THIS_MODULE,
-	.open		= alignment_proc_open,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= single_release,
-	.write		= alignment_proc_write,
+static const struct proc_ops alignment_proc_ops = {
+	.proc_open	= alignment_proc_open,
+	.proc_read	= seq_read,
+	.proc_lseek	= seq_lseek,
+	.proc_release	= single_release,
+	.proc_write	= alignment_proc_write,
 };
 
 /*
- * This needs to be done after sysctl_init, otherwise sys/ will be
+ * This needs to be done after sysctl_init_bases(), otherwise sys/ will be
  * overwritten.  Actually, this shouldn't be in sys/ at all since
  * it isn't a sysctl, and it doesn't contain sysctl information.
  * We now locate it in /proc/cpu/alignment instead.
@@ -175,12 +175,12 @@ static int __init alignment_init(void)
 		return -ENOMEM;
 
 	res = proc_create_data("alignment", S_IWUSR | S_IRUGO, dir,
-			       &alignment_proc_fops, &se_usermode);
+			       &alignment_proc_ops, &se_usermode);
 	if (!res)
 		return -ENOMEM;
 
         res = proc_create_data("kernel_alignment", S_IWUSR | S_IRUGO, dir,
-			       &alignment_proc_fops, &se_kernmode_warn);
+			       &alignment_proc_ops, &se_kernmode_warn);
         if (!res)
                 return -ENOMEM;
 

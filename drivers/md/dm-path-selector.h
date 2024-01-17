@@ -26,18 +26,33 @@ struct path_selector {
 	void *context;
 };
 
+/*
+ * If a path selector uses this flag, a high resolution timer is used
+ * (via ktime_get_ns) to account for IO start time in BIO-based mpath.
+ * This improves performance of some path selectors (i.e. HST), in
+ * exchange for slightly higher overhead when submitting the BIO.
+ * The extra cost is usually offset by improved path selection for
+ * some benchmarks.
+ *
+ * This has no effect for request-based mpath, since it already uses a
+ * higher precision timer by default.
+ */
+#define DM_PS_USE_HR_TIMER		0x00000001
+#define dm_ps_use_hr_timer(type)	((type)->features & DM_PS_USE_HR_TIMER)
+
 /* Information about a path selector type */
 struct path_selector_type {
 	char *name;
 	struct module *module;
 
+	unsigned int features;
 	unsigned int table_args;
 	unsigned int info_args;
 
 	/*
 	 * Constructs a path selector object, takes custom arguments
 	 */
-	int (*create) (struct path_selector *ps, unsigned argc, char **argv);
+	int (*create) (struct path_selector *ps, unsigned int argc, char **argv);
 	void (*destroy) (struct path_selector *ps);
 
 	/*
@@ -50,13 +65,8 @@ struct path_selector_type {
 	/*
 	 * Chooses a path for this io, if no paths are available then
 	 * NULL will be returned.
-	 *
-	 * repeat_count is the number of times to use the path before
-	 * calling the function again.  0 means don't call it again unless
-	 * the path fails.
 	 */
 	struct dm_path *(*select_path) (struct path_selector *ps,
-					unsigned *repeat_count,
 					size_t nr_bytes);
 
 	/*
@@ -79,7 +89,7 @@ struct path_selector_type {
 	int (*start_io) (struct path_selector *ps, struct dm_path *path,
 			 size_t nr_bytes);
 	int (*end_io) (struct path_selector *ps, struct dm_path *path,
-		       size_t nr_bytes);
+		       size_t nr_bytes, u64 start_time);
 };
 
 /* Register a path selector */

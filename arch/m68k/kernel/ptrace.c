@@ -12,17 +12,18 @@
 
 #include <linux/kernel.h>
 #include <linux/sched.h>
+#include <linux/sched/task_stack.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
 #include <linux/errno.h>
 #include <linux/ptrace.h>
 #include <linux/user.h>
 #include <linux/signal.h>
+#include <linux/regset.h>
+#include <linux/elf.h>
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/page.h>
-#include <asm/pgtable.h>
-#include <asm/system.h>
 #include <asm/processor.h>
 
 /*
@@ -145,11 +146,13 @@ void user_enable_single_step(struct task_struct *child)
 	set_tsk_thread_flag(child, TIF_DELAYED_TRACE);
 }
 
+#ifdef CONFIG_MMU
 void user_enable_block_step(struct task_struct *child)
 {
 	unsigned long tmp = get_reg(child, PT_SR) & ~TRACE_BITS;
 	put_reg(child, PT_SR, tmp | T0_BIT);
 }
+#endif
 
 void user_disable_single_step(struct task_struct *child)
 {
@@ -180,6 +183,14 @@ long arch_ptrace(struct task_struct *child, long request,
 			if (FPU_IS_EMU && (regno < 45) && !(regno % 3))
 				tmp = ((tmp & 0xffff0000) << 15) |
 				      ((tmp & 0x0000ffff) << 16);
+#ifndef CONFIG_MMU
+		} else if (regno == 49) {
+			tmp = child->mm->start_code;
+		} else if (regno == 50) {
+			tmp = child->mm->start_data;
+		} else if (regno == 51) {
+			tmp = child->mm->end_code;
+#endif
 		} else
 			goto out_eio;
 		ret = put_user(tmp, datap);
@@ -261,17 +272,73 @@ out_eio:
 	return -EIO;
 }
 
-asmlinkage void syscall_trace(void)
+asmlinkage int syscall_trace_enter(void)
 {
-	ptrace_notify(SIGTRAP | ((current->ptrace & PT_TRACESYSGOOD)
-				 ? 0x80 : 0));
-	/*
-	 * this isn't the same as continuing with a signal, but it will do
-	 * for normal use.  strace only continues with a signal if the
-	 * stopping signal is not SIGTRAP.  -brl
-	 */
-	if (current->exit_code) {
-		send_sig(current->exit_code, current, 1);
-		current->exit_code = 0;
-	}
+	int ret = 0;
+
+	if (test_thread_flag(TIF_SYSCALL_TRACE))
+		ret = ptrace_report_syscall_entry(task_pt_regs(current));
+	return ret;
 }
+
+asmlinkage void syscall_trace_leave(void)
+{
+	if (test_thread_flag(TIF_SYSCALL_TRACE))
+		ptrace_report_syscall_exit(task_pt_regs(current), 0);
+}
+
+#if defined(CONFIG_BINFMT_ELF_FDPIC) && defined(CONFIG_ELF_CORE)
+/*
+ * Currently the only thing that needs to use regsets for m68k is the
+ * coredump support of the elf_fdpic loader. Implement the minimum
+ * definitions required for that.
+ */
+static int m68k_regset_get(struct task_struct *target,
+			   const struct user_regset *regset,
+			   struct membuf to)
+{
+	struct pt_regs *ptregs = task_pt_regs(target);
+	u32 uregs[ELF_NGREG];
+
+	ELF_CORE_COPY_REGS(uregs, ptregs);
+	return membuf_write(&to, uregs, sizeof(uregs));
+}
+
+enum m68k_regset {
+	REGSET_GPR,
+#ifdef CONFIG_FPU
+	REGSET_FPU,
+#endif
+};
+
+static const struct user_regset m68k_user_regsets[] = {
+	[REGSET_GPR] = {
+		.core_note_type = NT_PRSTATUS,
+		.n = ELF_NGREG,
+		.size = sizeof(u32),
+		.align = sizeof(u16),
+		.regset_get = m68k_regset_get,
+	},
+#ifdef CONFIG_FPU
+	[REGSET_FPU] = {
+		.core_note_type = NT_PRFPREG,
+		.n = sizeof(struct user_m68kfp_struct) / sizeof(u32),
+		.size = sizeof(u32),
+		.align = sizeof(u32),
+	}
+#endif /* CONFIG_FPU */
+};
+
+static const struct user_regset_view user_m68k_view = {
+	.name = "m68k",
+	.e_machine = EM_68K,
+	.ei_osabi = ELF_OSABI,
+	.regsets = m68k_user_regsets,
+	.n = ARRAY_SIZE(m68k_user_regsets)
+};
+
+const struct user_regset_view *task_user_regset_view(struct task_struct *task)
+{
+	return &user_m68k_view;
+}
+#endif /* CONFIG_BINFMT_ELF_FDPIC && CONFIG_ELF_CORE */

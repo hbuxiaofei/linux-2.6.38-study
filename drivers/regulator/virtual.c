@@ -1,14 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * reg-virtual-consumer.c
  *
  * Copyright 2008 Wolfson Microelectronics PLC.
  *
  * Author: Mark Brown <broonie@opensource.wolfsonmicro.com>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 2 of the
- * License, or (at your option) any later version.
  */
 
 #include <linux/err.h>
@@ -16,6 +12,8 @@
 #include <linux/platform_device.h>
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
+#include <linux/module.h>
+#include <linux/of.h>
 
 struct virtual_consumer_data {
 	struct mutex lock;
@@ -120,7 +118,7 @@ static ssize_t set_min_uV(struct device *dev, struct device_attribute *attr,
 	struct virtual_consumer_data *data = dev_get_drvdata(dev);
 	long val;
 
-	if (strict_strtol(buf, 10, &val) != 0)
+	if (kstrtol(buf, 10, &val) != 0)
 		return count;
 
 	mutex_lock(&data->lock);
@@ -146,7 +144,7 @@ static ssize_t set_max_uV(struct device *dev, struct device_attribute *attr,
 	struct virtual_consumer_data *data = dev_get_drvdata(dev);
 	long val;
 
-	if (strict_strtol(buf, 10, &val) != 0)
+	if (kstrtol(buf, 10, &val) != 0)
 		return count;
 
 	mutex_lock(&data->lock);
@@ -172,7 +170,7 @@ static ssize_t set_min_uA(struct device *dev, struct device_attribute *attr,
 	struct virtual_consumer_data *data = dev_get_drvdata(dev);
 	long val;
 
-	if (strict_strtol(buf, 10, &val) != 0)
+	if (kstrtol(buf, 10, &val) != 0)
 		return count;
 
 	mutex_lock(&data->lock);
@@ -198,7 +196,7 @@ static ssize_t set_max_uA(struct device *dev, struct device_attribute *attr,
 	struct virtual_consumer_data *data = dev_get_drvdata(dev);
 	long val;
 
-	if (strict_strtol(buf, 10, &val) != 0)
+	if (kstrtol(buf, 10, &val) != 0)
 		return count;
 
 	mutex_lock(&data->lock);
@@ -265,11 +263,11 @@ static ssize_t set_mode(struct device *dev, struct device_attribute *attr,
 	return count;
 }
 
-static DEVICE_ATTR(min_microvolts, 0666, show_min_uV, set_min_uV);
-static DEVICE_ATTR(max_microvolts, 0666, show_max_uV, set_max_uV);
-static DEVICE_ATTR(min_microamps, 0666, show_min_uA, set_min_uA);
-static DEVICE_ATTR(max_microamps, 0666, show_max_uA, set_max_uA);
-static DEVICE_ATTR(mode, 0666, show_mode, set_mode);
+static DEVICE_ATTR(min_microvolts, 0664, show_min_uV, set_min_uV);
+static DEVICE_ATTR(max_microvolts, 0664, show_max_uV, set_max_uV);
+static DEVICE_ATTR(min_microamps, 0664, show_min_uA, set_min_uA);
+static DEVICE_ATTR(max_microamps, 0664, show_max_uA, set_max_uA);
+static DEVICE_ATTR(mode, 0664, show_mode, set_mode);
 
 static struct attribute *regulator_virtual_attributes[] = {
 	&dev_attr_min_microvolts.attr,
@@ -284,32 +282,60 @@ static const struct attribute_group regulator_virtual_attr_group = {
 	.attrs	= regulator_virtual_attributes,
 };
 
-static int __devinit regulator_virtual_probe(struct platform_device *pdev)
+#ifdef CONFIG_OF
+static const struct of_device_id regulator_virtual_consumer_of_match[] = {
+	{ .compatible = "regulator-virtual-consumer" },
+	{},
+};
+MODULE_DEVICE_TABLE(of, regulator_virtual_consumer_of_match);
+#endif
+
+static int regulator_virtual_probe(struct platform_device *pdev)
 {
-	char *reg_id = pdev->dev.platform_data;
+	char *reg_id = dev_get_platdata(&pdev->dev);
 	struct virtual_consumer_data *drvdata;
+	static bool warned;
 	int ret;
 
-	drvdata = kzalloc(sizeof(struct virtual_consumer_data), GFP_KERNEL);
+	if (!warned) {
+		warned = true;
+		pr_warn("**********************************************************\n");
+		pr_warn("**   NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE   **\n");
+		pr_warn("**                                                      **\n");
+		pr_warn("** regulator-virtual-consumer is only for testing and   **\n");
+		pr_warn("** debugging.  Do not use it in a production kernel.    **\n");
+		pr_warn("**                                                      **\n");
+		pr_warn("**   NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE NOTICE   **\n");
+		pr_warn("**********************************************************\n");
+	}
+
+	drvdata = devm_kzalloc(&pdev->dev, sizeof(struct virtual_consumer_data),
+			       GFP_KERNEL);
 	if (drvdata == NULL)
 		return -ENOMEM;
 
+	/*
+	 * This virtual consumer does not have any hardware-defined supply
+	 * name, so just allow the regulator to be specified in a property
+	 * named "default-supply" when we're being probed from devicetree.
+	 */
+	if (!reg_id && pdev->dev.of_node)
+		reg_id = "default";
+
 	mutex_init(&drvdata->lock);
 
-	drvdata->regulator = regulator_get(&pdev->dev, reg_id);
-	if (IS_ERR(drvdata->regulator)) {
-		ret = PTR_ERR(drvdata->regulator);
-		dev_err(&pdev->dev, "Failed to obtain supply '%s': %d\n",
-			reg_id, ret);
-		goto err;
-	}
+	drvdata->regulator = devm_regulator_get(&pdev->dev, reg_id);
+	if (IS_ERR(drvdata->regulator))
+		return dev_err_probe(&pdev->dev, PTR_ERR(drvdata->regulator),
+				     "Failed to obtain supply '%s'\n",
+				     reg_id);
 
 	ret = sysfs_create_group(&pdev->dev.kobj,
 				 &regulator_virtual_attr_group);
 	if (ret != 0) {
 		dev_err(&pdev->dev,
 			"Failed to create attribute group: %d\n", ret);
-		goto err_regulator;
+		return ret;
 	}
 
 	drvdata->mode = regulator_get_mode(drvdata->regulator);
@@ -317,15 +343,9 @@ static int __devinit regulator_virtual_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, drvdata);
 
 	return 0;
-
-err_regulator:
-	regulator_put(drvdata->regulator);
-err:
-	kfree(drvdata);
-	return ret;
 }
 
-static int __devexit regulator_virtual_remove(struct platform_device *pdev)
+static int regulator_virtual_remove(struct platform_device *pdev)
 {
 	struct virtual_consumer_data *drvdata = platform_get_drvdata(pdev);
 
@@ -333,35 +353,20 @@ static int __devexit regulator_virtual_remove(struct platform_device *pdev)
 
 	if (drvdata->enabled)
 		regulator_disable(drvdata->regulator);
-	regulator_put(drvdata->regulator);
-
-	kfree(drvdata);
-
-	platform_set_drvdata(pdev, NULL);
 
 	return 0;
 }
 
 static struct platform_driver regulator_virtual_consumer_driver = {
 	.probe		= regulator_virtual_probe,
-	.remove		= __devexit_p(regulator_virtual_remove),
+	.remove		= regulator_virtual_remove,
 	.driver		= {
 		.name		= "reg-virt-consumer",
-		.owner		= THIS_MODULE,
+		.of_match_table = of_match_ptr(regulator_virtual_consumer_of_match),
 	},
 };
 
-static int __init regulator_virtual_consumer_init(void)
-{
-	return platform_driver_register(&regulator_virtual_consumer_driver);
-}
-module_init(regulator_virtual_consumer_init);
-
-static void __exit regulator_virtual_consumer_exit(void)
-{
-	platform_driver_unregister(&regulator_virtual_consumer_driver);
-}
-module_exit(regulator_virtual_consumer_exit);
+module_platform_driver(regulator_virtual_consumer_driver);
 
 MODULE_AUTHOR("Mark Brown <broonie@opensource.wolfsonmicro.com>");
 MODULE_DESCRIPTION("Virtual regulator consumer");

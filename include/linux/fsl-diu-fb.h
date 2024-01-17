@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Copyright 2008 Freescale Semiconductor, Inc. All Rights Reserved.
  *
@@ -9,34 +10,12 @@
  *           York Sun <yorksun@freescale.com>
  *
  *   Based on imxfb.c Copyright (C) 2004 S.Hauer, Pengutronix
- *
- * This program is free software; you can redistribute  it and/or modify it
- * under  the terms of  the GNU General  Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
- *
  */
 
 #ifndef __FSL_DIU_FB_H__
 #define __FSL_DIU_FB_H__
 
-/* Arbitrary threshold to determine the allocation method
- * See mpc8610fb_set_par(), map_video_memory(), and unmap_video_memory()
- */
-#define MEM_ALLOC_THRESHOLD (1024*768*4+32)
-/* Minimum value that the pixel clock can be set to in pico seconds
- * This is determined by platform clock/3 where the minimum platform
- * clock is 533MHz. This gives 5629 pico seconds.
- */
-#define MIN_PIX_CLK 5629
-#define MAX_PIX_CLK 96096
-
 #include <linux/types.h>
-
-struct mfb_alpha {
-	int enable;
-	int alpha;
-};
 
 struct mfb_chroma_key {
 	int enable;
@@ -49,25 +28,38 @@ struct mfb_chroma_key {
 };
 
 struct aoi_display_offset {
-	int x_aoi_d;
-	int y_aoi_d;
+	__s32 x_aoi_d;
+	__s32 y_aoi_d;
 };
 
 #define MFB_SET_CHROMA_KEY	_IOW('M', 1, struct mfb_chroma_key)
 #define MFB_SET_BRIGHTNESS	_IOW('M', 3, __u8)
+#define MFB_SET_ALPHA		_IOW('M', 0, __u8)
+#define MFB_GET_ALPHA		_IOR('M', 0, __u8)
+#define MFB_SET_AOID		_IOW('M', 4, struct aoi_display_offset)
+#define MFB_GET_AOID		_IOR('M', 4, struct aoi_display_offset)
+#define MFB_SET_PIXFMT		_IOW('M', 8, __u32)
+#define MFB_GET_PIXFMT		_IOR('M', 8, __u32)
 
-#define MFB_SET_ALPHA		0x80014d00
-#define MFB_GET_ALPHA		0x40014d00
-#define MFB_SET_AOID		0x80084d04
-#define MFB_GET_AOID		0x40084d04
-#define MFB_SET_PIXFMT		0x80014d08
-#define MFB_GET_PIXFMT		0x40014d08
+/*
+ * The MPC5121 BSP comes with a gamma_set utility that initializes the
+ * gamma table.  Unfortunately, it uses bad values for the IOCTL commands,
+ * but there's nothing we can do about it now.  These ioctls are only
+ * supported on the MPC5121.
+ */
+#define MFB_SET_GAMMA		_IOW('M', 1, __u8)
+#define MFB_GET_GAMMA		_IOR('M', 1, __u8)
 
-#define FBIOGET_GWINFO		0x46E0
-#define FBIOPUT_GWINFO		0x46E1
+/*
+ * The original definitions of MFB_SET_PIXFMT and MFB_GET_PIXFMT used the
+ * wrong value for 'size' field of the ioctl.  The current macros above use the
+ * right size, but we still need to provide backwards compatibility, at least
+ * for a while.
+*/
+#define MFB_SET_PIXFMT_OLD	0x80014d08
+#define MFB_GET_PIXFMT_OLD	0x40014d08
 
 #ifdef __KERNEL__
-#include <linux/spinlock.h>
 
 /*
  * These are the fields of area descriptor(in DDR memory) for every plane
@@ -76,7 +68,7 @@ struct diu_ad {
 	/* Word 0(32-bit) in DDR memory */
 /* 	__u16 comp; */
 /* 	__u16 pixel_s:2; */
-/* 	__u16 pallete:1; */
+/* 	__u16 palette:1; */
 /* 	__u16 red_c:2; */
 /* 	__u16 green_c:2; */
 /* 	__u16 blue_c:2; */
@@ -145,7 +137,7 @@ struct diu_ad {
 struct diu {
 	__be32 desc[3];
 	__be32 gamma;
-	__be32 pallete;
+	__be32 palette;
 	__be32 cursor;
 	__be32 curs_pos;
 	__be32 diu_mode;
@@ -165,58 +157,12 @@ struct diu {
 	__be32 plut;
 } __attribute__ ((packed));
 
-struct diu_hw {
-	struct diu *diu_reg;
-	spinlock_t reg_lock;
-
-	__u32 mode;		/* DIU operation mode */
-};
-
-struct diu_addr {
-	__u8 __iomem *vaddr;	/* Virtual address */
-	dma_addr_t paddr;	/* Physical address */
-	__u32 	   offset;
-};
-
-struct diu_pool {
-	struct diu_addr ad;
-	struct diu_addr gamma;
-	struct diu_addr pallete;
-	struct diu_addr cursor;
-};
-
-#define FSL_DIU_BASE_OFFSET	0x2C000	/* Offset of DIU */
-#define INT_LCDC		64	/* DIU interrupt number */
-
-#define FSL_AOI_NUM	6	/* 5 AOIs and one dummy AOI */
-				/* 1 for plane 0, 2 for plane 1&2 each */
-
-/* Minimum X and Y resolutions */
-#define MIN_XRES	64
-#define MIN_YRES	64
-
-/* HW cursor parameters */
-#define MAX_CURS		32
-
-/* Modes of operation of DIU */
+/*
+ * Modes of operation of DIU.  The DIU supports five different modes, but
+ * the driver only supports modes 0 and 1.
+ */
 #define MFB_MODE0	0	/* DIU off */
 #define MFB_MODE1	1	/* All three planes output to display */
-#define MFB_MODE2	2	/* Plane 1 to display, planes 2+3 written back*/
-#define MFB_MODE3	3	/* All three planes written back to memory */
-#define MFB_MODE4	4	/* Color bar generation */
-
-/* INT_STATUS/INT_MASK field descriptions */
-#define INT_VSYNC	0x01	/* Vsync interrupt  */
-#define INT_VSYNC_WB	0x02	/* Vsync interrupt for write back operation */
-#define INT_UNDRUN	0x04	/* Under run exception interrupt */
-#define INT_PARERR	0x08	/* Display parameters error interrupt */
-#define INT_LS_BF_VS	0x10	/* Lines before vsync. interrupt */
-
-/* Panels'operation modes */
-#define MFB_TYPE_OUTPUT	0	/* Panel output to display */
-#define MFB_TYPE_OFF	1	/* Panel off */
-#define MFB_TYPE_WB	2	/* Panel written back to memory */
-#define MFB_TYPE_TEST	3	/* Panel generate color bar */
 
 #endif /* __KERNEL__ */
 #endif /* __FSL_DIU_FB_H__ */

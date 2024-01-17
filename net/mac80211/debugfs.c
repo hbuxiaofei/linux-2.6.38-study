@@ -1,25 +1,19 @@
-
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * mac80211 debugfs for wireless PHYs
  *
  * Copyright 2007	Johannes Berg <johannes@sipsolutions.net>
- *
- * GPLv2
- *
+ * Copyright 2013-2014  Intel Mobile Communications GmbH
+ * Copyright (C) 2018 - 2019, 2021-2022 Intel Corporation
  */
 
 #include <linux/debugfs.h>
 #include <linux/rtnetlink.h>
+#include <linux/vmalloc.h>
 #include "ieee80211_i.h"
 #include "driver-ops.h"
 #include "rate.h"
 #include "debugfs.h"
-
-int mac80211_open_file_generic(struct inode *inode, struct file *file)
-{
-	file->private_data = inode->i_private;
-	return 0;
-}
 
 #define DEBUGFS_FORMAT_BUFFER_SIZE 100
 
@@ -37,7 +31,7 @@ int mac80211_format_buffer(char __user *userbuf, size_t count,
 	return simple_read_from_buffer(userbuf, count, ppos, buf, res);
 }
 
-#define DEBUGFS_READONLY_FILE(name, fmt, value...)			\
+#define DEBUGFS_READONLY_FILE_FN(name, fmt, value...)			\
 static ssize_t name## _read(struct file *file, char __user *userbuf,	\
 			    size_t count, loff_t *ppos)			\
 {									\
@@ -45,23 +39,32 @@ static ssize_t name## _read(struct file *file, char __user *userbuf,	\
 									\
 	return mac80211_format_buffer(userbuf, count, ppos, 		\
 				      fmt "\n", ##value);		\
-}									\
-									\
+}
+
+#define DEBUGFS_READONLY_FILE_OPS(name)			\
 static const struct file_operations name## _ops = {			\
 	.read = name## _read,						\
-	.open = mac80211_open_file_generic,				\
+	.open = simple_open,						\
 	.llseek = generic_file_llseek,					\
 };
 
+#define DEBUGFS_READONLY_FILE(name, fmt, value...)		\
+	DEBUGFS_READONLY_FILE_FN(name, fmt, value)		\
+	DEBUGFS_READONLY_FILE_OPS(name)
+
 #define DEBUGFS_ADD(name)						\
-	debugfs_create_file(#name, 0400, phyd, local, &name## _ops);
+	debugfs_create_file(#name, 0400, phyd, local, &name## _ops)
 
 #define DEBUGFS_ADD_MODE(name, mode)					\
 	debugfs_create_file(#name, mode, phyd, local, &name## _ops);
 
 
-DEBUGFS_READONLY_FILE(frequency, "%d",
-		      local->hw.conf.channel->center_freq);
+DEBUGFS_READONLY_FILE(hw_conf, "%x",
+		      local->hw.conf.flags);
+DEBUGFS_READONLY_FILE(user_power, "%d",
+		      local->user_power_level);
+DEBUGFS_READONLY_FILE(power, "%d",
+		      local->hw.conf.power_level);
 DEBUGFS_READONLY_FILE(total_ps_buffered, "%d",
 		      local->total_ps_buffered);
 DEBUGFS_READONLY_FILE(wep_iv, "%#08x",
@@ -69,65 +72,362 @@ DEBUGFS_READONLY_FILE(wep_iv, "%#08x",
 DEBUGFS_READONLY_FILE(rate_ctrl_alg, "%s",
 	local->rate_ctrl ? local->rate_ctrl->ops->name : "hw/driver");
 
-static ssize_t tsf_read(struct file *file, char __user *user_buf,
-			     size_t count, loff_t *ppos)
+static ssize_t aqm_read(struct file *file,
+			char __user *user_buf,
+			size_t count,
+			loff_t *ppos)
 {
 	struct ieee80211_local *local = file->private_data;
-	u64 tsf;
+	struct fq *fq = &local->fq;
+	char buf[200];
+	int len = 0;
 
-	tsf = drv_get_tsf(local);
+	spin_lock_bh(&local->fq.lock);
+	rcu_read_lock();
 
-	return mac80211_format_buffer(user_buf, count, ppos, "0x%016llx\n",
-				      (unsigned long long) tsf);
+	len = scnprintf(buf, sizeof(buf),
+			"access name value\n"
+			"R fq_flows_cnt %u\n"
+			"R fq_backlog %u\n"
+			"R fq_overlimit %u\n"
+			"R fq_overmemory %u\n"
+			"R fq_collisions %u\n"
+			"R fq_memory_usage %u\n"
+			"RW fq_memory_limit %u\n"
+			"RW fq_limit %u\n"
+			"RW fq_quantum %u\n",
+			fq->flows_cnt,
+			fq->backlog,
+			fq->overmemory,
+			fq->overlimit,
+			fq->collisions,
+			fq->memory_usage,
+			fq->memory_limit,
+			fq->limit,
+			fq->quantum);
+
+	rcu_read_unlock();
+	spin_unlock_bh(&local->fq.lock);
+
+	return simple_read_from_buffer(user_buf, count, ppos,
+				       buf, len);
 }
 
-static ssize_t tsf_write(struct file *file,
-                         const char __user *user_buf,
-                         size_t count, loff_t *ppos)
+static ssize_t aqm_write(struct file *file,
+			 const char __user *user_buf,
+			 size_t count,
+			 loff_t *ppos)
 {
 	struct ieee80211_local *local = file->private_data;
-	unsigned long long tsf;
 	char buf[100];
+
+	if (count >= sizeof(buf))
+		return -EINVAL;
+
+	if (copy_from_user(buf, user_buf, count))
+		return -EFAULT;
+
+	if (count && buf[count - 1] == '\n')
+		buf[count - 1] = '\0';
+	else
+		buf[count] = '\0';
+
+	if (sscanf(buf, "fq_limit %u", &local->fq.limit) == 1)
+		return count;
+	else if (sscanf(buf, "fq_memory_limit %u", &local->fq.memory_limit) == 1)
+		return count;
+	else if (sscanf(buf, "fq_quantum %u", &local->fq.quantum) == 1)
+		return count;
+
+	return -EINVAL;
+}
+
+static const struct file_operations aqm_ops = {
+	.write = aqm_write,
+	.read = aqm_read,
+	.open = simple_open,
+	.llseek = default_llseek,
+};
+
+static ssize_t airtime_flags_read(struct file *file,
+				  char __user *user_buf,
+				  size_t count, loff_t *ppos)
+{
+	struct ieee80211_local *local = file->private_data;
+	char buf[128] = {}, *pos, *end;
+
+	pos = buf;
+	end = pos + sizeof(buf) - 1;
+
+	if (local->airtime_flags & AIRTIME_USE_TX)
+		pos += scnprintf(pos, end - pos, "AIRTIME_TX\t(%lx)\n",
+				 AIRTIME_USE_TX);
+	if (local->airtime_flags & AIRTIME_USE_RX)
+		pos += scnprintf(pos, end - pos, "AIRTIME_RX\t(%lx)\n",
+				 AIRTIME_USE_RX);
+
+	return simple_read_from_buffer(user_buf, count, ppos, buf,
+				       strlen(buf));
+}
+
+static ssize_t airtime_flags_write(struct file *file,
+				   const char __user *user_buf,
+				   size_t count, loff_t *ppos)
+{
+	struct ieee80211_local *local = file->private_data;
+	char buf[16];
+
+	if (count >= sizeof(buf))
+		return -EINVAL;
+
+	if (copy_from_user(buf, user_buf, count))
+		return -EFAULT;
+
+	if (count && buf[count - 1] == '\n')
+		buf[count - 1] = '\0';
+	else
+		buf[count] = '\0';
+
+	if (kstrtou16(buf, 0, &local->airtime_flags))
+		return -EINVAL;
+
+	return count;
+}
+
+static const struct file_operations airtime_flags_ops = {
+	.write = airtime_flags_write,
+	.read = airtime_flags_read,
+	.open = simple_open,
+	.llseek = default_llseek,
+};
+
+static ssize_t aql_pending_read(struct file *file,
+				char __user *user_buf,
+				size_t count, loff_t *ppos)
+{
+	struct ieee80211_local *local = file->private_data;
+	char buf[400];
+	int len = 0;
+
+	len = scnprintf(buf, sizeof(buf),
+			"AC     AQL pending\n"
+			"VO     %u us\n"
+			"VI     %u us\n"
+			"BE     %u us\n"
+			"BK     %u us\n"
+			"total  %u us\n",
+			atomic_read(&local->aql_ac_pending_airtime[IEEE80211_AC_VO]),
+			atomic_read(&local->aql_ac_pending_airtime[IEEE80211_AC_VI]),
+			atomic_read(&local->aql_ac_pending_airtime[IEEE80211_AC_BE]),
+			atomic_read(&local->aql_ac_pending_airtime[IEEE80211_AC_BK]),
+			atomic_read(&local->aql_total_pending_airtime));
+	return simple_read_from_buffer(user_buf, count, ppos,
+				       buf, len);
+}
+
+static const struct file_operations aql_pending_ops = {
+	.read = aql_pending_read,
+	.open = simple_open,
+	.llseek = default_llseek,
+};
+
+static ssize_t aql_txq_limit_read(struct file *file,
+				  char __user *user_buf,
+				  size_t count,
+				  loff_t *ppos)
+{
+	struct ieee80211_local *local = file->private_data;
+	char buf[400];
+	int len = 0;
+
+	len = scnprintf(buf, sizeof(buf),
+			"AC	AQL limit low	AQL limit high\n"
+			"VO	%u		%u\n"
+			"VI	%u		%u\n"
+			"BE	%u		%u\n"
+			"BK	%u		%u\n",
+			local->aql_txq_limit_low[IEEE80211_AC_VO],
+			local->aql_txq_limit_high[IEEE80211_AC_VO],
+			local->aql_txq_limit_low[IEEE80211_AC_VI],
+			local->aql_txq_limit_high[IEEE80211_AC_VI],
+			local->aql_txq_limit_low[IEEE80211_AC_BE],
+			local->aql_txq_limit_high[IEEE80211_AC_BE],
+			local->aql_txq_limit_low[IEEE80211_AC_BK],
+			local->aql_txq_limit_high[IEEE80211_AC_BK]);
+	return simple_read_from_buffer(user_buf, count, ppos,
+				       buf, len);
+}
+
+static ssize_t aql_txq_limit_write(struct file *file,
+				   const char __user *user_buf,
+				   size_t count,
+				   loff_t *ppos)
+{
+	struct ieee80211_local *local = file->private_data;
+	char buf[100];
+	u32 ac, q_limit_low, q_limit_high, q_limit_low_old, q_limit_high_old;
+	struct sta_info *sta;
+
+	if (count >= sizeof(buf))
+		return -EINVAL;
+
+	if (copy_from_user(buf, user_buf, count))
+		return -EFAULT;
+
+	if (count && buf[count - 1] == '\n')
+		buf[count - 1] = '\0';
+	else
+		buf[count] = '\0';
+
+	if (sscanf(buf, "%u %u %u", &ac, &q_limit_low, &q_limit_high) != 3)
+		return -EINVAL;
+
+	if (ac >= IEEE80211_NUM_ACS)
+		return -EINVAL;
+
+	q_limit_low_old = local->aql_txq_limit_low[ac];
+	q_limit_high_old = local->aql_txq_limit_high[ac];
+
+	local->aql_txq_limit_low[ac] = q_limit_low;
+	local->aql_txq_limit_high[ac] = q_limit_high;
+
+	mutex_lock(&local->sta_mtx);
+	list_for_each_entry(sta, &local->sta_list, list) {
+		/* If a sta has customized queue limits, keep it */
+		if (sta->airtime[ac].aql_limit_low == q_limit_low_old &&
+		    sta->airtime[ac].aql_limit_high == q_limit_high_old) {
+			sta->airtime[ac].aql_limit_low = q_limit_low;
+			sta->airtime[ac].aql_limit_high = q_limit_high;
+		}
+	}
+	mutex_unlock(&local->sta_mtx);
+	return count;
+}
+
+static const struct file_operations aql_txq_limit_ops = {
+	.write = aql_txq_limit_write,
+	.read = aql_txq_limit_read,
+	.open = simple_open,
+	.llseek = default_llseek,
+};
+
+static ssize_t aql_enable_read(struct file *file, char __user *user_buf,
+			       size_t count, loff_t *ppos)
+{
+	char buf[3];
+	int len;
+
+	len = scnprintf(buf, sizeof(buf), "%d\n",
+			!static_key_false(&aql_disable.key));
+
+	return simple_read_from_buffer(user_buf, count, ppos, buf, len);
+}
+
+static ssize_t aql_enable_write(struct file *file, const char __user *user_buf,
+				size_t count, loff_t *ppos)
+{
+	bool aql_disabled = static_key_false(&aql_disable.key);
+	char buf[3];
 	size_t len;
 
-	len = min(count, sizeof(buf) - 1);
-	if (copy_from_user(buf, user_buf, len))
+	if (count > sizeof(buf))
+		return -EINVAL;
+
+	if (copy_from_user(buf, user_buf, count))
 		return -EFAULT;
-	buf[len] = '\0';
 
-	if (strncmp(buf, "reset", 5) == 0) {
-		if (local->ops->reset_tsf) {
-			drv_reset_tsf(local);
-			wiphy_info(local->hw.wiphy, "debugfs reset TSF\n");
-		}
+	buf[sizeof(buf) - 1] = '\0';
+	len = strlen(buf);
+	if (len > 0 && buf[len - 1] == '\n')
+		buf[len - 1] = 0;
+
+	if (buf[0] == '0' && buf[1] == '\0') {
+		if (!aql_disabled)
+			static_branch_inc(&aql_disable);
+	} else if (buf[0] == '1' && buf[1] == '\0') {
+		if (aql_disabled)
+			static_branch_dec(&aql_disable);
 	} else {
-		tsf = simple_strtoul(buf, NULL, 0);
-		if (local->ops->set_tsf) {
-			drv_set_tsf(local, tsf);
-			wiphy_info(local->hw.wiphy,
-				   "debugfs set TSF to %#018llx\n", tsf);
-
-		}
+		return -EINVAL;
 	}
 
 	return count;
 }
 
-static const struct file_operations tsf_ops = {
-	.read = tsf_read,
-	.write = tsf_write,
-	.open = mac80211_open_file_generic,
+static const struct file_operations aql_enable_ops = {
+	.write = aql_enable_write,
+	.read = aql_enable_read,
+	.open = simple_open,
 	.llseek = default_llseek,
 };
 
+static ssize_t force_tx_status_read(struct file *file,
+				    char __user *user_buf,
+				    size_t count,
+				    loff_t *ppos)
+{
+	struct ieee80211_local *local = file->private_data;
+	char buf[3];
+	int len = 0;
+
+	len = scnprintf(buf, sizeof(buf), "%d\n", (int)local->force_tx_status);
+
+	return simple_read_from_buffer(user_buf, count, ppos,
+				       buf, len);
+}
+
+static ssize_t force_tx_status_write(struct file *file,
+				     const char __user *user_buf,
+				     size_t count,
+				     loff_t *ppos)
+{
+	struct ieee80211_local *local = file->private_data;
+	char buf[3];
+
+	if (count >= sizeof(buf))
+		return -EINVAL;
+
+	if (copy_from_user(buf, user_buf, count))
+		return -EFAULT;
+
+	if (count && buf[count - 1] == '\n')
+		buf[count - 1] = '\0';
+	else
+		buf[count] = '\0';
+
+	if (buf[0] == '0' && buf[1] == '\0')
+		local->force_tx_status = 0;
+	else if (buf[0] == '1' && buf[1] == '\0')
+		local->force_tx_status = 1;
+	else
+		return -EINVAL;
+
+	return count;
+}
+
+static const struct file_operations force_tx_status_ops = {
+	.write = force_tx_status_write,
+	.read = force_tx_status_read,
+	.open = simple_open,
+	.llseek = default_llseek,
+};
+
+#ifdef CONFIG_PM
 static ssize_t reset_write(struct file *file, const char __user *user_buf,
 			   size_t count, loff_t *ppos)
 {
 	struct ieee80211_local *local = file->private_data;
+	int ret;
 
 	rtnl_lock();
-	__ieee80211_suspend(&local->hw);
-	__ieee80211_resume(&local->hw);
+	wiphy_lock(local->hw.wiphy);
+	__ieee80211_suspend(&local->hw, NULL);
+	ret = __ieee80211_resume(&local->hw);
+	wiphy_unlock(local->hw.wiphy);
+
+	if (ret)
+		cfg80211_shutdown_all_interfaces(local->hw.wiphy);
+
 	rtnl_unlock();
 
 	return count;
@@ -135,163 +435,130 @@ static ssize_t reset_write(struct file *file, const char __user *user_buf,
 
 static const struct file_operations reset_ops = {
 	.write = reset_write,
-	.open = mac80211_open_file_generic,
+	.open = simple_open,
 	.llseek = noop_llseek,
 };
+#endif
 
-static ssize_t noack_read(struct file *file, char __user *user_buf,
-			  size_t count, loff_t *ppos)
-{
-	struct ieee80211_local *local = file->private_data;
-
-	return mac80211_format_buffer(user_buf, count, ppos, "%d\n",
-				      local->wifi_wme_noack_test);
-}
-
-static ssize_t noack_write(struct file *file,
-			   const char __user *user_buf,
-			   size_t count, loff_t *ppos)
-{
-	struct ieee80211_local *local = file->private_data;
-	char buf[10];
-	size_t len;
-
-	len = min(count, sizeof(buf) - 1);
-	if (copy_from_user(buf, user_buf, len))
-		return -EFAULT;
-	buf[len] = '\0';
-
-	local->wifi_wme_noack_test = !!simple_strtoul(buf, NULL, 0);
-
-	return count;
-}
-
-static const struct file_operations noack_ops = {
-	.read = noack_read,
-	.write = noack_write,
-	.open = mac80211_open_file_generic,
-	.llseek = default_llseek,
+static const char *hw_flag_names[] = {
+#define FLAG(F)	[IEEE80211_HW_##F] = #F
+	FLAG(HAS_RATE_CONTROL),
+	FLAG(RX_INCLUDES_FCS),
+	FLAG(HOST_BROADCAST_PS_BUFFERING),
+	FLAG(SIGNAL_UNSPEC),
+	FLAG(SIGNAL_DBM),
+	FLAG(NEED_DTIM_BEFORE_ASSOC),
+	FLAG(SPECTRUM_MGMT),
+	FLAG(AMPDU_AGGREGATION),
+	FLAG(SUPPORTS_PS),
+	FLAG(PS_NULLFUNC_STACK),
+	FLAG(SUPPORTS_DYNAMIC_PS),
+	FLAG(MFP_CAPABLE),
+	FLAG(WANT_MONITOR_VIF),
+	FLAG(NO_AUTO_VIF),
+	FLAG(SW_CRYPTO_CONTROL),
+	FLAG(SUPPORT_FAST_XMIT),
+	FLAG(REPORTS_TX_ACK_STATUS),
+	FLAG(CONNECTION_MONITOR),
+	FLAG(QUEUE_CONTROL),
+	FLAG(SUPPORTS_PER_STA_GTK),
+	FLAG(AP_LINK_PS),
+	FLAG(TX_AMPDU_SETUP_IN_HW),
+	FLAG(SUPPORTS_RC_TABLE),
+	FLAG(P2P_DEV_ADDR_FOR_INTF),
+	FLAG(TIMING_BEACON_ONLY),
+	FLAG(SUPPORTS_HT_CCK_RATES),
+	FLAG(CHANCTX_STA_CSA),
+	FLAG(SUPPORTS_CLONED_SKBS),
+	FLAG(SINGLE_SCAN_ON_ALL_BANDS),
+	FLAG(TDLS_WIDER_BW),
+	FLAG(SUPPORTS_AMSDU_IN_AMPDU),
+	FLAG(BEACON_TX_STATUS),
+	FLAG(NEEDS_UNIQUE_STA_ADDR),
+	FLAG(SUPPORTS_REORDERING_BUFFER),
+	FLAG(USES_RSS),
+	FLAG(TX_AMSDU),
+	FLAG(TX_FRAG_LIST),
+	FLAG(REPORTS_LOW_ACK),
+	FLAG(SUPPORTS_TX_FRAG),
+	FLAG(SUPPORTS_TDLS_BUFFER_STA),
+	FLAG(DEAUTH_NEED_MGD_TX_PREP),
+	FLAG(DOESNT_SUPPORT_QOS_NDP),
+	FLAG(BUFF_MMPDU_TXQ),
+	FLAG(SUPPORTS_VHT_EXT_NSS_BW),
+	FLAG(STA_MMPDU_TXQ),
+	FLAG(TX_STATUS_NO_AMPDU_LEN),
+	FLAG(SUPPORTS_MULTI_BSSID),
+	FLAG(SUPPORTS_ONLY_HE_MULTI_BSSID),
+	FLAG(AMPDU_KEYBORDER_SUPPORT),
+	FLAG(SUPPORTS_TX_ENCAP_OFFLOAD),
+	FLAG(SUPPORTS_RX_DECAP_OFFLOAD),
+	FLAG(SUPPORTS_CONC_MON_RX_DECAP),
+	FLAG(DETECTS_COLOR_COLLISION),
+	FLAG(MLO_MCAST_MULTI_LINK_TX),
+#undef FLAG
 };
 
-static ssize_t uapsd_queues_read(struct file *file, char __user *user_buf,
-				 size_t count, loff_t *ppos)
+static ssize_t hwflags_read(struct file *file, char __user *user_buf,
+			    size_t count, loff_t *ppos)
 {
 	struct ieee80211_local *local = file->private_data;
-	return mac80211_format_buffer(user_buf, count, ppos, "0x%x\n",
-				      local->uapsd_queues);
-}
+	size_t bufsz = 30 * NUM_IEEE80211_HW_FLAGS;
+	char *buf = kzalloc(bufsz, GFP_KERNEL);
+	char *pos = buf, *end = buf + bufsz - 1;
+	ssize_t rv;
+	int i;
 
-static ssize_t uapsd_queues_write(struct file *file,
-				  const char __user *user_buf,
-				  size_t count, loff_t *ppos)
-{
-	struct ieee80211_local *local = file->private_data;
-	unsigned long val;
-	char buf[10];
-	size_t len;
-	int ret;
+	if (!buf)
+		return -ENOMEM;
 
-	len = min(count, sizeof(buf) - 1);
-	if (copy_from_user(buf, user_buf, len))
-		return -EFAULT;
-	buf[len] = '\0';
+	/* fail compilation if somebody adds or removes
+	 * a flag without updating the name array above
+	 */
+	BUILD_BUG_ON(ARRAY_SIZE(hw_flag_names) != NUM_IEEE80211_HW_FLAGS);
 
-	ret = strict_strtoul(buf, 0, &val);
-
-	if (ret)
-		return -EINVAL;
-
-	if (val & ~IEEE80211_WMM_IE_STA_QOSINFO_AC_MASK)
-		return -ERANGE;
-
-	local->uapsd_queues = val;
-
-	return count;
-}
-
-static const struct file_operations uapsd_queues_ops = {
-	.read = uapsd_queues_read,
-	.write = uapsd_queues_write,
-	.open = mac80211_open_file_generic,
-	.llseek = default_llseek,
-};
-
-static ssize_t uapsd_max_sp_len_read(struct file *file, char __user *user_buf,
-				     size_t count, loff_t *ppos)
-{
-	struct ieee80211_local *local = file->private_data;
-
-	return mac80211_format_buffer(user_buf, count, ppos, "0x%x\n",
-				      local->uapsd_max_sp_len);
-}
-
-static ssize_t uapsd_max_sp_len_write(struct file *file,
-				      const char __user *user_buf,
-				      size_t count, loff_t *ppos)
-{
-	struct ieee80211_local *local = file->private_data;
-	unsigned long val;
-	char buf[10];
-	size_t len;
-	int ret;
-
-	len = min(count, sizeof(buf) - 1);
-	if (copy_from_user(buf, user_buf, len))
-		return -EFAULT;
-	buf[len] = '\0';
-
-	ret = strict_strtoul(buf, 0, &val);
-
-	if (ret)
-		return -EINVAL;
-
-	if (val & ~IEEE80211_WMM_IE_STA_QOSINFO_SP_MASK)
-		return -ERANGE;
-
-	local->uapsd_max_sp_len = val;
-
-	return count;
-}
-
-static const struct file_operations uapsd_max_sp_len_ops = {
-	.read = uapsd_max_sp_len_read,
-	.write = uapsd_max_sp_len_write,
-	.open = mac80211_open_file_generic,
-	.llseek = default_llseek,
-};
-
-static ssize_t channel_type_read(struct file *file, char __user *user_buf,
-		       size_t count, loff_t *ppos)
-{
-	struct ieee80211_local *local = file->private_data;
-	const char *buf;
-
-	switch (local->hw.conf.channel_type) {
-	case NL80211_CHAN_NO_HT:
-		buf = "no ht\n";
-		break;
-	case NL80211_CHAN_HT20:
-		buf = "ht20\n";
-		break;
-	case NL80211_CHAN_HT40MINUS:
-		buf = "ht40-\n";
-		break;
-	case NL80211_CHAN_HT40PLUS:
-		buf = "ht40+\n";
-		break;
-	default:
-		buf = "???";
-		break;
+	for (i = 0; i < NUM_IEEE80211_HW_FLAGS; i++) {
+		if (test_bit(i, local->hw.flags))
+			pos += scnprintf(pos, end - pos, "%s\n",
+					 hw_flag_names[i]);
 	}
 
-	return simple_read_from_buffer(user_buf, count, ppos, buf, strlen(buf));
+	rv = simple_read_from_buffer(user_buf, count, ppos, buf, strlen(buf));
+	kfree(buf);
+	return rv;
 }
 
-static const struct file_operations channel_type_ops = {
-	.read = channel_type_read,
-	.open = mac80211_open_file_generic,
-	.llseek = default_llseek,
-};
+static ssize_t misc_read(struct file *file, char __user *user_buf,
+			 size_t count, loff_t *ppos)
+{
+	struct ieee80211_local *local = file->private_data;
+	/* Max len of each line is 16 characters, plus 9 for 'pending:\n' */
+	size_t bufsz = IEEE80211_MAX_QUEUES * 16 + 9;
+	char *buf;
+	char *pos, *end;
+	ssize_t rv;
+	int i;
+	int ln;
+
+	buf = kzalloc(bufsz, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+
+	pos = buf;
+	end = buf + bufsz - 1;
+
+	pos += scnprintf(pos, end - pos, "pending:\n");
+
+	for (i = 0; i < IEEE80211_MAX_QUEUES; i++) {
+		ln = skb_queue_len(&local->pending[i]);
+		pos += scnprintf(pos, end - pos, "[%i] %d\n",
+				 i, ln);
+	}
+
+	rv = simple_read_from_buffer(user_buf, count, ppos, buf, strlen(buf));
+	kfree(buf);
+	return rv;
+}
 
 static ssize_t queues_read(struct file *file, char __user *user_buf,
 			   size_t count, loff_t *ppos)
@@ -311,11 +578,9 @@ static ssize_t queues_read(struct file *file, char __user *user_buf,
 	return simple_read_from_buffer(user_buf, count, ppos, buf, res);
 }
 
-static const struct file_operations queues_ops = {
-	.read = queues_read,
-	.open = mac80211_open_file_generic,
-	.llseek = default_llseek,
-};
+DEBUGFS_READONLY_FILE_OPS(hwflags);
+DEBUGFS_READONLY_FILE_OPS(queues);
+DEBUGFS_READONLY_FILE_OPS(misc);
 
 /* statistics stuff */
 
@@ -357,12 +622,14 @@ static ssize_t stats_ ##name## _read(struct file *file,			\
 									\
 static const struct file_operations stats_ ##name## _ops = {		\
 	.read = stats_ ##name## _read,					\
-	.open = mac80211_open_file_generic,				\
+	.open = simple_open,						\
 	.llseek = generic_file_llseek,					\
 };
 
-#define DEBUGFS_STATS_ADD(name, field)					\
-	debugfs_create_u32(#name, 0400, statsd, (u32 *) &field);
+#ifdef CONFIG_MAC80211_DEBUG_COUNTERS
+#define DEBUGFS_STATS_ADD(name)					\
+	debugfs_create_u32(#name, 0400, statsd, &local->name);
+#endif
 #define DEBUGFS_DEVSTATS_ADD(name)					\
 	debugfs_create_file(#name, 0400, statsd, local, &stats_ ##name## _ops);
 
@@ -381,16 +648,30 @@ void debugfs_hw_add(struct ieee80211_local *local)
 
 	local->debugfs.keys = debugfs_create_dir("keys", phyd);
 
-	DEBUGFS_ADD(frequency);
 	DEBUGFS_ADD(total_ps_buffered);
 	DEBUGFS_ADD(wep_iv);
-	DEBUGFS_ADD(tsf);
+	DEBUGFS_ADD(rate_ctrl_alg);
 	DEBUGFS_ADD(queues);
+	DEBUGFS_ADD(misc);
+#ifdef CONFIG_PM
 	DEBUGFS_ADD_MODE(reset, 0200);
-	DEBUGFS_ADD(noack);
-	DEBUGFS_ADD(uapsd_queues);
-	DEBUGFS_ADD(uapsd_max_sp_len);
-	DEBUGFS_ADD(channel_type);
+#endif
+	DEBUGFS_ADD(hwflags);
+	DEBUGFS_ADD(user_power);
+	DEBUGFS_ADD(power);
+	DEBUGFS_ADD(hw_conf);
+	DEBUGFS_ADD_MODE(force_tx_status, 0600);
+	DEBUGFS_ADD_MODE(aql_enable, 0600);
+	DEBUGFS_ADD(aql_pending);
+
+	if (local->ops->wake_tx_queue)
+		DEBUGFS_ADD_MODE(aqm, 0600);
+
+	DEBUGFS_ADD_MODE(airtime_flags, 0600);
+
+	DEBUGFS_ADD(aql_txq_limit);
+	debugfs_create_u32("aql_threshold", 0600,
+			   phyd, &local->aql_threshold);
 
 	statsd = debugfs_create_dir("statistics", phyd);
 
@@ -398,57 +679,30 @@ void debugfs_hw_add(struct ieee80211_local *local)
 	if (!statsd)
 		return;
 
-	DEBUGFS_STATS_ADD(transmitted_fragment_count,
-		local->dot11TransmittedFragmentCount);
-	DEBUGFS_STATS_ADD(multicast_transmitted_frame_count,
-		local->dot11MulticastTransmittedFrameCount);
-	DEBUGFS_STATS_ADD(failed_count, local->dot11FailedCount);
-	DEBUGFS_STATS_ADD(retry_count, local->dot11RetryCount);
-	DEBUGFS_STATS_ADD(multiple_retry_count,
-		local->dot11MultipleRetryCount);
-	DEBUGFS_STATS_ADD(frame_duplicate_count,
-		local->dot11FrameDuplicateCount);
-	DEBUGFS_STATS_ADD(received_fragment_count,
-		local->dot11ReceivedFragmentCount);
-	DEBUGFS_STATS_ADD(multicast_received_frame_count,
-		local->dot11MulticastReceivedFrameCount);
-	DEBUGFS_STATS_ADD(transmitted_frame_count,
-		local->dot11TransmittedFrameCount);
 #ifdef CONFIG_MAC80211_DEBUG_COUNTERS
-	DEBUGFS_STATS_ADD(tx_handlers_drop, local->tx_handlers_drop);
-	DEBUGFS_STATS_ADD(tx_handlers_queued, local->tx_handlers_queued);
-	DEBUGFS_STATS_ADD(tx_handlers_drop_unencrypted,
-		local->tx_handlers_drop_unencrypted);
-	DEBUGFS_STATS_ADD(tx_handlers_drop_fragment,
-		local->tx_handlers_drop_fragment);
-	DEBUGFS_STATS_ADD(tx_handlers_drop_wep,
-		local->tx_handlers_drop_wep);
-	DEBUGFS_STATS_ADD(tx_handlers_drop_not_assoc,
-		local->tx_handlers_drop_not_assoc);
-	DEBUGFS_STATS_ADD(tx_handlers_drop_unauth_port,
-		local->tx_handlers_drop_unauth_port);
-	DEBUGFS_STATS_ADD(rx_handlers_drop, local->rx_handlers_drop);
-	DEBUGFS_STATS_ADD(rx_handlers_queued, local->rx_handlers_queued);
-	DEBUGFS_STATS_ADD(rx_handlers_drop_nullfunc,
-		local->rx_handlers_drop_nullfunc);
-	DEBUGFS_STATS_ADD(rx_handlers_drop_defrag,
-		local->rx_handlers_drop_defrag);
-	DEBUGFS_STATS_ADD(rx_handlers_drop_short,
-		local->rx_handlers_drop_short);
-	DEBUGFS_STATS_ADD(rx_handlers_drop_passive_scan,
-		local->rx_handlers_drop_passive_scan);
-	DEBUGFS_STATS_ADD(tx_expand_skb_head,
-		local->tx_expand_skb_head);
-	DEBUGFS_STATS_ADD(tx_expand_skb_head_cloned,
-		local->tx_expand_skb_head_cloned);
-	DEBUGFS_STATS_ADD(rx_expand_skb_head,
-		local->rx_expand_skb_head);
-	DEBUGFS_STATS_ADD(rx_expand_skb_head2,
-		local->rx_expand_skb_head2);
-	DEBUGFS_STATS_ADD(rx_handlers_fragments,
-		local->rx_handlers_fragments);
-	DEBUGFS_STATS_ADD(tx_status_drop,
-		local->tx_status_drop);
+	DEBUGFS_STATS_ADD(dot11TransmittedFragmentCount);
+	DEBUGFS_STATS_ADD(dot11MulticastTransmittedFrameCount);
+	DEBUGFS_STATS_ADD(dot11FailedCount);
+	DEBUGFS_STATS_ADD(dot11RetryCount);
+	DEBUGFS_STATS_ADD(dot11MultipleRetryCount);
+	DEBUGFS_STATS_ADD(dot11FrameDuplicateCount);
+	DEBUGFS_STATS_ADD(dot11ReceivedFragmentCount);
+	DEBUGFS_STATS_ADD(dot11MulticastReceivedFrameCount);
+	DEBUGFS_STATS_ADD(dot11TransmittedFrameCount);
+	DEBUGFS_STATS_ADD(tx_handlers_drop);
+	DEBUGFS_STATS_ADD(tx_handlers_queued);
+	DEBUGFS_STATS_ADD(tx_handlers_drop_wep);
+	DEBUGFS_STATS_ADD(tx_handlers_drop_not_assoc);
+	DEBUGFS_STATS_ADD(tx_handlers_drop_unauth_port);
+	DEBUGFS_STATS_ADD(rx_handlers_drop);
+	DEBUGFS_STATS_ADD(rx_handlers_queued);
+	DEBUGFS_STATS_ADD(rx_handlers_drop_nullfunc);
+	DEBUGFS_STATS_ADD(rx_handlers_drop_defrag);
+	DEBUGFS_STATS_ADD(tx_expand_skb_head);
+	DEBUGFS_STATS_ADD(tx_expand_skb_head_cloned);
+	DEBUGFS_STATS_ADD(rx_expand_skb_head_defrag);
+	DEBUGFS_STATS_ADD(rx_handlers_fragments);
+	DEBUGFS_STATS_ADD(tx_status_drop);
 #endif
 	DEBUGFS_DEVSTATS_ADD(dot11ACKFailureCount);
 	DEBUGFS_DEVSTATS_ADD(dot11RTSFailureCount);

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * linux/arch/arm/mach-pxa/cm-x300.c
  *
@@ -7,11 +8,8 @@
  *
  * Mike Rapoport <mike@compulab.co.il>
  * Igor Grinberg <grinberg@compulab.co.il>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
+#define pr_fmt(fmt) "%s: " fmt, __func__
 
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -22,13 +20,16 @@
 #include <linux/clk.h>
 
 #include <linux/gpio.h>
+#include <linux/gpio/machine.h>
 #include <linux/dm9000.h>
 #include <linux/leds.h>
-#include <linux/rtc-v3020.h>
+#include <linux/platform_data/rtc-v3020.h>
+#include <linux/pwm.h>
 #include <linux/pwm_backlight.h>
 
 #include <linux/i2c.h>
-#include <linux/i2c/pca953x.h>
+#include <linux/platform_data/pca953x.h>
+#include <linux/platform_data/i2c-pxa.h>
 
 #include <linux/mfd/da903x.h>
 #include <linux/regulator/machine.h>
@@ -39,19 +40,21 @@
 #include <linux/spi/spi_gpio.h>
 #include <linux/spi/tdo24m.h>
 
+#include <linux/soc/pxa/cpu.h>
+
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
 #include <asm/setup.h>
+#include <asm/system_info.h>
 
-#include <mach/pxa300.h>
-#include <mach/pxa27x-udc.h>
-#include <mach/pxafb.h>
-#include <mach/mmc.h>
-#include <mach/ohci.h>
-#include <plat/i2c.h>
-#include <plat/pxa3xx_nand.h>
-#include <mach/audio.h>
-#include <mach/pxa3xx-u2d.h>
+#include "pxa300.h"
+#include "pxa27x-udc.h"
+#include <linux/platform_data/video-pxafb.h>
+#include <linux/platform_data/mmc-pxamci.h>
+#include <linux/platform_data/usb-ohci-pxa27x.h>
+#include <linux/platform_data/mtd-nand-pxa3xx.h>
+#include <linux/platform_data/asoc-pxa.h>
+#include <linux/platform_data/usb-pxa3xx-ulpi.h>
 
 #include <asm/mach/map.h>
 
@@ -63,7 +66,7 @@
 #define GPIO82_MMC_IRQ		(82)
 #define GPIO85_MMC_WP		(85)
 
-#define	CM_X300_MMC_IRQ		IRQ_GPIO(GPIO82_MMC_IRQ)
+#define	CM_X300_MMC_IRQ		PXA_GPIO_TO_IRQ(GPIO82_MMC_IRQ)
 
 #define GPIO95_RTC_CS		(95)
 #define GPIO96_RTC_WR		(96)
@@ -161,10 +164,10 @@ static mfp_cfg_t cm_x3xx_mfp_cfg[] __initdata = {
 	GPIO99_GPIO,			/* Ethernet IRQ */
 
 	/* RTC GPIOs */
-	GPIO95_GPIO,			/* RTC CS */
-	GPIO96_GPIO,			/* RTC WR */
-	GPIO97_GPIO,			/* RTC RD */
-	GPIO98_GPIO,			/* RTC IO */
+	GPIO95_GPIO | MFP_LPM_DRIVE_HIGH,	/* RTC CS */
+	GPIO96_GPIO | MFP_LPM_DRIVE_HIGH,	/* RTC WR */
+	GPIO97_GPIO | MFP_LPM_DRIVE_HIGH,	/* RTC RD */
+	GPIO98_GPIO,				/* RTC IO */
 
 	/* Standard I2C */
 	GPIO21_I2C_SCL,
@@ -228,8 +231,8 @@ static struct resource dm9000_resources[] = {
 		.flags	= IORESOURCE_MEM,
 	},
 	[2] = {
-		.start	= IRQ_GPIO(mfp_to_gpio(MFP_PIN_GPIO99)),
-		.end	= IRQ_GPIO(mfp_to_gpio(MFP_PIN_GPIO99)),
+		.start	= PXA_GPIO_TO_IRQ(mfp_to_gpio(MFP_PIN_GPIO99)),
+		.end	= PXA_GPIO_TO_IRQ(mfp_to_gpio(MFP_PIN_GPIO99)),
 		.flags	= IORESOURCE_IRQ | IORESOURCE_IRQ_HIGHEDGE,
 	}
 };
@@ -296,18 +299,21 @@ static struct pxafb_mach_info cm_x300_lcd = {
 
 static void __init cm_x300_init_lcd(void)
 {
-	set_pxa_fb_info(&cm_x300_lcd);
+	pxa_set_fb_info(NULL, &cm_x300_lcd);
 }
 #else
 static inline void cm_x300_init_lcd(void) {}
 #endif
 
 #if defined(CONFIG_BACKLIGHT_PWM) || defined(CONFIG_BACKLIGHT_PWM_MODULE)
+static struct pwm_lookup cm_x300_pwm_lookup[] = {
+	PWM_LOOKUP("pxa27x-pwm.0", 1, "pwm-backlight.0", NULL, 10000,
+		   PWM_POLARITY_NORMAL),
+};
+
 static struct platform_pwm_backlight_data cm_x300_backlight_data = {
-	.pwm_id		= 2,
 	.max_brightness	= 100,
 	.dft_brightness	= 100,
-	.pwm_period_ns	= 10000,
 };
 
 static struct platform_device cm_x300_backlight_device = {
@@ -320,6 +326,7 @@ static struct platform_device cm_x300_backlight_device = {
 
 static void cm_x300_init_bl(void)
 {
+	pwm_add_table(cm_x300_pwm_lookup, ARRAY_SIZE(cm_x300_pwm_lookup));
 	platform_device_register(&cm_x300_backlight_device);
 }
 #else
@@ -335,9 +342,6 @@ static inline void cm_x300_init_bl(void) {}
 #define LCD_SPI_BUS_NUM	(1)
 
 static struct spi_gpio_platform_data cm_x300_spi_gpio_pdata = {
-	.sck		= GPIO_LCD_SCL,
-	.mosi		= GPIO_LCD_DIN,
-	.miso		= GPIO_LCD_DOUT,
 	.num_chipselect	= 1,
 };
 
@@ -346,6 +350,21 @@ static struct platform_device cm_x300_spi_gpio = {
 	.id		= LCD_SPI_BUS_NUM,
 	.dev		= {
 		.platform_data	= &cm_x300_spi_gpio_pdata,
+	},
+};
+
+static struct gpiod_lookup_table cm_x300_spi_gpiod_table = {
+	.dev_id         = "spi_gpio",
+	.table          = {
+		GPIO_LOOKUP("pca9555.1", GPIO_LCD_SCL - GPIO_LCD_BASE,
+			    "sck", GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP("pca9555.1", GPIO_LCD_DIN - GPIO_LCD_BASE,
+			    "mosi", GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP("pca9555.1", GPIO_LCD_DOUT - GPIO_LCD_BASE,
+			    "miso", GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP("pca9555.1", GPIO_LCD_CS - GPIO_LCD_BASE,
+			    "cs", GPIO_ACTIVE_HIGH),
+		{ },
 	},
 };
 
@@ -359,7 +378,6 @@ static struct spi_board_info cm_x300_spi_devices[] __initdata = {
 		.max_speed_hz		= 1000000,
 		.bus_num		= LCD_SPI_BUS_NUM,
 		.chip_select		= 0,
-		.controller_data	= (void *) GPIO_LCD_CS,
 		.platform_data		= &cm_x300_tdo24m_pdata,
 	},
 };
@@ -368,6 +386,7 @@ static void __init cm_x300_init_spi(void)
 {
 	spi_register_board_info(cm_x300_spi_devices,
 				ARRAY_SIZE(cm_x300_spi_devices));
+	gpiod_add_lookup_table(&cm_x300_spi_gpiod_table);
 	platform_device_register(&cm_x300_spi_gpio);
 }
 #else
@@ -383,7 +402,7 @@ static void __init cm_x300_init_ac97(void)
 static inline void cm_x300_init_ac97(void) {}
 #endif
 
-#if defined(CONFIG_MTD_NAND_PXA3xx) || defined(CONFIG_MTD_NAND_PXA3xx_MODULE)
+#if IS_ENABLED(CONFIG_MTD_NAND_MARVELL)
 static struct mtd_partition cm_x300_nand_partitions[] = {
 	[0] = {
 		.name        = "OBM",
@@ -421,7 +440,6 @@ static struct mtd_partition cm_x300_nand_partitions[] = {
 };
 
 static struct pxa3xx_nand_platform_data cm_x300_nand_info = {
-	.enable_arbiter	= 1,
 	.keep_config	= 1,
 	.parts		= cm_x300_nand_partitions,
 	.nr_parts	= ARRAY_SIZE(cm_x300_nand_partitions),
@@ -439,9 +457,17 @@ static inline void cm_x300_init_nand(void) {}
 static struct pxamci_platform_data cm_x300_mci_platform_data = {
 	.detect_delay_ms	= 200,
 	.ocr_mask		= MMC_VDD_32_33|MMC_VDD_33_34,
-	.gpio_card_detect	= GPIO82_MMC_IRQ,
-	.gpio_card_ro		= GPIO85_MMC_WP,
-	.gpio_power		= -1,
+};
+
+static struct gpiod_lookup_table cm_x300_mci_gpio_table = {
+	.dev_id = "pxa2xx-mci.0",
+	.table = {
+		/* Card detect on GPIO 82 */
+		GPIO_LOOKUP("gpio-pxa", GPIO82_MMC_IRQ, "cd", GPIO_ACTIVE_LOW),
+		/* Write protect on GPIO 85 */
+		GPIO_LOOKUP("gpio-pxa", GPIO85_MMC_WP, "wp", GPIO_ACTIVE_LOW),
+		{ },
+	},
 };
 
 /* The second MMC slot of CM-X300 is hardwired to Libertas card and has
@@ -462,13 +488,11 @@ static struct pxamci_platform_data cm_x300_mci2_platform_data = {
 	.ocr_mask		= MMC_VDD_32_33|MMC_VDD_33_34,
 	.init 			= cm_x300_mci2_init,
 	.exit			= cm_x300_mci2_exit,
-	.gpio_card_detect	= -1,
-	.gpio_card_ro		= -1,
-	.gpio_power		= -1,
 };
 
 static void __init cm_x300_init_mmc(void)
 {
+	gpiod_add_lookup_table(&cm_x300_mci_gpio_table);
 	pxa_set_mci_info(&cm_x300_mci_platform_data);
 	pxa3xx_set_mci2_info(&cm_x300_mci2_platform_data);
 }
@@ -484,14 +508,13 @@ static int cm_x300_ulpi_phy_reset(void)
 	int err;
 
 	/* reset the PHY */
-	err = gpio_request(GPIO_ULPI_PHY_RST, "ulpi reset");
+	err = gpio_request_one(GPIO_ULPI_PHY_RST, GPIOF_OUT_INIT_LOW,
+			       "ulpi reset");
 	if (err) {
-		pr_err("%s: failed to request ULPI reset GPIO: %d\n",
-		       __func__, err);
+		pr_err("failed to request ULPI reset GPIO: %d\n", err);
 		return err;
 	}
 
-	gpio_direction_output(GPIO_ULPI_PHY_RST, 0);
 	msleep(10);
 	gpio_set_value(GPIO_ULPI_PHY_RST, 1);
 	msleep(10);
@@ -501,7 +524,7 @@ static int cm_x300_ulpi_phy_reset(void)
 	return 0;
 }
 
-static inline int cm_x300_u2d_init(struct device *dev)
+static int cm_x300_u2d_init(struct device *dev)
 {
 	int err = 0;
 
@@ -510,11 +533,10 @@ static inline int cm_x300_u2d_init(struct device *dev)
 		pout_clk = clk_get(NULL, "CLK_POUT");
 		if (IS_ERR(pout_clk)) {
 			err = PTR_ERR(pout_clk);
-			pr_err("%s: failed to get CLK_POUT: %d\n",
-			       __func__, err);
+			pr_err("failed to get CLK_POUT: %d\n", err);
 			return err;
 		}
-		clk_enable(pout_clk);
+		clk_prepare_enable(pout_clk);
 
 		err = cm_x300_ulpi_phy_reset();
 		if (err) {
@@ -529,7 +551,7 @@ static inline int cm_x300_u2d_init(struct device *dev)
 static void cm_x300_u2d_exit(struct device *dev)
 {
 	if (cpu_is_pxa310()) {
-		clk_disable(pout_clk);
+		clk_disable_unprepare(pout_clk);
 		clk_put(pout_clk);
 	}
 }
@@ -540,7 +562,7 @@ static struct pxa3xx_u2d_platform_data cm_x300_u2d_platform_data = {
 	.exit		= cm_x300_u2d_exit,
 };
 
-static void cm_x300_init_u2d(void)
+static void __init cm_x300_init_u2d(void)
 {
 	pxa3xx_set_u2d_info(&cm_x300_u2d_platform_data);
 }
@@ -712,10 +734,7 @@ struct da9030_battery_info cm_x300_battery_info = {
 };
 
 static struct regulator_consumer_supply buck2_consumers[] = {
-	{
-		.dev = NULL,
-		.supply = "vcc_core",
-	},
+	REGULATOR_SUPPLY("vcc_core", NULL),
 };
 
 static struct regulator_init_data buck2_data = {
@@ -765,42 +784,37 @@ static void __init cm_x300_init_da9030(void)
 {
 	pxa3xx_set_i2c_power_info(&cm_x300_pwr_i2c_info);
 	i2c_register_board_info(1, &cm_x300_pmic_info, 1);
-	set_irq_wake(IRQ_WAKEUP0, 1);
+	irq_set_irq_wake(IRQ_WAKEUP0, 1);
 }
+
+/* wi2wi gpio setting for system_rev >= 130 */
+static struct gpio cm_x300_wi2wi_gpios[] __initdata = {
+	{ 71, GPIOF_OUT_INIT_HIGH, "wlan en" },
+	{ 70, GPIOF_OUT_INIT_HIGH, "bt reset" },
+};
 
 static void __init cm_x300_init_wi2wi(void)
 {
-	int bt_reset, wlan_en;
 	int err;
 
 	if (system_rev < 130) {
-		wlan_en = 77;
-		bt_reset = 78;
-	} else {
-		wlan_en = 71;
-		bt_reset = 70;
+		cm_x300_wi2wi_gpios[0].gpio = 77;	/* wlan en */
+		cm_x300_wi2wi_gpios[1].gpio = 78;	/* bt reset */
 	}
 
 	/* Libertas and CSR reset */
-	err = gpio_request(wlan_en, "wlan en");
+	err = gpio_request_array(ARRAY_AND_SIZE(cm_x300_wi2wi_gpios));
 	if (err) {
-		pr_err("CM-X300: failed to request wlan en gpio: %d\n", err);
-	} else {
-		gpio_direction_output(wlan_en, 1);
-		gpio_free(wlan_en);
+		pr_err("failed to request wifi/bt gpios: %d\n", err);
+		return;
 	}
 
-	err = gpio_request(bt_reset, "bt reset");
-	if (err) {
-		pr_err("CM-X300: failed to request bt reset gpio: %d\n", err);
-	} else {
-		gpio_direction_output(bt_reset, 1);
-		udelay(10);
-		gpio_set_value(bt_reset, 0);
-		udelay(10);
-		gpio_set_value(bt_reset, 1);
-		gpio_free(bt_reset);
-	}
+	udelay(10);
+	gpio_set_value(cm_x300_wi2wi_gpios[1].gpio, 0);
+	udelay(10);
+	gpio_set_value(cm_x300_wi2wi_gpios[1].gpio, 1);
+
+	gpio_free_array(ARRAY_AND_SIZE(cm_x300_wi2wi_gpios));
 }
 
 /* MFP */
@@ -841,10 +855,11 @@ static void __init cm_x300_init(void)
 	cm_x300_init_ac97();
 	cm_x300_init_wi2wi();
 	cm_x300_init_bl();
+
+	regulator_has_full_constraints();
 }
 
-static void __init cm_x300_fixup(struct machine_desc *mdesc, struct tag *tags,
-				 char **cmdline, struct meminfo *mi)
+static void __init cm_x300_fixup(struct tag *tags, char **cmdline)
 {
 	/* Make sure that mi->bank[0].start = PHYS_ADDR */
 	for (; tags->hdr.size; tags = tag_next(tags))
@@ -856,10 +871,13 @@ static void __init cm_x300_fixup(struct machine_desc *mdesc, struct tag *tags,
 }
 
 MACHINE_START(CM_X300, "CM-X300 module")
-	.boot_params	= 0xa0000100,
+	.atag_offset	= 0x100,
 	.map_io		= pxa3xx_map_io,
+	.nr_irqs	= PXA_NR_IRQS,
 	.init_irq	= pxa3xx_init_irq,
-	.timer		= &pxa_timer,
+	.handle_irq	= pxa3xx_handle_irq,
+	.init_time	= pxa_timer_init,
 	.init_machine	= cm_x300_init,
 	.fixup		= cm_x300_fixup,
+	.restart	= pxa_restart,
 MACHINE_END

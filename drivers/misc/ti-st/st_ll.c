@@ -1,27 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  Shared Transport driver
  *	HCI-LL module responsible for TI proprietary HCI_LL protocol
  *  Copyright (C) 2009-2010 Texas Instruments
  *  Author: Pavan Savoy <pavan_savoy@ti.com>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License version 2 as
- *  published by the Free Software Foundation.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
- *
  */
 
 #define pr_fmt(fmt) "(stll) :" fmt
 #include <linux/skbuff.h>
 #include <linux/module.h>
+#include <linux/platform_device.h>
 #include <linux/ti_wilink_st.h>
 
 /**********************************************************************/
@@ -30,13 +18,16 @@ static void send_ll_cmd(struct st_data_s *st_data,
 	unsigned char cmd)
 {
 
-	pr_info("%s: writing %x", __func__, cmd);
+	pr_debug("%s: writing %x", __func__, cmd);
 	st_int_write(st_data, &cmd, 1);
 	return;
 }
 
 static void ll_device_want_to_sleep(struct st_data_s *st_data)
 {
+	struct kim_data_s	*kim_data;
+	struct ti_st_plat_data	*pdata;
+
 	pr_debug("%s", __func__);
 	/* sanity check */
 	if (st_data->ll_state != ST_LL_AWAKE)
@@ -46,10 +37,19 @@ static void ll_device_want_to_sleep(struct st_data_s *st_data)
 	send_ll_cmd(st_data, LL_SLEEP_ACK);
 	/* update state */
 	st_data->ll_state = ST_LL_ASLEEP;
+
+	/* communicate to platform about chip asleep */
+	kim_data = st_data->kim_data;
+	pdata = kim_data->kim_pdev->dev.platform_data;
+	if (pdata->chip_asleep)
+		pdata->chip_asleep(NULL);
 }
 
 static void ll_device_want_to_wakeup(struct st_data_s *st_data)
 {
+	struct kim_data_s	*kim_data;
+	struct ti_st_plat_data	*pdata;
+
 	/* diff actions in diff states */
 	switch (st_data->ll_state) {
 	case ST_LL_ASLEEP:
@@ -70,6 +70,12 @@ static void ll_device_want_to_wakeup(struct st_data_s *st_data)
 	}
 	/* update state */
 	st_data->ll_state = ST_LL_AWAKE;
+
+	/* communicate to platform about chip wakeup */
+	kim_data = st_data->kim_data;
+	pdata = kim_data->kim_pdev->dev.platform_data;
+	if (pdata->chip_awake)
+		pdata->chip_awake(NULL);
 }
 
 /**********************************************************************/
@@ -114,23 +120,23 @@ unsigned long st_ll_sleep_state(struct st_data_s *st_data,
 {
 	switch (cmd) {
 	case LL_SLEEP_IND:	/* sleep ind */
-		pr_info("sleep indication recvd");
+		pr_debug("sleep indication recvd");
 		ll_device_want_to_sleep(st_data);
 		break;
 	case LL_SLEEP_ACK:	/* sleep ack */
 		pr_err("sleep ack rcvd: host shouldn't");
 		break;
 	case LL_WAKE_UP_IND:	/* wake ind */
-		pr_info("wake indication recvd");
+		pr_debug("wake indication recvd");
 		ll_device_want_to_wakeup(st_data);
 		break;
 	case LL_WAKE_UP_ACK:	/* wake ack */
-		pr_info("wake ack rcvd");
+		pr_debug("wake ack rcvd");
 		st_data->ll_state = ST_LL_AWAKE;
 		break;
 	default:
 		pr_err(" unknown input/state ");
-		return -1;
+		return -EINVAL;
 	}
 	return 0;
 }

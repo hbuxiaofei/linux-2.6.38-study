@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 2009  Matt Fleming
  *
@@ -13,7 +14,7 @@
 #include <linux/spinlock.h>
 #include <linux/module.h>
 #include <asm/unwinder.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 
 /*
  * This is the most basic stack unwinder an architecture can

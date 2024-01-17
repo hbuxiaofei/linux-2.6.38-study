@@ -1,10 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (c) 2008 Intel Corporation
  * Author: Matthew Wilcox <willy@linux.intel.com>
  *
- * Distributed under the terms of the GNU GPL, version 2
- *
- * Please see kernel/semaphore.c for documentation of these functions
+ * Please see kernel/locking/semaphore.c for documentation of these functions
  */
 #ifndef __LINUX_SEMAPHORE_H
 #define __LINUX_SEMAPHORE_H
@@ -14,14 +13,14 @@
 
 /* Please don't access any members of this structure directly */
 struct semaphore {
-	spinlock_t		lock;
+	raw_spinlock_t		lock;
 	unsigned int		count;
 	struct list_head	wait_list;
 };
 
 #define __SEMAPHORE_INITIALIZER(name, n)				\
 {									\
-	.lock		= __SPIN_LOCK_UNLOCKED((name).lock),		\
+	.lock		= __RAW_SPIN_LOCK_UNLOCKED((name).lock),	\
 	.count		= n,						\
 	.wait_list	= LIST_HEAD_INIT((name).wait_list),		\
 }

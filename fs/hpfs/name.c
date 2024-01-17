@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  linux/fs/hpfs/name.c
  *
@@ -7,39 +8,6 @@
  */
 
 #include "hpfs_fn.h"
-
-static const char *text_postfix[]={
-".ASM", ".BAS", ".BAT", ".C", ".CC", ".CFG", ".CMD", ".CON", ".CPP", ".DEF",
-".DOC", ".DPR", ".ERX", ".H", ".HPP", ".HTM", ".HTML", ".JAVA", ".LOG", ".PAS",
-".RC", ".TEX", ".TXT", ".Y", ""};
-
-static const char *text_prefix[]={
-"AUTOEXEC.", "CHANGES", "COPYING", "CONFIG.", "CREDITS", "FAQ", "FILE_ID.DIZ",
-"MAKEFILE", "READ.ME", "README", "TERMCAP", ""};
-
-void hpfs_decide_conv(struct inode *inode, const unsigned char *name, unsigned len)
-{
-	struct hpfs_inode_info *hpfs_inode = hpfs_i(inode);
-	int i;
-	if (hpfs_inode->i_conv != CONV_AUTO) return;
-	for (i = 0; *text_postfix[i]; i++) {
-		int l = strlen(text_postfix[i]);
-		if (l <= len)
-			if (!hpfs_compare_names(inode->i_sb, text_postfix[i], l, name + len - l, l, 0))
-				goto text;
-	}
-	for (i = 0; *text_prefix[i]; i++) {
-		int l = strlen(text_prefix[i]);
-		if (l <= len)
-			if (!hpfs_compare_names(inode->i_sb, text_prefix[i], l, name, l, 0))
-				goto text;
-	}
-	hpfs_inode->i_conv = CONV_BINARY;
-	return;
-	text:
-	hpfs_inode->i_conv = CONV_TEXT;
-	return;
-}
 
 static inline int not_allowed_char(unsigned char c)
 {
@@ -89,14 +57,15 @@ unsigned char *hpfs_translate_name(struct super_block *s, unsigned char *from,
 	unsigned char *to;
 	int i;
 	if (hpfs_sb(s)->sb_chk >= 2) if (hpfs_is_name_long(from, len) != lng) {
-		printk("HPFS: Long name flag mismatch - name ");
-		for (i=0; i<len; i++) printk("%c", from[i]);
-		printk(" misidentified as %s.\n", lng ? "short" : "long");
-		printk("HPFS: It's nothing serious. It could happen because of bug in OS/2.\nHPFS: Set checks=normal to disable this message.\n");
+		pr_err("Long name flag mismatch - name ");
+		for (i = 0; i < len; i++)
+			pr_cont("%c", from[i]);
+		pr_cont(" misidentified as %s.\n", lng ? "short" : "long");
+		pr_err("It's nothing serious. It could happen because of bug in OS/2.\nSet checks=normal to disable this message.\n");
 	}
 	if (!lc) return from;
 	if (!(to = kmalloc(len, GFP_KERNEL))) {
-		printk("HPFS: can't allocate memory for name conversion buffer\n");
+		pr_err("can't allocate memory for name conversion buffer\n");
 		return from;
 	}
 	for (i = 0; i < len; i++) to[i] = locase(hpfs_sb(s)->sb_cp_table,from[i]);

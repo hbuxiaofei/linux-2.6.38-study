@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * linux/arch/sh/boards/se/7206/irq.c
  *
@@ -92,9 +93,8 @@ static void eoi_se7206_irq(struct irq_data *data)
 {
 	unsigned short sts0,sts1;
 	unsigned int irq = data->irq;
-	struct irq_desc *desc = irq_to_desc(irq);
 
-	if (!(desc->status & (IRQ_DISABLED|IRQ_INPROGRESS)))
+	if (!irqd_irq_disabled(data) && !irqd_irq_inprogress(data))
 		enable_se7206_irq(data);
 	/* FPGA isr clear */
 	sts0 = __raw_readw(INTSTS0);
@@ -126,7 +126,7 @@ static struct irq_chip se7206_irq_chip __read_mostly = {
 static void make_se7206_irq(unsigned int irq)
 {
 	disable_irq_nosync(irq);
-	set_irq_chip_and_handler_name(irq, &se7206_irq_chip,
+	irq_set_chip_and_handler_name(irq, &se7206_irq_chip,
 				      handle_level_irq, "level");
 	disable_se7206_irq(irq_get_irq_data(irq));
 }

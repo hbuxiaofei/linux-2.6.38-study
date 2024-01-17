@@ -1,18 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * arch/sh/boards/superh/microdev/irq.c
  *
  * Copyright (C) 2003 Sean McGoogan (Sean.McGoogan@superh.com)
  *
  * SuperH SH4-202 MicroDev board support.
- *
- * May be copied or modified under the terms of the GNU General Public
- * License.  See linux/COPYING for more information.
  */
 
 #include <linux/init.h>
 #include <linux/irq.h>
 #include <linux/interrupt.h>
-#include <asm/system.h>
 #include <asm/io.h>
 #include <mach/microdev.h>
 
@@ -117,7 +114,7 @@ static struct irq_chip microdev_irq_type = {
 static void __init make_microdev_irq(unsigned int irq)
 {
 	disable_irq_nosync(irq);
-	set_irq_chip_and_handler(irq, &microdev_irq_type, handle_level_irq);
+	irq_set_chip_and_handler(irq, &microdev_irq_type, handle_level_irq);
 	disable_microdev_irq(irq_get_irq_data(irq));
 }
 

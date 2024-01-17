@@ -1,24 +1,12 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  *  Copyright 2007 Sony Corporation
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; version 2 of the License.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program.
- *  If not, see <http://www.gnu.org/licenses/>.
  */
 
 #ifndef _ASM_POWERPC_EMULATED_OPS_H
 #define _ASM_POWERPC_EMULATED_OPS_H
 
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 #include <linux/perf_event.h>
 
 
@@ -43,14 +31,22 @@ extern struct ppc_emulated {
 	struct ppc_emulated_entry popcntb;
 	struct ppc_emulated_entry spe;
 	struct ppc_emulated_entry string;
+	struct ppc_emulated_entry sync;
 	struct ppc_emulated_entry unaligned;
 #ifdef CONFIG_MATH_EMULATION
 	struct ppc_emulated_entry math;
-#elif defined(CONFIG_8XX_MINIMAL_FPEMU)
-	struct ppc_emulated_entry 8xx;
 #endif
 #ifdef CONFIG_VSX
 	struct ppc_emulated_entry vsx;
+#endif
+#ifdef CONFIG_PPC64
+	struct ppc_emulated_entry mfdscr;
+	struct ppc_emulated_entry mtdscr;
+	struct ppc_emulated_entry lq_stq;
+	struct ppc_emulated_entry lxvw4x;
+	struct ppc_emulated_entry lxvh8x;
+	struct ppc_emulated_entry lxvd2x;
+	struct ppc_emulated_entry lxvb16x;
 #endif
 } ppc_emulated;
 
@@ -74,14 +70,14 @@ extern void ppc_warn_emulated_print(const char *type);
 #define PPC_WARN_EMULATED(type, regs)					\
 	do {								\
 		perf_sw_event(PERF_COUNT_SW_EMULATION_FAULTS,		\
-			1, 0, regs, 0);					\
+			1, regs, 0);					\
 		__PPC_WARN_EMULATED(type);				\
 	} while (0)
 
 #define PPC_WARN_ALIGNMENT(type, regs)					\
 	do {								\
 		perf_sw_event(PERF_COUNT_SW_ALIGNMENT_FAULTS,		\
-			1, 0, regs, regs->dar);				\
+			1, regs, regs->dar);				\
 		__PPC_WARN_EMULATED(type);				\
 	} while (0)
 

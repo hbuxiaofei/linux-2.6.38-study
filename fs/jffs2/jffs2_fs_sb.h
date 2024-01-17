@@ -29,6 +29,19 @@
 
 struct jffs2_inodirty;
 
+struct jffs2_mount_opts {
+	bool override_compr;
+	unsigned int compr;
+
+	/* The size of the reserved pool. The reserved pool is the JFFS2 flash
+	 * space which may only be used by root cannot be used by the other
+	 * users. This is implemented simply by means of not allowing the
+	 * latter users to write to the file system if the amount if the
+	 * available space is less then 'rp_size'. */
+	bool set_rp_size;
+	unsigned int rp_size;
+};
+
 /* A struct for the overall file system control.  Pointers to
    jffs2_sb_info structs are named `c' in the source code.
    Nee jffs_control
@@ -37,7 +50,7 @@ struct jffs2_sb_info {
 	struct mtd_info *mtd;
 
 	uint32_t highest_ino;
-	uint32_t checked_ino;
+	uint32_t check_ino;		/* *NEXT* inode to be checked */
 
 	unsigned int flags;
 
@@ -121,11 +134,14 @@ struct jffs2_sb_info {
 	struct jffs2_inodirty *wbuf_inodes;
 	struct rw_semaphore wbuf_sem;	/* Protects the write buffer */
 
+	struct delayed_work wbuf_dwork; /* write-buffer write-out work */
+
 	unsigned char *oobbuf;
 	int oobavail; /* How many bytes are available for JFFS2 in OOB */
 #endif
 
 	struct jffs2_summary *summary;		/* Summary information */
+	struct jffs2_mount_opts mount_opts;
 
 #ifdef CONFIG_JFFS2_FS_XATTR
 #define XATTRINDEX_HASHSIZE	(57)

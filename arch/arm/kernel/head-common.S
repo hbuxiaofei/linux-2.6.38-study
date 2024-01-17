@@ -1,19 +1,22 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  *  linux/arch/arm/kernel/head-common.S
  *
  *  Copyright (C) 1994-2002 Russell King
  *  Copyright (c) 2003 ARM Limited
  *  All Rights Reserved
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
  */
+#include <asm/assembler.h>
 
 #define ATAG_CORE 0x54410001
 #define ATAG_CORE_SIZE ((2*4 + 3*4) >> 2)
 #define ATAG_CORE_SIZE_EMPTY ((2*4) >> 2)
+
+#ifdef CONFIG_CPU_BIG_ENDIAN
+#define OF_DT_MAGIC 0xd00dfeed
+#else
+#define OF_DT_MAGIC 0xedfe0dd0 /* 0xd00dfeed in big-endian */
+#endif
 
 /*
  * Exception handling.  Something went wrong and we can't proceed.  We
@@ -25,102 +28,29 @@
  * machine ID for example).
  */
 	__HEAD
-__error_a:
-#ifdef CONFIG_DEBUG_LL
-	mov	r4, r1				@ preserve machine ID
-	adr	r0, str_a1
-	bl	printascii
-	mov	r0, r4
-	bl	printhex8
-	adr	r0, str_a2
-	bl	printascii
-	adr	r3, __lookup_machine_type_data
-	ldmia	r3, {r4, r5, r6}		@ get machine desc list
-	sub	r4, r3, r4			@ get offset between virt&phys
-	add	r5, r5, r4			@ convert virt addresses to
-	add	r6, r6, r4			@ physical address space
-1:	ldr	r0, [r5, #MACHINFO_TYPE]	@ get machine type
-	bl	printhex8
-	mov	r0, #'\t'
-	bl	printch
-	ldr     r0, [r5, #MACHINFO_NAME]	@ get machine name
-	add	r0, r0, r4
-	bl	printascii
-	mov	r0, #'\n'
-	bl	printch
-	add	r5, r5, #SIZEOF_MACHINE_DESC	@ next machine_desc
-	cmp	r5, r6
-	blo	1b
-	adr	r0, str_a3
-	bl	printascii
-	b	__error
-ENDPROC(__error_a)
-
-str_a1:	.asciz	"\nError: unrecognized/unsupported machine ID (r1 = 0x"
-str_a2:	.asciz	").\n\nAvailable machine support:\n\nID (hex)\tNAME\n"
-str_a3:	.asciz	"\nPlease check your kernel config and/or bootloader.\n"
-	.align
-#else
-	b	__error
-#endif
-
-/*
- * Lookup machine architecture in the linker-build list of architectures.
- * Note that we can't use the absolute addresses for the __arch_info
- * lists since we aren't running with the MMU on (and therefore, we are
- * not in the correct address space).  We have to calculate the offset.
- *
- *  r1 = machine architecture number
- * Returns:
- *  r3, r4, r6 corrupted
- *  r5 = mach_info pointer in physical address space
- */
-__lookup_machine_type:
-	adr	r3, __lookup_machine_type_data
-	ldmia	r3, {r4, r5, r6}
-	sub	r3, r3, r4			@ get offset between virt&phys
-	add	r5, r5, r3			@ convert virt addresses to
-	add	r6, r6, r3			@ physical address space
-1:	ldr	r3, [r5, #MACHINFO_TYPE]	@ get machine type
-	teq	r3, r1				@ matches loader number?
-	beq	2f				@ found
-	add	r5, r5, #SIZEOF_MACHINE_DESC	@ next machine_desc
-	cmp	r5, r6
-	blo	1b
-	mov	r5, #0				@ unknown machine
-2:	mov	pc, lr
-ENDPROC(__lookup_machine_type)
-
-/*
- * Look in arch/arm/kernel/arch.[ch] for information about the
- * __arch_info structures.
- */
-	.align	2
-	.type	__lookup_machine_type_data, %object
-__lookup_machine_type_data:
-	.long	.
-	.long	__arch_info_begin
-	.long	__arch_info_end
-	.size	__lookup_machine_type_data, . - __lookup_machine_type_data
 
 /* Determine validity of the r2 atags pointer.  The heuristic requires
  * that the pointer be aligned, in the first 16k of physical RAM and
- * that the ATAG_CORE marker is first and present.  Future revisions
+ * that the ATAG_CORE marker is first and present.  If CONFIG_OF_FLATTREE
+ * is selected, then it will also accept a dtb pointer.  Future revisions
  * of this function may be more lenient with the physical address and
  * may also be able to move the ATAGS block if necessary.
  *
- * r8  = machinfo
- *
  * Returns:
- *  r2 either valid atags pointer, or zero
+ *  r2 either valid atags pointer, valid dtb pointer, or zero
  *  r5, r6 corrupted
  */
 __vet_atags:
 	tst	r2, #0x3			@ aligned?
 	bne	1f
 
-	ldr	r5, [r2, #0]			@ is first tag ATAG_CORE?
-	cmp	r5, #ATAG_CORE_SIZE
+	ldr	r5, [r2, #0]
+#ifdef CONFIG_OF_FLATTREE
+	ldr	r6, =OF_DT_MAGIC		@ is it a DTB?
+	cmp	r5, r6
+	beq	2f
+#endif
+	cmp	r5, #ATAG_CORE_SIZE		@ is first tag ATAG_CORE?
 	cmpne	r5, #ATAG_CORE_SIZE_EMPTY
 	bne	1f
 	ldr	r5, [r2, #4]
@@ -128,72 +58,98 @@ __vet_atags:
 	cmp	r5, r6
 	bne	1f
 
-	mov	pc, lr				@ atag pointer is ok
+2:	ret	lr				@ atag/dtb pointer is ok
 
 1:	mov	r2, #0
-	mov	pc, lr
+	ret	lr
 ENDPROC(__vet_atags)
 
 /*
  * The following fragment of code is executed with the MMU on in MMU mode,
  * and uses absolute addresses; this is not position independent.
  *
- *  r0  = cp#15 control register
+ *  r0  = cp#15 control register (exc_ret for M-class)
  *  r1  = machine ID
- *  r2  = atags pointer
+ *  r2  = atags/dtb pointer
  *  r9  = processor ID
  */
 	__INIT
 __mmap_switched:
-	adr	r3, __mmap_switched_data
 
-	ldmia	r3!, {r4, r5, r6, r7}
-	cmp	r4, r5				@ Copy data segment if needed
-1:	cmpne	r5, r6
-	ldrne	fp, [r4], #4
-	strne	fp, [r5], #4
-	bne	1b
+	mov	r7, r1
+	mov	r8, r2
+	mov	r10, r0
 
-	mov	fp, #0				@ Clear BSS (and zero fp)
-1:	cmp	r6, r7
-	strcc	fp, [r6],#4
-	bcc	1b
+	adr	r4, __mmap_switched_data
+	mov	fp, #0
 
- ARM(	ldmia	r3, {r4, r5, r6, r7, sp})
- THUMB(	ldmia	r3, {r4, r5, r6, r7}	)
- THUMB(	ldr	sp, [r3, #16]		)
-	str	r9, [r4]			@ Save processor ID
-	str	r1, [r5]			@ Save machine type
-	str	r2, [r6]			@ Save atags pointer
-	bic	r4, r0, #CR_A			@ Clear 'A' bit
-	stmia	r7, {r0, r4}			@ Save control register values
+#if defined(CONFIG_XIP_DEFLATED_DATA)
+   ARM(	ldr	sp, [r4], #4 )
+ THUMB(	ldr	sp, [r4] )
+ THUMB(	add	r4, #4 )
+	bl	__inflate_kernel_data		@ decompress .data to RAM
+	teq	r0, #0
+	bne	__error
+#elif defined(CONFIG_XIP_KERNEL)
+   ARM(	ldmia	r4!, {r0, r1, r2, sp} )
+ THUMB(	ldmia	r4!, {r0, r1, r2, r3} )
+ THUMB(	mov	sp, r3 )
+	sub	r2, r2, r1
+	bl	__memcpy			@ copy .data to RAM
+#endif
+
+   ARM(	ldmia	r4!, {r0, r1, sp} )
+ THUMB(	ldmia	r4!, {r0, r1, r3} )
+ THUMB(	mov	sp, r3 )
+	sub	r2, r1, r0
+	mov	r1, #0
+	bl	__memset			@ clear .bss
+
+	adr_l	r0, init_task			@ get swapper task_struct
+	set_current r0, r1
+
+	ldmia	r4, {r0, r1, r2, r3}
+	str	r9, [r0]			@ Save processor ID
+	str	r7, [r1]			@ Save machine type
+	str	r8, [r2]			@ Save atags pointer
+	cmp	r3, #0
+	strne	r10, [r3]			@ Save control register values
+#ifdef CONFIG_KASAN
+	bl	kasan_early_init
+#endif
+	mov	lr, #0
 	b	start_kernel
 ENDPROC(__mmap_switched)
 
 	.align	2
 	.type	__mmap_switched_data, %object
 __mmap_switched_data:
-	.long	__data_loc			@ r4
-	.long	_sdata				@ r5
-	.long	__bss_start			@ r6
-	.long	_end				@ r7
-	.long	processor_id			@ r4
-	.long	__machine_arch_type		@ r5
-	.long	__atags_pointer			@ r6
-	.long	cr_alignment			@ r7
+#ifdef CONFIG_XIP_KERNEL
+#ifndef CONFIG_XIP_DEFLATED_DATA
+	.long	_sdata				@ r0
+	.long	__data_loc			@ r1
+	.long	_edata_loc			@ r2
+#endif
+	.long	__bss_stop			@ sp (temporary stack in .bss)
+#endif
+
+	.long	__bss_start			@ r0
+	.long	__bss_stop			@ r1
 	.long	init_thread_union + THREAD_START_SP @ sp
+
+	.long	processor_id			@ r0
+	.long	__machine_arch_type		@ r1
+	.long	__atags_pointer			@ r2
+#ifdef CONFIG_CPU_CP15
+	.long	cr_alignment			@ r3
+#else
+M_CLASS(.long	exc_ret)			@ r3
+AR_CLASS(.long	0)				@ r3
+#endif
 	.size	__mmap_switched_data, . - __mmap_switched_data
 
-/*
- * This provides a C-API version of __lookup_machine_type
- */
-ENTRY(lookup_machine_type)
-	stmfd	sp!, {r4 - r6, lr}
-	mov	r1, r0
-	bl	__lookup_machine_type
-	mov	r0, r5
-	ldmfd	sp!, {r4 - r6, pc}
-ENDPROC(lookup_machine_type)
+	__FINIT
+	.text
 
 /*
  * This provides a C-API version of __lookup_processor_type
@@ -219,13 +175,13 @@ ENDPROC(lookup_processor_type)
  *	r5 = proc_info pointer in physical address space
  *	r9 = cpuid (preserved)
  */
-	__CPUINIT
 __lookup_processor_type:
-	adr	r3, __lookup_processor_type_data
-	ldmia	r3, {r4 - r6}
-	sub	r3, r3, r4			@ get offset between virt&phys
-	add	r5, r5, r3			@ convert virt addresses to
-	add	r6, r6, r3			@ physical address space
+	/*
+	 * Look in <asm/procinfo.h> for information about the __proc_info
+	 * structure.
+	 */
+	adr_l	r5, __proc_info_begin
+	adr_l	r6, __proc_info_end
 1:	ldmia	r5, {r3, r4}			@ value, mask
 	and	r4, r4, r9			@ mask wanted bits
 	teq	r3, r4
@@ -234,19 +190,20 @@ __lookup_processor_type:
 	cmp	r5, r6
 	blo	1b
 	mov	r5, #0				@ unknown processor
-2:	mov	pc, lr
+2:	ret	lr
 ENDPROC(__lookup_processor_type)
 
-/*
- * Look in <asm/procinfo.h> for information about the __proc_info structure.
- */
-	.align	2
-	.type	__lookup_processor_type_data, %object
-__lookup_processor_type_data:
-	.long	.
-	.long	__proc_info_begin
-	.long	__proc_info_end
-	.size	__lookup_processor_type_data, . - __lookup_processor_type_data
+__error_lpae:
+#ifdef CONFIG_DEBUG_LL
+	adr	r0, str_lpae
+	bl 	printascii
+	b	__error
+str_lpae: .asciz "\nError: Kernel with LPAE support, but CPU does not support LPAE.\n"
+#else
+	b	__error
+#endif
+	.align
+ENDPROC(__error_lpae)
 
 __error_p:
 #ifdef CONFIG_DEBUG_LL

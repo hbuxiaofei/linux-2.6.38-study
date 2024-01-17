@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * SMS/SDRC (SDRAM controller) common code for OMAP2/3
  *
@@ -7,10 +8,6 @@
  * Tony Lindgren <tony@atomide.com>
  * Paul Walmsley
  * Richard Woodruff <r-woodruff2@ti.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #undef DEBUG
 
@@ -23,11 +20,8 @@
 #include <linux/clk.h>
 #include <linux/io.h>
 
-#include <plat/common.h>
-#include <plat/clock.h>
-#include <plat/sram.h>
-
-#include <plat/sdrc.h>
+#include "common.h"
+#include "clock.h"
 #include "sdrc.h"
 
 static struct omap_sdrc_params *sdrc_init_params_cs0, *sdrc_init_params_cs1;
@@ -115,17 +109,10 @@ int omap2_sdrc_get_params(unsigned long r,
 }
 
 
-void __init omap2_set_globals_sdrc(struct omap_globals *omap2_globals)
+void __init omap2_set_globals_sdrc(void __iomem *sdrc, void __iomem *sms)
 {
-	/* Static mapping, never released */
-	if (omap2_globals->sdrc) {
-		omap2_sdrc_base = ioremap(omap2_globals->sdrc, SZ_64K);
-		WARN_ON(!omap2_sdrc_base);
-	}
-	if (omap2_globals->sms) {
-		omap2_sms_base = ioremap(omap2_globals->sms, SZ_64K);
-		WARN_ON(!omap2_sms_base);
-	}
+	omap2_sdrc_base = sdrc;
+	omap2_sms_base = sms;
 }
 
 /**
@@ -165,19 +152,3 @@ void __init omap2_sdrc_init(struct omap_sdrc_params *sdrc_cs0,
 	sdrc_write_reg(l, SDRC_POWER);
 	omap2_sms_save_context();
 }
-
-void omap2_sms_write_rot_control(u32 val, unsigned ctx)
-{
-	sms_write_reg(val, SMS_ROT_CONTROL(ctx));
-}
-
-void omap2_sms_write_rot_size(u32 val, unsigned ctx)
-{
-	sms_write_reg(val, SMS_ROT_SIZE(ctx));
-}
-
-void omap2_sms_write_rot_physical_ba(u32 val, unsigned ctx)
-{
-	sms_write_reg(val, SMS_ROT_PHYSICAL_BA(ctx));
-}
-

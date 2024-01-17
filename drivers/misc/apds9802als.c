@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * apds9802als.c - apds9802  ALS Driver
  *
@@ -5,24 +6,10 @@
  *
  *  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 of the License.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write to the Free Software Foundation, Inc.,
- * 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA.
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
- *
  */
 
 #include <linux/module.h>
-#include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/i2c.h>
 #include <linux/err.h>
@@ -68,7 +55,7 @@ static int als_wait_for_data_ready(struct device *dev)
 		ret = i2c_smbus_read_byte_data(client, 0x86);
 	} while (!(ret & 0x80) && retry--);
 
-	if (!retry) {
+	if (retry < 0) {
 		dev_warn(dev, "timeout waiting for data ready\n");
 		return -ETIMEDOUT;
 	}
@@ -126,8 +113,9 @@ static ssize_t als_sensing_range_store(struct device *dev,
 	int ret_val;
 	unsigned long val;
 
-	if (strict_strtoul(buf, 10, &val))
-		return -EINVAL;
+	ret_val = kstrtoul(buf, 10, &val);
+	if (ret_val)
+		return ret_val;
 
 	if (val < 4096)
 		val = 1;
@@ -197,7 +185,7 @@ static struct attribute *mid_att_als[] = {
 	NULL
 };
 
-static struct attribute_group m_als_gr = {
+static const struct attribute_group m_als_gr = {
 	.name = "apds9802als",
 	.attrs = mid_att_als
 };
@@ -245,9 +233,8 @@ static int apds9802als_probe(struct i2c_client *client,
 	als_set_default_config(client);
 	mutex_init(&data->mutex);
 
+	pm_runtime_set_active(&client->dev);
 	pm_runtime_enable(&client->dev);
-	pm_runtime_get(&client->dev);
-	pm_runtime_put(&client->dev);
 
 	return res;
 als_error1:
@@ -255,33 +242,25 @@ als_error1:
 	return res;
 }
 
-static int apds9802als_remove(struct i2c_client *client)
+static void apds9802als_remove(struct i2c_client *client)
 {
 	struct als_data *data = i2c_get_clientdata(client);
 
+	pm_runtime_get_sync(&client->dev);
+
 	als_set_power_state(client, false);
 	sysfs_remove_group(&client->dev.kobj, &m_als_gr);
+
+	pm_runtime_disable(&client->dev);
+	pm_runtime_set_suspended(&client->dev);
+	pm_runtime_put_noidle(&client->dev);
+
 	kfree(data);
-	return 0;
 }
 
 #ifdef CONFIG_PM
-static int apds9802als_suspend(struct i2c_client *client, pm_message_t mesg)
-{
-	als_set_power_state(client, false);
-	return 0;
-}
 
-static int apds9802als_resume(struct i2c_client *client)
-{
-	als_set_default_config(client);
-
-	pm_runtime_get(&client->dev);
-	pm_runtime_put(&client->dev);
-	return 0;
-}
-
-static int apds9802als_runtime_suspend(struct device *dev)
+static int apds9802als_suspend(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 
@@ -289,7 +268,7 @@ static int apds9802als_runtime_suspend(struct device *dev)
 	return 0;
 }
 
-static int apds9802als_runtime_resume(struct device *dev)
+static int apds9802als_resume(struct device *dev)
 {
 	struct i2c_client *client = to_i2c_client(dev);
 
@@ -297,20 +276,16 @@ static int apds9802als_runtime_resume(struct device *dev)
 	return 0;
 }
 
-static const struct dev_pm_ops apds9802als_pm_ops = {
-	.runtime_suspend = apds9802als_runtime_suspend,
-	.runtime_resume = apds9802als_runtime_resume,
-};
+static UNIVERSAL_DEV_PM_OPS(apds9802als_pm_ops, apds9802als_suspend,
+	apds9802als_resume, NULL);
 
 #define APDS9802ALS_PM_OPS (&apds9802als_pm_ops)
 
 #else	/* CONFIG_PM */
-#define apds9802als_suspend NULL
-#define apds9802als_resume NULL
 #define APDS9802ALS_PM_OPS NULL
 #endif	/* CONFIG_PM */
 
-static struct i2c_device_id apds9802als_id[] = {
+static const struct i2c_device_id apds9802als_id[] = {
 	{ DRIVER_NAME, 0 },
 	{ }
 };
@@ -324,22 +299,10 @@ static struct i2c_driver apds9802als_driver = {
 	},
 	.probe = apds9802als_probe,
 	.remove = apds9802als_remove,
-	.suspend = apds9802als_suspend,
-	.resume = apds9802als_resume,
 	.id_table = apds9802als_id,
 };
 
-static int __init sensor_apds9802als_init(void)
-{
-	return i2c_add_driver(&apds9802als_driver);
-}
-
-static void  __exit sensor_apds9802als_exit(void)
-{
-	i2c_del_driver(&apds9802als_driver);
-}
-module_init(sensor_apds9802als_init);
-module_exit(sensor_apds9802als_exit);
+module_i2c_driver(apds9802als_driver);
 
 MODULE_AUTHOR("Anantha Narayanan <Anantha.Narayanan@intel.com");
 MODULE_DESCRIPTION("Avago apds9802als ALS Driver");

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 
 /*
  * Register bits and API for Wolfson WM97xx series of codecs
@@ -38,7 +39,11 @@
 #define WM97XX_ADCSEL_X		0x1000	/* x coord measurement */
 #define WM97XX_ADCSEL_Y		0x2000	/* y coord measurement */
 #define WM97XX_ADCSEL_PRES	0x3000	/* pressure measurement */
-#define WM97XX_ADCSEL_MASK	0x7000
+#define WM97XX_AUX_ID1		0x4000
+#define WM97XX_AUX_ID2		0x5000
+#define WM97XX_AUX_ID3		0x6000
+#define WM97XX_AUX_ID4		0x7000
+#define WM97XX_ADCSEL_MASK	0x7000	/* ADC selection mask */
 #define WM97XX_COO		0x0800	/* enable coordinate mode */
 #define WM97XX_CTC		0x0400	/* enable continuous mode */
 #define WM97XX_CM_RATE_93	0x0000	/* 93.75Hz continuous rate */
@@ -61,13 +66,6 @@
 #define WM97XX_PRP_DET_DIG	0xc000	/* setect on, digitise on */
 #define WM97XX_RPR		0x2000	/* wake up on pen down */
 #define WM97XX_PEN_DOWN		0x8000	/* pen is down */
-#define WM97XX_ADCSRC_MASK	0x7000	/* ADC source mask */
-
-#define WM97XX_AUX_ID1		0x8001
-#define WM97XX_AUX_ID2		0x8002
-#define WM97XX_AUX_ID3		0x8003
-#define WM97XX_AUX_ID4		0x8004
-
 
 /* WM9712 Bits */
 #define WM9712_45W		0x1000	/* set for 5-wire touchscreen */
@@ -256,9 +254,6 @@ struct wm97xx_mach_ops {
 	int (*acc_startup) (struct wm97xx *);
 	void (*acc_shutdown) (struct wm97xx *);
 
-	/* interrupt mask control - required for accelerated operation */
-	void (*irq_enable) (struct wm97xx *, int enable);
-
 	/* GPIO pin used for accelerated operation */
 	int irq_gpio;
 
@@ -283,7 +278,6 @@ struct wm97xx {
 	unsigned long ts_reader_min_interval; /* Minimum interval */
 	unsigned int pen_irq;		/* Pen IRQ number in use */
 	struct workqueue_struct *ts_workq;
-	struct work_struct pen_event_work;
 	u16 acc_slot;			/* AC97 slot used for acc touch data */
 	u16 acc_rate;			/* acc touch data rate */
 	unsigned pen_is_down:1;		/* Pen is down */
@@ -296,7 +290,6 @@ struct wm97xx {
 struct wm97xx_batt_pdata {
 	int	batt_aux;
 	int	temp_aux;
-	int	charge_gpio;
 	int	min_voltage;
 	int	max_voltage;
 	int	batt_div;

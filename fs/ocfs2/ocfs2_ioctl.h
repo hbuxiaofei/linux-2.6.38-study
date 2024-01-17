@@ -1,32 +1,14 @@
-/* -*- mode: c; c-basic-offset: 8; -*-
- * vim: noexpandtab sw=8 ts=8 sts=0:
- *
+/* SPDX-License-Identifier: GPL-2.0-only */
+/*
  * ocfs2_ioctl.h
  *
  * Defines OCFS2 ioctls.
  *
  * Copyright (C) 2010 Oracle.  All rights reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public
- * License, version 2, as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
  */
 
 #ifndef OCFS2_IOCTL_H
 #define OCFS2_IOCTL_H
-
-/*
- * ioctl commands
- */
-#define OCFS2_IOC_GETFLAGS	FS_IOC_GETFLAGS
-#define OCFS2_IOC_SETFLAGS	FS_IOC_SETFLAGS
-#define OCFS2_IOC32_GETFLAGS	FS_IOC32_GETFLAGS
-#define OCFS2_IOC32_SETFLAGS	FS_IOC32_SETFLAGS
 
 /*
  * Space reservation / allocation / free ioctls and argument structure
@@ -142,6 +124,38 @@ struct ocfs2_info_journal_size {
 	__u64 ij_journal_size;
 };
 
+struct ocfs2_info_freeinode {
+	struct ocfs2_info_request ifi_req;
+	struct ocfs2_info_local_freeinode {
+		__u64 lfi_total;
+		__u64 lfi_free;
+	} ifi_stat[OCFS2_MAX_SLOTS];
+	__u32 ifi_slotnum; /* out */
+	__u32 ifi_pad;
+};
+
+#define OCFS2_INFO_MAX_HIST     (32)
+
+struct ocfs2_info_freefrag {
+	struct ocfs2_info_request iff_req;
+	struct ocfs2_info_freefrag_stats { /* (out) */
+		struct ocfs2_info_free_chunk_list {
+			__u32 fc_chunks[OCFS2_INFO_MAX_HIST];
+			__u32 fc_clusters[OCFS2_INFO_MAX_HIST];
+		} ffs_fc_hist;
+		__u32 ffs_clusters;
+		__u32 ffs_free_clusters;
+		__u32 ffs_free_chunks;
+		__u32 ffs_free_chunks_real;
+		__u32 ffs_min; /* Minimum free chunksize in clusters */
+		__u32 ffs_max;
+		__u32 ffs_avg;
+		__u32 ffs_pad;
+	} iff_ffs;
+	__u32 iff_chunksize; /* chunksize in clusters(in) */
+	__u32 iff_pad;
+};
+
 /* Codes for ocfs2_info_request */
 enum ocfs2_info_type {
 	OCFS2_INFO_CLUSTERSIZE = 1,
@@ -151,6 +165,8 @@ enum ocfs2_info_type {
 	OCFS2_INFO_UUID,
 	OCFS2_INFO_FS_FEATURES,
 	OCFS2_INFO_JOURNAL_SIZE,
+	OCFS2_INFO_FREEINODE,
+	OCFS2_INFO_FREEFRAG,
 	OCFS2_INFO_NUM_TYPES
 };
 
@@ -170,5 +186,39 @@ enum ocfs2_info_type {
 							   request handling. */
 
 #define OCFS2_IOC_INFO		_IOR('o', 5, struct ocfs2_info)
+
+struct ocfs2_move_extents {
+/* All values are in bytes */
+	/* in */
+	__u64 me_start;		/* Virtual start in the file to move */
+	__u64 me_len;		/* Length of the extents to be moved */
+	__u64 me_goal;		/* Physical offset of the goal,
+				   it's in block unit */
+	__u64 me_threshold;	/* Maximum distance from goal or threshold
+				   for auto defragmentation */
+	__u64 me_flags;		/* Flags for the operation:
+				 * - auto defragmentation.
+				 * - refcount,xattr cases.
+				 */
+	/* out */
+	__u64 me_moved_len;	/* Moved/defraged length */
+	__u64 me_new_offset;	/* Resulting physical location */
+	__u32 me_reserved[2];	/* Reserved for futhure */
+};
+
+#define OCFS2_MOVE_EXT_FL_AUTO_DEFRAG	(0x00000001)	/* Kernel manages to
+							   claim new clusters
+							   as the goal place
+							   for extents moving */
+#define OCFS2_MOVE_EXT_FL_PART_DEFRAG	(0x00000002)	/* Allow partial extent
+							   moving, is to make
+							   movement less likely
+							   to fail, may make fs
+							   even more fragmented */
+#define OCFS2_MOVE_EXT_FL_COMPLETE	(0x00000004)	/* Move or defragmenation
+							   completely gets done.
+							 */
+
+#define OCFS2_IOC_MOVE_EXT	_IOW('o', 6, struct ocfs2_move_extents)
 
 #endif /* OCFS2_IOCTL_H */

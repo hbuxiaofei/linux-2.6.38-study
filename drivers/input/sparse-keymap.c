@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Generic support for sparse keymaps
  *
@@ -7,20 +8,16 @@
  * Copyright (C) 2005 Miloslav Trmac <mitr@volny.cz>
  * Copyright (C) 2005 Bernhard Rosenkraenzer <bero@arklinux.org>
  * Copyright (C) 2005 Dmitry Torokhov <dtor@mail.ru>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License version 2 as published by
- * the Free Software Foundation.
  */
 
 #include <linux/input.h>
 #include <linux/input/sparse-keymap.h>
+#include <linux/module.h>
 #include <linux/slab.h>
 
 MODULE_AUTHOR("Dmitry Torokhov <dtor@mail.ru>");
 MODULE_DESCRIPTION("Generic support for sparse keymaps");
 MODULE_LICENSE("GPL v2");
-MODULE_VERSION("0.1");
 
 static unsigned int sparse_keymap_get_key_index(struct input_dev *dev,
 						const struct key_entry *k)
@@ -159,12 +156,12 @@ static int sparse_keymap_setkeycode(struct input_dev *dev,
  * @keymap: Keymap in form of array of &key_entry structures ending
  *	with %KE_END type entry
  * @setup: Function that can be used to adjust keymap entries
- *	depending on device's deeds, may be %NULL
+ *	depending on device's needs, may be %NULL
  *
  * The function calculates size and allocates copy of the original
  * keymap after which sets up input device event bits appropriately.
- * Before destroying input device allocated keymap should be freed
- * with a call to sparse_keymap_free().
+ * The allocated copy of the keymap is automatically freed when it
+ * is no longer needed.
  */
 int sparse_keymap_setup(struct input_dev *dev,
 			const struct key_entry *keymap,
@@ -179,11 +176,10 @@ int sparse_keymap_setup(struct input_dev *dev,
 	for (e = keymap; e->type != KE_END; e++)
 		map_size++;
 
-	map = kcalloc(map_size, sizeof (struct key_entry), GFP_KERNEL);
+	map = devm_kmemdup(&dev->dev, keymap, map_size * sizeof(*map),
+			   GFP_KERNEL);
 	if (!map)
 		return -ENOMEM;
-
-	memcpy(map, keymap, map_size * sizeof (struct key_entry));
 
 	for (i = 0; i < map_size; i++) {
 		entry = &map[i];
@@ -191,7 +187,7 @@ int sparse_keymap_setup(struct input_dev *dev,
 		if (setup) {
 			error = setup(dev, entry);
 			if (error)
-				goto err_out;
+				return error;
 		}
 
 		switch (entry->type) {
@@ -208,48 +204,20 @@ int sparse_keymap_setup(struct input_dev *dev,
 		}
 	}
 
+	if (test_bit(EV_KEY, dev->evbit)) {
+		__set_bit(KEY_UNKNOWN, dev->keybit);
+		__set_bit(EV_MSC, dev->evbit);
+		__set_bit(MSC_SCAN, dev->mscbit);
+	}
+
 	dev->keycode = map;
 	dev->keycodemax = map_size;
-	dev->getkeycode_new = sparse_keymap_getkeycode;
-	dev->setkeycode_new = sparse_keymap_setkeycode;
+	dev->getkeycode = sparse_keymap_getkeycode;
+	dev->setkeycode = sparse_keymap_setkeycode;
 
 	return 0;
-
- err_out:
-	kfree(map);
-	return error;
 }
 EXPORT_SYMBOL(sparse_keymap_setup);
-
-/**
- * sparse_keymap_free - free memory allocated for sparse keymap
- * @dev: Input device using sparse keymap
- *
- * This function is used to free memory allocated by sparse keymap
- * in an input device that was set up by sparse_keymap_setup().
- * NOTE: It is safe to cal this function while input device is
- * still registered (however the drivers should care not to try to
- * use freed keymap and thus have to shut off interrups/polling
- * before freeing the keymap).
- */
-void sparse_keymap_free(struct input_dev *dev)
-{
-	unsigned long flags;
-
-	/*
-	 * Take event lock to prevent racing with input_get_keycode()
-	 * and input_set_keycode() if we are called while input device
-	 * is still registered.
-	 */
-	spin_lock_irqsave(&dev->event_lock, flags);
-
-	kfree(dev->keycode);
-	dev->keycode = NULL;
-	dev->keycodemax = 0;
-
-	spin_unlock_irqrestore(&dev->event_lock, flags);
-}
-EXPORT_SYMBOL(sparse_keymap_free);
 
 /**
  * sparse_keymap_report_entry - report event corresponding to given key entry
@@ -268,6 +236,7 @@ void sparse_keymap_report_entry(struct input_dev *dev, const struct key_entry *k
 {
 	switch (ke->type) {
 	case KE_KEY:
+		input_event(dev, EV_MSC, MSC_SCAN, ke->code);
 		input_report_key(dev, ke->keycode, value);
 		input_sync(dev);
 		if (value && autorelease) {
@@ -278,10 +247,11 @@ void sparse_keymap_report_entry(struct input_dev *dev, const struct key_entry *k
 
 	case KE_SW:
 		value = ke->sw.value;
-		/* fall through */
+		fallthrough;
 
 	case KE_VSW:
 		input_report_switch(dev, ke->sw.code, value);
+		input_sync(dev);
 		break;
 	}
 }
@@ -305,11 +275,18 @@ bool sparse_keymap_report_event(struct input_dev *dev, unsigned int code,
 {
 	const struct key_entry *ke =
 		sparse_keymap_entry_from_scancode(dev, code);
+	struct key_entry unknown_ke;
 
 	if (ke) {
 		sparse_keymap_report_entry(dev, ke, value, autorelease);
 		return true;
 	}
+
+	/* Report an unknown key event as a debugging aid */
+	unknown_ke.type = KE_KEY;
+	unknown_ke.code = code;
+	unknown_ke.keycode = KEY_UNKNOWN;
+	sparse_keymap_report_entry(dev, &unknown_ke, value, true);
 
 	return false;
 }

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * arch/um/drivers/mmapper_kern.c
  *
@@ -17,8 +18,8 @@
 #include <linux/module.h>
 #include <linux/mm.h>
 
-#include <asm/uaccess.h>
-#include "mem_user.h"
+#include <linux/uaccess.h>
+#include <mem_user.h>
 
 /* These are set in mmapper_init, which is called at boot time */
 static unsigned long mmapper_size;
@@ -116,12 +117,12 @@ static int __init mmapper_init(void)
 	if (err) {
 		printk(KERN_ERR "mmapper - misc_register failed, err = %d\n",
 		       err);
-		return err;;
+		return err;
 	}
 	return 0;
 }
 
-static void mmapper_exit(void)
+static void __exit mmapper_exit(void)
 {
 	misc_deregister(&mmapper_dev);
 }

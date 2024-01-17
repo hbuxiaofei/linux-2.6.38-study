@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * PCMCIA driver for SL811HS (as found in REX-CFU1U)
  * Filename: sl811_cs.c
@@ -12,7 +13,6 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/init.h>
 #include <linux/ptrace.h>
 #include <linux/slab.h>
 #include <linux/string.h>
@@ -94,7 +94,7 @@ static int sl811_hc_init(struct device *parent, resource_size_t base_addr,
 		return -EBUSY;
 	platform_dev.dev.parent = parent;
 
-	/* finish seting up the platform device */
+	/* finish setting up the platform device */
 	resources[0].start = irq;
 
 	resources[1].start = base_addr;
@@ -187,7 +187,7 @@ static int sl811_cs_probe(struct pcmcia_device *link)
 	return sl811_cs_config(link);
 }
 
-static struct pcmcia_device_id sl811_ids[] = {
+static const struct pcmcia_device_id sl811_ids[] = {
 	PCMCIA_DEVICE_MANF_CARD(0xc015, 0x0001), /* RATOC USB HOST CF+ Card */
 	PCMCIA_DEVICE_NULL,
 };
@@ -200,17 +200,4 @@ static struct pcmcia_driver sl811_cs_driver = {
 	.remove		= sl811_cs_detach,
 	.id_table	= sl811_ids,
 };
-
-/*====================================================================*/
-
-static int __init init_sl811_cs(void)
-{
-	return pcmcia_register_driver(&sl811_cs_driver);
-}
-module_init(init_sl811_cs);
-
-static void __exit exit_sl811_cs(void)
-{
-	pcmcia_unregister_driver(&sl811_cs_driver);
-}
-module_exit(exit_sl811_cs);
+module_pcmcia_driver(sl811_cs_driver);

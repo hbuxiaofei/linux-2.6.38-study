@@ -1,7 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) ST-Ericsson AB 2010
- * Author:	Sjur Brendeland/sjur.brandeland@stericsson.com
- * License terms: GNU General Public License (GPL) version 2
+ * Author:	Sjur Brendeland
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ":%s(): " fmt, __func__
@@ -20,23 +20,20 @@
 #define UTIL_REMOTE_SHUTDOWN 0x82
 #define UTIL_FLOW_OFF 0x81
 #define UTIL_FLOW_ON  0x80
-#define UTIL_CTRL_PKT_SIZE 1
+
 static int cfutill_receive(struct cflayer *layr, struct cfpkt *pkt);
 static int cfutill_transmit(struct cflayer *layr, struct cfpkt *pkt);
 
 struct cflayer *cfutill_create(u8 channel_id, struct dev_info *dev_info)
 {
-	struct cfsrvl *util = kmalloc(sizeof(struct cfsrvl), GFP_ATOMIC);
-	if (!util) {
-		pr_warn("Out of memory\n");
+	struct cfsrvl *util = kzalloc(sizeof(struct cfsrvl), GFP_ATOMIC);
+	if (!util)
 		return NULL;
-	}
 	caif_assert(offsetof(struct cfsrvl, layer) == 0);
-	memset(util, 0, sizeof(struct cfsrvl));
 	cfsrvl_init(util, channel_id, dev_info, true);
 	util->layer.receive = cfutill_receive;
 	util->layer.transmit = cfutill_transmit;
-	snprintf(util->layer.name, CAIF_LAYER_NAME_SZ - 1, "util1");
+	snprintf(util->layer.name, CAIF_LAYER_NAME_SZ, "util1");
 	return &util->layer;
 }
 
@@ -87,8 +84,11 @@ static int cfutill_transmit(struct cflayer *layr, struct cfpkt *pkt)
 	caif_assert(layr != NULL);
 	caif_assert(layr->dn != NULL);
 	caif_assert(layr->dn->transmit != NULL);
-	if (!cfsrvl_ready(service, &ret))
+
+	if (!cfsrvl_ready(service, &ret)) {
+		cfpkt_destroy(pkt);
 		return ret;
+	}
 
 	cfpkt_add_head(pkt, &zero, 1);
 	/* Add info for MUX-layer to route the packet out. */
@@ -100,10 +100,5 @@ static int cfutill_transmit(struct cflayer *layr, struct cfpkt *pkt)
 	 */
 	info->hdr_len = 1;
 	info->dev_info = &service->dev_info;
-	ret = layr->dn->transmit(layr->dn, pkt);
-	if (ret < 0) {
-		u32 tmp32;
-		cfpkt_extr_head(pkt, &tmp32, 4);
-	}
-	return ret;
+	return layr->dn->transmit(layr->dn, pkt);
 }

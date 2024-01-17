@@ -1,11 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * max98088.h -- MAX98088 ALSA SoC Audio driver
  *
  * Copyright 2010 Maxim Integrated Products
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #ifndef _MAX98088_H
@@ -16,7 +13,7 @@
  */
 #define M98088_REG_00_IRQ_STATUS            0x00
 #define M98088_REG_01_MIC_STATUS            0x01
-#define M98088_REG_02_JACK_STAUS            0x02
+#define M98088_REG_02_JACK_STATUS           0x02
 #define M98088_REG_03_BATTERY_VOLTAGE       0x03
 #define M98088_REG_0F_IRQ_ENABLE            0x0F
 #define M98088_REG_10_SYS_CLK               0x10
@@ -132,6 +129,19 @@
 /* M98088_REG_2A_MIC_REC_CNTL */
        #define M98088_REC_LINEMODE             (1<<7)
        #define M98088_REC_LINEMODE_MASK        (1<<7)
+
+/* M98088_REG_2D_MIX_SPK_CNTL */
+       #define M98088_MIX_SPKR_GAIN_MASK       (3<<2)
+       #define M98088_MIX_SPKR_GAIN_SHIFT      2
+       #define M98088_MIX_SPKL_GAIN_MASK       (3<<0)
+       #define M98088_MIX_SPKL_GAIN_SHIFT      0
+
+/* M98088_REG_2F_LVL_DAI1_PLAY, M98088_REG_31_LVL_DAI2_PLAY */
+       #define M98088_DAI_MUTE                 (1<<7)
+       #define M98088_DAI_MUTE_MASK            (1<<7)
+       #define M98088_DAI_VOICE_GAIN_MASK      (3<<4)
+       #define M98088_DAI_ATTENUATION_MASK     (0xF<<0)
+       #define M98088_DAI_ATTENUATION_SHIFT    0
 
 /* M98088_REG_35_LVL_MIC1, M98088_REG_36_LVL_MIC2 */
        #define M98088_MICPRE_MASK              (3<<5)

@@ -1,6 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 2000 - 2007 Jeff Dike (jdike@{linux.intel,addtoit}.com)
- * Licensed under the GPL
  */
 
 #include <stdlib.h>
@@ -11,10 +11,8 @@
 #include <termios.h>
 #include <sys/ioctl.h>
 #include "chan_user.h"
-#include "kern_constants.h"
-#include "os.h"
-#include "um_malloc.h"
-#include "user.h"
+#include <os.h>
+#include <um_malloc.h>
 
 void generic_close(int fd, void *unused)
 {
@@ -28,10 +26,10 @@ int generic_read(int fd, char *c_out, void *unused)
 	n = read(fd, c_out, sizeof(*c_out));
 	if (n > 0)
 		return n;
-	else if (errno == EAGAIN)
-		return 0;
 	else if (n == 0)
 		return -EIO;
+	else if (errno == EAGAIN)
+		return 0;
 	return -errno;
 }
 
@@ -218,11 +216,11 @@ static int winch_thread(void *arg)
 	}
 }
 
-static int winch_tramp(int fd, struct tty_struct *tty, int *fd_out,
+static int winch_tramp(int fd, struct tty_port *port, int *fd_out,
 		       unsigned long *stack_out)
 {
 	struct winch_data data;
-	int fds[2], n, err;
+	int fds[2], n, err, pid;
 	char c;
 
 	err = os_pipe(fds, 1, 1);
@@ -240,8 +238,9 @@ static int winch_tramp(int fd, struct tty_struct *tty, int *fd_out,
 	 * problem with /dev/net/tun, which if held open by this
 	 * thread, prevents the TUN/TAP device from being reused.
 	 */
-	err = run_helper_thread(winch_thread, &data, CLONE_FILES, stack_out);
-	if (err < 0) {
+	pid = run_helper_thread(winch_thread, &data, CLONE_FILES, stack_out);
+	if (pid < 0) {
+		err = pid;
 		printk(UM_KERN_ERR "fork of winch_thread failed - errno = %d\n",
 		       -err);
 		goto out_close;
@@ -258,13 +257,14 @@ static int winch_tramp(int fd, struct tty_struct *tty, int *fd_out,
 		goto out_close;
 	}
 
-	if (os_set_fd_block(*fd_out, 0)) {
+	err = os_set_fd_block(*fd_out, 0);
+	if (err) {
 		printk(UM_KERN_ERR "winch_tramp: failed to set thread_fd "
 		       "non-blocking.\n");
 		goto out_close;
 	}
 
-	return err;
+	return pid;
 
  out_close:
 	close(fds[1]);
@@ -273,7 +273,7 @@ static int winch_tramp(int fd, struct tty_struct *tty, int *fd_out,
 	return err;
 }
 
-void register_winch(int fd, struct tty_struct *tty)
+void register_winch(int fd, struct tty_port *port)
 {
 	unsigned long stack;
 	int pid, thread, count, thread_fd = -1;
@@ -283,12 +283,17 @@ void register_winch(int fd, struct tty_struct *tty)
 		return;
 
 	pid = tcgetpgrp(fd);
-	if (!is_skas_winch(pid, fd, tty) && (pid == -1)) {
-		thread = winch_tramp(fd, tty, &thread_fd, &stack);
+	if (is_skas_winch(pid, fd, port)) {
+		register_winch_irq(-1, fd, -1, port, 0);
+		return;
+	}
+
+	if (pid == -1) {
+		thread = winch_tramp(fd, port, &thread_fd, &stack);
 		if (thread < 0)
 			return;
 
-		register_winch_irq(thread_fd, fd, thread, tty, stack);
+		register_winch_irq(thread_fd, fd, thread, port, stack);
 
 		count = write(thread_fd, &c, sizeof(c));
 		if (count != sizeof(c))

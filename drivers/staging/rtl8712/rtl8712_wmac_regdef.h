@@ -1,3 +1,16 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/******************************************************************************
+ *
+ * Copyright(c) 2007 - 2010 Realtek Corporation. All rights reserved.
+ *
+ * Modifications for inclusion into the Linux staging tree are
+ * Copyright(c) 2010 Larry Finger. All rights reserved.
+ *
+ * Contact information:
+ * WLAN FAE <wlanfae@realtek.com>
+ * Larry Finger <Larry.Finger@lwfinger.net>
+ *
+ ******************************************************************************/
 #ifndef __RTL8712_WMAC_REGDEF_H__
 #define __RTL8712_WMAC_REGDEF_H__
 
@@ -18,7 +31,6 @@
 #define CFEND_TH			(RTL8712_WMAC_ + 0x36)
 #define AMPDU_MIN_SPACE			(RTL8712_WMAC_ + 0x37)
 #define	TXOP_STALL_CTRL			(RTL8712_WMAC_ + 0x38)
-
 
 #endif /*__RTL8712_WMAC_REGDEF_H__*/
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * netfilter module to enforce network quotas
  *
@@ -9,6 +10,7 @@
 
 #include <linux/netfilter/x_tables.h>
 #include <linux/netfilter/xt_quota.h>
+#include <linux/module.h>
 
 struct xt_quota_priv {
 	spinlock_t	lock;
@@ -72,6 +74,7 @@ static struct xt_match quota_mt_reg __read_mostly = {
 	.checkentry = quota_mt_check,
 	.destroy    = quota_mt_destroy,
 	.matchsize  = sizeof(struct xt_quota_info),
+	.usersize   = offsetof(struct xt_quota_info, master),
 	.me         = THIS_MODULE,
 };
 

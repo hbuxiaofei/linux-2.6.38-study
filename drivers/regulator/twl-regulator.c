@@ -1,26 +1,26 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * twl-regulator.c -- support regulators in twl4030/twl6030 family chips
  *
  * Copyright (C) 2008 David Brownell
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 
 #include <linux/module.h>
+#include <linux/string.h>
+#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/err.h>
-#include <linux/delay.h>
 #include <linux/platform_device.h>
+#include <linux/of.h>
+#include <linux/of_device.h>
 #include <linux/regulator/driver.h>
 #include <linux/regulator/machine.h>
-#include <linux/i2c/twl.h>
-
+#include <linux/regulator/of_regulator.h>
+#include <linux/mfd/twl.h>
+#include <linux/delay.h>
 
 /*
- * The TWL4030/TW5030/TPS659x0/TWL6030 family chips include power management, a
+ * The TWL4030/TW5030/TPS659x0 family chips include power management, a
  * USB OTG transceiver, an RTC, ADC, PWM, and lots more.  Some versions
  * include an audio codec, battery charger, and more voltage regulators.
  * These chips are often used in OMAP-based systems.
@@ -41,18 +41,17 @@ struct twlreg_info {
 	u8			table_len;
 	const u16		*table;
 
-	/* regulator specific turn-on delay */
-	u16			delay;
-
 	/* State REMAP default configuration */
 	u8			remap;
 
-	/* chip constraints on regulator behavior */
-	u16			min_mV;
-	u16			max_mV;
-
 	/* used by regulator core */
 	struct regulator_desc	desc;
+
+	/* chip specific features */
+	unsigned long		features;
+
+	/* data passed from board for external get/set voltage */
+	void			*data;
 };
 
 
@@ -66,15 +65,12 @@ struct twlreg_info {
 #define VREG_TYPE		1
 #define VREG_REMAP		2
 #define VREG_DEDICATED		3	/* LDO control */
+#define VREG_VOLTAGE_SMPS_4030	9
 /* TWL6030 register offsets */
 #define VREG_TRANS		1
 #define VREG_STATE		2
 #define VREG_VOLTAGE		3
-/* TWL6030 Misc register offsets */
-#define VREG_BC_ALL		1
-#define VREG_BC_REF		2
-#define VREG_BC_PROC		3
-#define VREG_BC_CLK_RST		4
+#define VREG_VOLTAGE_SMPS	4
 
 static inline int
 twlreg_read(struct twlreg_info *info, unsigned slave_subgp, unsigned offset)
@@ -118,65 +114,115 @@ static int twlreg_grp(struct regulator_dev *rdev)
 #define P2_GRP_6030	BIT(1)		/* "peripherals" */
 #define P1_GRP_6030	BIT(0)		/* CPU/Linux */
 
-static int twlreg_is_enabled(struct regulator_dev *rdev)
+static int twl4030reg_is_enabled(struct regulator_dev *rdev)
 {
 	int	state = twlreg_grp(rdev);
 
 	if (state < 0)
 		return state;
 
-	if (twl_class_is_4030())
-		state &= P1_GRP_4030;
-	else
-		state &= P1_GRP_6030;
-	return state;
+	return state & P1_GRP_4030;
 }
 
-static int twlreg_enable(struct regulator_dev *rdev)
+#define PB_I2C_BUSY	BIT(0)
+#define PB_I2C_BWEN	BIT(1)
+
+/* Wait until buffer empty/ready to send a word on power bus. */
+static int twl4030_wait_pb_ready(void)
+{
+
+	int	ret;
+	int	timeout = 10;
+	u8	val;
+
+	do {
+		ret = twl_i2c_read_u8(TWL_MODULE_PM_MASTER, &val,
+				      TWL4030_PM_MASTER_PB_CFG);
+		if (ret < 0)
+			return ret;
+
+		if (!(val & PB_I2C_BUSY))
+			return 0;
+
+		mdelay(1);
+		timeout--;
+	} while (timeout);
+
+	return -ETIMEDOUT;
+}
+
+/* Send a word over the powerbus */
+static int twl4030_send_pb_msg(unsigned msg)
+{
+	u8	val;
+	int	ret;
+
+	/* save powerbus configuration */
+	ret = twl_i2c_read_u8(TWL_MODULE_PM_MASTER, &val,
+			      TWL4030_PM_MASTER_PB_CFG);
+	if (ret < 0)
+		return ret;
+
+	/* Enable i2c access to powerbus */
+	ret = twl_i2c_write_u8(TWL_MODULE_PM_MASTER, val | PB_I2C_BWEN,
+			       TWL4030_PM_MASTER_PB_CFG);
+	if (ret < 0)
+		return ret;
+
+	ret = twl4030_wait_pb_ready();
+	if (ret < 0)
+		return ret;
+
+	ret = twl_i2c_write_u8(TWL_MODULE_PM_MASTER, msg >> 8,
+			       TWL4030_PM_MASTER_PB_WORD_MSB);
+	if (ret < 0)
+		return ret;
+
+	ret = twl_i2c_write_u8(TWL_MODULE_PM_MASTER, msg & 0xff,
+			       TWL4030_PM_MASTER_PB_WORD_LSB);
+	if (ret < 0)
+		return ret;
+
+	ret = twl4030_wait_pb_ready();
+	if (ret < 0)
+		return ret;
+
+	/* Restore powerbus configuration */
+	return twl_i2c_write_u8(TWL_MODULE_PM_MASTER, val,
+				TWL4030_PM_MASTER_PB_CFG);
+}
+
+static int twl4030reg_enable(struct regulator_dev *rdev)
 {
 	struct twlreg_info	*info = rdev_get_drvdata(rdev);
 	int			grp;
-	int			ret;
 
-	grp = twlreg_read(info, TWL_MODULE_PM_RECEIVER, VREG_GRP);
+	grp = twlreg_grp(rdev);
 	if (grp < 0)
 		return grp;
 
-	if (twl_class_is_4030())
-		grp |= P1_GRP_4030;
-	else
-		grp |= P1_GRP_6030;
-
-	ret = twlreg_write(info, TWL_MODULE_PM_RECEIVER, VREG_GRP, grp);
-
-	udelay(info->delay);
-
-	return ret;
-}
-
-static int twlreg_disable(struct regulator_dev *rdev)
-{
-	struct twlreg_info	*info = rdev_get_drvdata(rdev);
-	int			grp;
-
-	grp = twlreg_read(info, TWL_MODULE_PM_RECEIVER, VREG_GRP);
-	if (grp < 0)
-		return grp;
-
-	if (twl_class_is_4030())
-		grp &= ~(P1_GRP_4030 | P2_GRP_4030 | P3_GRP_4030);
-	else
-		grp &= ~(P1_GRP_6030 | P2_GRP_6030 | P3_GRP_6030);
+	grp |= P1_GRP_4030;
 
 	return twlreg_write(info, TWL_MODULE_PM_RECEIVER, VREG_GRP, grp);
 }
 
-static int twlreg_get_status(struct regulator_dev *rdev)
+static int twl4030reg_disable(struct regulator_dev *rdev)
+{
+	struct twlreg_info	*info = rdev_get_drvdata(rdev);
+	int			grp;
+
+	grp = twlreg_grp(rdev);
+	if (grp < 0)
+		return grp;
+
+	grp &= ~(P1_GRP_4030 | P2_GRP_4030 | P3_GRP_4030);
+
+	return twlreg_write(info, TWL_MODULE_PM_RECEIVER, VREG_GRP, grp);
+}
+
+static int twl4030reg_get_status(struct regulator_dev *rdev)
 {
 	int	state = twlreg_grp(rdev);
-
-	if (twl_class_is_6030())
-		return 0; /* FIXME return for 6030 regulator */
 
 	if (state < 0)
 		return state;
@@ -190,14 +236,10 @@ static int twlreg_get_status(struct regulator_dev *rdev)
 		: REGULATOR_STATUS_STANDBY;
 }
 
-static int twlreg_set_mode(struct regulator_dev *rdev, unsigned mode)
+static int twl4030reg_set_mode(struct regulator_dev *rdev, unsigned mode)
 {
 	struct twlreg_info	*info = rdev_get_drvdata(rdev);
 	unsigned		message;
-	int			status;
-
-	if (twl_class_is_6030())
-		return 0; /* FIXME return for 6030 regulator */
 
 	/* We can only set the mode through state machine commands... */
 	switch (mode) {
@@ -211,20 +253,19 @@ static int twlreg_set_mode(struct regulator_dev *rdev, unsigned mode)
 		return -EINVAL;
 	}
 
-	/* Ensure the resource is associated with some group */
-	status = twlreg_grp(rdev);
-	if (status < 0)
-		return status;
-	if (!(status & (P3_GRP_4030 | P2_GRP_4030 | P1_GRP_4030)))
-		return -EACCES;
+	return twl4030_send_pb_msg(message);
+}
 
-	status = twl_i2c_write_u8(TWL_MODULE_PM_MASTER,
-			message >> 8, TWL4030_PM_MASTER_PB_WORD_MSB);
-	if (status < 0)
-		return status;
-
-	return twl_i2c_write_u8(TWL_MODULE_PM_MASTER,
-			message & 0xff, TWL4030_PM_MASTER_PB_WORD_LSB);
+static inline unsigned int twl4030reg_map_mode(unsigned int mode)
+{
+	switch (mode) {
+	case RES_STATE_ACTIVE:
+		return REGULATOR_MODE_NORMAL;
+	case RES_STATE_SLEEP:
+		return REGULATOR_MODE_STANDBY;
+	default:
+		return REGULATOR_MODE_INVALID;
+	}
 }
 
 /*----------------------------------------------------------------------*/
@@ -244,14 +285,12 @@ static int twlreg_set_mode(struct regulator_dev *rdev, unsigned mode)
  * VAUX3 at 3V is incorrectly listed in some TI manuals as unsupported.
  * TI are revising the twl5030/tps659x0 specs to support that 3.0V setting.
  */
-#ifdef CONFIG_TWL4030_ALLOW_UNSUPPORTED
-#define UNSUP_MASK	0x0000
-#else
 #define UNSUP_MASK	0x8000
-#endif
 
 #define UNSUP(x)	(UNSUP_MASK | (x))
-#define IS_UNSUP(x)	(UNSUP_MASK & (x))
+#define IS_UNSUP(info, x)			\
+	((UNSUP_MASK & (x)) &&			\
+	 !((info)->features & TWL4030_ALLOW_UNSUPPORTED))
 #define LDO_MV(x)	(~UNSUP_MASK & (x))
 
 
@@ -307,12 +346,6 @@ static const u16 VSIM_VSEL_table[] = {
 static const u16 VDAC_VSEL_table[] = {
 	1200, 1300, 1800, 1800,
 };
-static const u16 VDD1_VSEL_table[] = {
-	800, 1450,
-};
-static const u16 VDD2_VSEL_table[] = {
-	800, 1450, 1500,
-};
 static const u16 VIO_VSEL_table[] = {
 	1800, 1850,
 };
@@ -320,178 +353,113 @@ static const u16 VINTANA2_VSEL_table[] = {
 	2500, 2750,
 };
 
+/* 600mV to 1450mV in 12.5 mV steps */
+static const struct linear_range VDD1_ranges[] = {
+	REGULATOR_LINEAR_RANGE(600000, 0, 68, 12500)
+};
+
+/* 600mV to 1450mV in 12.5 mV steps, everything above = 1500mV */
+static const struct linear_range VDD2_ranges[] = {
+	REGULATOR_LINEAR_RANGE(600000, 0, 68, 12500),
+	REGULATOR_LINEAR_RANGE(1500000, 69, 69, 12500)
+};
+
 static int twl4030ldo_list_voltage(struct regulator_dev *rdev, unsigned index)
 {
 	struct twlreg_info	*info = rdev_get_drvdata(rdev);
 	int			mV = info->table[index];
 
-	return IS_UNSUP(mV) ? 0 : (LDO_MV(mV) * 1000);
+	return IS_UNSUP(info, mV) ? 0 : (LDO_MV(mV) * 1000);
 }
 
 static int
-twl4030ldo_set_voltage(struct regulator_dev *rdev, int min_uV, int max_uV,
-		       unsigned *selector)
+twl4030ldo_set_voltage_sel(struct regulator_dev *rdev, unsigned selector)
 {
 	struct twlreg_info	*info = rdev_get_drvdata(rdev);
-	int			vsel;
 
-	for (vsel = 0; vsel < info->table_len; vsel++) {
-		int mV = info->table[vsel];
-		int uV;
-
-		if (IS_UNSUP(mV))
-			continue;
-		uV = LDO_MV(mV) * 1000;
-
-		/* REVISIT for VAUX2, first match may not be best/lowest */
-
-		/* use the first in-range value */
-		if (min_uV <= uV && uV <= max_uV) {
-			*selector = vsel;
-			return twlreg_write(info, TWL_MODULE_PM_RECEIVER,
-							VREG_VOLTAGE, vsel);
-		}
-	}
-
-	return -EDOM;
+	return twlreg_write(info, TWL_MODULE_PM_RECEIVER, VREG_VOLTAGE,
+			    selector);
 }
 
-static int twl4030ldo_get_voltage(struct regulator_dev *rdev)
+static int twl4030ldo_get_voltage_sel(struct regulator_dev *rdev)
 {
 	struct twlreg_info	*info = rdev_get_drvdata(rdev);
-	int		vsel = twlreg_read(info, TWL_MODULE_PM_RECEIVER,
-								VREG_VOLTAGE);
+	int vsel = twlreg_read(info, TWL_MODULE_PM_RECEIVER, VREG_VOLTAGE);
 
 	if (vsel < 0)
 		return vsel;
 
 	vsel &= info->table_len - 1;
-	return LDO_MV(info->table[vsel]) * 1000;
+	return vsel;
 }
 
-static struct regulator_ops twl4030ldo_ops = {
+static const struct regulator_ops twl4030ldo_ops = {
 	.list_voltage	= twl4030ldo_list_voltage,
 
-	.set_voltage	= twl4030ldo_set_voltage,
-	.get_voltage	= twl4030ldo_get_voltage,
+	.set_voltage_sel = twl4030ldo_set_voltage_sel,
+	.get_voltage_sel = twl4030ldo_get_voltage_sel,
 
-	.enable		= twlreg_enable,
-	.disable	= twlreg_disable,
-	.is_enabled	= twlreg_is_enabled,
+	.enable		= twl4030reg_enable,
+	.disable	= twl4030reg_disable,
+	.is_enabled	= twl4030reg_is_enabled,
 
-	.set_mode	= twlreg_set_mode,
+	.set_mode	= twl4030reg_set_mode,
 
-	.get_status	= twlreg_get_status,
+	.get_status	= twl4030reg_get_status,
 };
-
-static int twl6030ldo_list_voltage(struct regulator_dev *rdev, unsigned index)
-{
-	struct twlreg_info	*info = rdev_get_drvdata(rdev);
-
-	return ((info->min_mV + (index * 100)) * 1000);
-}
 
 static int
-twl6030ldo_set_voltage(struct regulator_dev *rdev, int min_uV, int max_uV,
-		       unsigned *selector)
+twl4030smps_set_voltage(struct regulator_dev *rdev, int min_uV, int max_uV,
+			unsigned *selector)
 {
-	struct twlreg_info	*info = rdev_get_drvdata(rdev);
-	int			vsel;
+	struct twlreg_info *info = rdev_get_drvdata(rdev);
+	int vsel = DIV_ROUND_UP(min_uV - 600000, 12500);
 
-	if ((min_uV/1000 < info->min_mV) || (max_uV/1000 > info->max_mV))
-		return -EDOM;
+	twlreg_write(info, TWL_MODULE_PM_RECEIVER, VREG_VOLTAGE_SMPS_4030, vsel);
 
-	/*
-	 * Use the below formula to calculate vsel
-	 * mV = 1000mv + 100mv * (vsel - 1)
-	 */
-	vsel = (min_uV/1000 - 1000)/100 + 1;
-	*selector = vsel;
-	return twlreg_write(info, TWL_MODULE_PM_RECEIVER, VREG_VOLTAGE, vsel);
-
+	return 0;
 }
 
-static int twl6030ldo_get_voltage(struct regulator_dev *rdev)
+static int twl4030smps_get_voltage(struct regulator_dev *rdev)
 {
-	struct twlreg_info	*info = rdev_get_drvdata(rdev);
-	int		vsel = twlreg_read(info, TWL_MODULE_PM_RECEIVER,
-								VREG_VOLTAGE);
+	struct twlreg_info *info = rdev_get_drvdata(rdev);
+	int vsel;
 
-	if (vsel < 0)
-		return vsel;
+	vsel = twlreg_read(info, TWL_MODULE_PM_RECEIVER,
+		VREG_VOLTAGE_SMPS_4030);
 
-	/*
-	 * Use the below formula to calculate vsel
-	 * mV = 1000mv + 100mv * (vsel - 1)
-	 */
-	return (1000 + (100 * (vsel - 1))) * 1000;
+	return vsel * 12500 + 600000;
 }
 
-static struct regulator_ops twl6030ldo_ops = {
-	.list_voltage	= twl6030ldo_list_voltage,
+static const struct regulator_ops twl4030smps_ops = {
+	.list_voltage   = regulator_list_voltage_linear_range,
 
-	.set_voltage	= twl6030ldo_set_voltage,
-	.get_voltage	= twl6030ldo_get_voltage,
-
-	.enable		= twlreg_enable,
-	.disable	= twlreg_disable,
-	.is_enabled	= twlreg_is_enabled,
-
-	.set_mode	= twlreg_set_mode,
-
-	.get_status	= twlreg_get_status,
+	.set_voltage	= twl4030smps_set_voltage,
+	.get_voltage	= twl4030smps_get_voltage,
 };
 
 /*----------------------------------------------------------------------*/
 
-/*
- * Fixed voltage LDOs don't have a VSEL field to update.
- */
-static int twlfixed_list_voltage(struct regulator_dev *rdev, unsigned index)
-{
-	struct twlreg_info	*info = rdev_get_drvdata(rdev);
+static const struct regulator_ops twl4030fixed_ops = {
+	.list_voltage	= regulator_list_voltage_linear,
 
-	return info->min_mV * 1000;
-}
+	.enable		= twl4030reg_enable,
+	.disable	= twl4030reg_disable,
+	.is_enabled	= twl4030reg_is_enabled,
 
-static int twlfixed_get_voltage(struct regulator_dev *rdev)
-{
-	struct twlreg_info	*info = rdev_get_drvdata(rdev);
+	.set_mode	= twl4030reg_set_mode,
 
-	return info->min_mV * 1000;
-}
-
-static struct regulator_ops twlfixed_ops = {
-	.list_voltage	= twlfixed_list_voltage,
-
-	.get_voltage	= twlfixed_get_voltage,
-
-	.enable		= twlreg_enable,
-	.disable	= twlreg_disable,
-	.is_enabled	= twlreg_is_enabled,
-
-	.set_mode	= twlreg_set_mode,
-
-	.get_status	= twlreg_get_status,
+	.get_status	= twl4030reg_get_status,
 };
 
 /*----------------------------------------------------------------------*/
 
-#define TWL4030_FIXED_LDO(label, offset, mVolts, num, turnon_delay, \
-			remap_conf) \
-		TWL_FIXED_LDO(label, offset, mVolts, num, turnon_delay, \
-			remap_conf, TWL4030)
-#define TWL6030_FIXED_LDO(label, offset, mVolts, num, turnon_delay, \
-			remap_conf) \
-		TWL_FIXED_LDO(label, offset, mVolts, num, turnon_delay, \
-			remap_conf, TWL6030)
-
-#define TWL4030_ADJUSTABLE_LDO(label, offset, num, turnon_delay, remap_conf) { \
+#define TWL4030_ADJUSTABLE_LDO(label, offset, num, turnon_delay, remap_conf) \
+static const struct twlreg_info TWL4030_INFO_##label = { \
 	.base = offset, \
 	.id = num, \
 	.table_len = ARRAY_SIZE(label##_VSEL_table), \
 	.table = label##_VSEL_table, \
-	.delay = turnon_delay, \
 	.remap = remap_conf, \
 	.desc = { \
 		.name = #label, \
@@ -500,41 +468,47 @@ static struct regulator_ops twlfixed_ops = {
 		.ops = &twl4030ldo_ops, \
 		.type = REGULATOR_VOLTAGE, \
 		.owner = THIS_MODULE, \
+		.enable_time = turnon_delay, \
+		.of_map_mode = twl4030reg_map_mode, \
 		}, \
 	}
 
-#define TWL6030_ADJUSTABLE_LDO(label, offset, min_mVolts, max_mVolts, num, \
-		remap_conf) { \
+#define TWL4030_ADJUSTABLE_SMPS(label, offset, num, turnon_delay, remap_conf, \
+		n_volt) \
+static const struct twlreg_info TWL4030_INFO_##label = { \
 	.base = offset, \
 	.id = num, \
-	.min_mV = min_mVolts, \
-	.max_mV = max_mVolts, \
 	.remap = remap_conf, \
 	.desc = { \
 		.name = #label, \
-		.id = TWL6030_REG_##label, \
-		.n_voltages = (max_mVolts - min_mVolts)/100, \
-		.ops = &twl6030ldo_ops, \
+		.id = TWL4030_REG_##label, \
+		.ops = &twl4030smps_ops, \
 		.type = REGULATOR_VOLTAGE, \
 		.owner = THIS_MODULE, \
+		.enable_time = turnon_delay, \
+		.of_map_mode = twl4030reg_map_mode, \
+		.n_voltages = n_volt, \
+		.n_linear_ranges = ARRAY_SIZE(label ## _ranges), \
+		.linear_ranges = label ## _ranges, \
 		}, \
 	}
 
-
-#define TWL_FIXED_LDO(label, offset, mVolts, num, turnon_delay, remap_conf, \
-		family) { \
+#define TWL4030_FIXED_LDO(label, offset, mVolts, num, turnon_delay, \
+			remap_conf) \
+static const struct twlreg_info TWLFIXED_INFO_##label = { \
 	.base = offset, \
 	.id = num, \
-	.min_mV = mVolts, \
-	.delay = turnon_delay, \
 	.remap = remap_conf, \
 	.desc = { \
 		.name = #label, \
-		.id = family##_REG_##label, \
+		.id = TWL4030##_REG_##label, \
 		.n_voltages = 1, \
-		.ops = &twlfixed_ops, \
+		.ops = &twl4030fixed_ops, \
 		.type = REGULATOR_VOLTAGE, \
 		.owner = THIS_MODULE, \
+		.min_uV = mVolts * 1000, \
+		.enable_time = turnon_delay, \
+		.of_map_mode = twl4030reg_map_mode, \
 		}, \
 	}
 
@@ -542,64 +516,88 @@ static struct regulator_ops twlfixed_ops = {
  * We list regulators here if systems need some level of
  * software control over them after boot.
  */
-static struct twlreg_info twl_regs[] = {
-	TWL4030_ADJUSTABLE_LDO(VAUX1, 0x17, 1, 100, 0x08),
-	TWL4030_ADJUSTABLE_LDO(VAUX2_4030, 0x1b, 2, 100, 0x08),
-	TWL4030_ADJUSTABLE_LDO(VAUX2, 0x1b, 2, 100, 0x08),
-	TWL4030_ADJUSTABLE_LDO(VAUX3, 0x1f, 3, 100, 0x08),
-	TWL4030_ADJUSTABLE_LDO(VAUX4, 0x23, 4, 100, 0x08),
-	TWL4030_ADJUSTABLE_LDO(VMMC1, 0x27, 5, 100, 0x08),
-	TWL4030_ADJUSTABLE_LDO(VMMC2, 0x2b, 6, 100, 0x08),
-	TWL4030_ADJUSTABLE_LDO(VPLL1, 0x2f, 7, 100, 0x00),
-	TWL4030_ADJUSTABLE_LDO(VPLL2, 0x33, 8, 100, 0x08),
-	TWL4030_ADJUSTABLE_LDO(VSIM, 0x37, 9, 100, 0x00),
-	TWL4030_ADJUSTABLE_LDO(VDAC, 0x3b, 10, 100, 0x08),
-	TWL4030_FIXED_LDO(VINTANA1, 0x3f, 1500, 11, 100, 0x08),
-	TWL4030_ADJUSTABLE_LDO(VINTANA2, 0x43, 12, 100, 0x08),
-	TWL4030_FIXED_LDO(VINTDIG, 0x47, 1500, 13, 100, 0x08),
-	TWL4030_ADJUSTABLE_LDO(VIO, 0x4b, 14, 1000, 0x08),
-	TWL4030_ADJUSTABLE_LDO(VDD1, 0x55, 15, 1000, 0x08),
-	TWL4030_ADJUSTABLE_LDO(VDD2, 0x63, 16, 1000, 0x08),
-	TWL4030_FIXED_LDO(VUSB1V5, 0x71, 1500, 17, 100, 0x08),
-	TWL4030_FIXED_LDO(VUSB1V8, 0x74, 1800, 18, 100, 0x08),
-	TWL4030_FIXED_LDO(VUSB3V1, 0x77, 3100, 19, 150, 0x08),
-	/* VUSBCP is managed *only* by the USB subchip */
+TWL4030_ADJUSTABLE_LDO(VAUX1, 0x17, 1, 100, 0x08);
+TWL4030_ADJUSTABLE_LDO(VAUX2_4030, 0x1b, 2, 100, 0x08);
+TWL4030_ADJUSTABLE_LDO(VAUX2, 0x1b, 2, 100, 0x08);
+TWL4030_ADJUSTABLE_LDO(VAUX3, 0x1f, 3, 100, 0x08);
+TWL4030_ADJUSTABLE_LDO(VAUX4, 0x23, 4, 100, 0x08);
+TWL4030_ADJUSTABLE_LDO(VMMC1, 0x27, 5, 100, 0x08);
+TWL4030_ADJUSTABLE_LDO(VMMC2, 0x2b, 6, 100, 0x08);
+TWL4030_ADJUSTABLE_LDO(VPLL1, 0x2f, 7, 100, 0x00);
+TWL4030_ADJUSTABLE_LDO(VPLL2, 0x33, 8, 100, 0x08);
+TWL4030_ADJUSTABLE_LDO(VSIM, 0x37, 9, 100, 0x00);
+TWL4030_ADJUSTABLE_LDO(VDAC, 0x3b, 10, 100, 0x08);
+TWL4030_ADJUSTABLE_LDO(VINTANA2, 0x43, 12, 100, 0x08);
+TWL4030_ADJUSTABLE_LDO(VIO, 0x4b, 14, 1000, 0x08);
+TWL4030_ADJUSTABLE_SMPS(VDD1, 0x55, 15, 1000, 0x08, 68);
+TWL4030_ADJUSTABLE_SMPS(VDD2, 0x63, 16, 1000, 0x08, 69);
+/* VUSBCP is managed *only* by the USB subchip */
+TWL4030_FIXED_LDO(VINTANA1, 0x3f, 1500, 11, 100, 0x08);
+TWL4030_FIXED_LDO(VINTDIG, 0x47, 1500, 13, 100, 0x08);
+TWL4030_FIXED_LDO(VUSB1V5, 0x71, 1500, 17, 100, 0x08);
+TWL4030_FIXED_LDO(VUSB1V8, 0x74, 1800, 18, 100, 0x08);
+TWL4030_FIXED_LDO(VUSB3V1, 0x77, 3100, 19, 150, 0x08);
 
-	/* 6030 REG with base as PMC Slave Misc : 0x0030 */
-	/* Turnon-delay and remap configuration values for 6030 are not
-	   verified since the specification is not public */
-	TWL6030_ADJUSTABLE_LDO(VAUX1_6030, 0x54, 1000, 3300, 1, 0x21),
-	TWL6030_ADJUSTABLE_LDO(VAUX2_6030, 0x58, 1000, 3300, 2, 0x21),
-	TWL6030_ADJUSTABLE_LDO(VAUX3_6030, 0x5c, 1000, 3300, 3, 0x21),
-	TWL6030_ADJUSTABLE_LDO(VMMC, 0x68, 1000, 3300, 4, 0x21),
-	TWL6030_ADJUSTABLE_LDO(VPP, 0x6c, 1000, 3300, 5, 0x21),
-	TWL6030_ADJUSTABLE_LDO(VUSIM, 0x74, 1000, 3300, 7, 0x21),
-	TWL6030_FIXED_LDO(VANA, 0x50, 2100, 15, 0, 0x21),
-	TWL6030_FIXED_LDO(VCXIO, 0x60, 1800, 16, 0, 0x21),
-	TWL6030_FIXED_LDO(VDAC, 0x64, 1800, 17, 0, 0x21),
-	TWL6030_FIXED_LDO(VUSB, 0x70, 3300, 18, 0, 0x21)
+#define TWL_OF_MATCH(comp, family, label) \
+	{ \
+		.compatible = comp, \
+		.data = &family##_INFO_##label, \
+	}
+
+#define TWL4030_OF_MATCH(comp, label) TWL_OF_MATCH(comp, TWL4030, label)
+#define TWL6030_OF_MATCH(comp, label) TWL_OF_MATCH(comp, TWL6030, label)
+#define TWL6032_OF_MATCH(comp, label) TWL_OF_MATCH(comp, TWL6032, label)
+#define TWLFIXED_OF_MATCH(comp, label) TWL_OF_MATCH(comp, TWLFIXED, label)
+#define TWLSMPS_OF_MATCH(comp, label) TWL_OF_MATCH(comp, TWLSMPS, label)
+
+static const struct of_device_id twl_of_match[] = {
+	TWL4030_OF_MATCH("ti,twl4030-vaux1", VAUX1),
+	TWL4030_OF_MATCH("ti,twl4030-vaux2", VAUX2_4030),
+	TWL4030_OF_MATCH("ti,twl5030-vaux2", VAUX2),
+	TWL4030_OF_MATCH("ti,twl4030-vaux3", VAUX3),
+	TWL4030_OF_MATCH("ti,twl4030-vaux4", VAUX4),
+	TWL4030_OF_MATCH("ti,twl4030-vmmc1", VMMC1),
+	TWL4030_OF_MATCH("ti,twl4030-vmmc2", VMMC2),
+	TWL4030_OF_MATCH("ti,twl4030-vpll1", VPLL1),
+	TWL4030_OF_MATCH("ti,twl4030-vpll2", VPLL2),
+	TWL4030_OF_MATCH("ti,twl4030-vsim", VSIM),
+	TWL4030_OF_MATCH("ti,twl4030-vdac", VDAC),
+	TWL4030_OF_MATCH("ti,twl4030-vintana2", VINTANA2),
+	TWL4030_OF_MATCH("ti,twl4030-vio", VIO),
+	TWL4030_OF_MATCH("ti,twl4030-vdd1", VDD1),
+	TWL4030_OF_MATCH("ti,twl4030-vdd2", VDD2),
+	TWLFIXED_OF_MATCH("ti,twl4030-vintana1", VINTANA1),
+	TWLFIXED_OF_MATCH("ti,twl4030-vintdig", VINTDIG),
+	TWLFIXED_OF_MATCH("ti,twl4030-vusb1v5", VUSB1V5),
+	TWLFIXED_OF_MATCH("ti,twl4030-vusb1v8", VUSB1V8),
+	TWLFIXED_OF_MATCH("ti,twl4030-vusb3v1", VUSB3V1),
+	{},
 };
+MODULE_DEVICE_TABLE(of, twl_of_match);
 
-static int __devinit twlreg_probe(struct platform_device *pdev)
+static int twlreg_probe(struct platform_device *pdev)
 {
-	int				i;
+	int id;
 	struct twlreg_info		*info;
+	const struct twlreg_info	*template;
 	struct regulator_init_data	*initdata;
 	struct regulation_constraints	*c;
 	struct regulator_dev		*rdev;
+	struct regulator_config		config = { };
 
-	for (i = 0, info = NULL; i < ARRAY_SIZE(twl_regs); i++) {
-		if (twl_regs[i].desc.id != pdev->id)
-			continue;
-		info = twl_regs + i;
-		break;
-	}
-	if (!info)
+	template = of_device_get_match_data(&pdev->dev);
+	if (!template)
 		return -ENODEV;
 
-	initdata = pdev->dev.platform_data;
+	id = template->desc.id;
+	initdata = of_get_regulator_init_data(&pdev->dev, pdev->dev.of_node,
+						&template->desc);
 	if (!initdata)
 		return -EINVAL;
+
+	info = devm_kmemdup(&pdev->dev, template, sizeof(*info), GFP_KERNEL);
+	if (!info)
+		return -ENOMEM;
 
 	/* Constrain board-specific capabilities according to what
 	 * this driver and the chip itself can actually do.
@@ -609,7 +607,7 @@ static int __devinit twlreg_probe(struct platform_device *pdev)
 	c->valid_ops_mask &= REGULATOR_CHANGE_VOLTAGE
 				| REGULATOR_CHANGE_MODE
 				| REGULATOR_CHANGE_STATUS;
-	switch (pdev->id) {
+	switch (id) {
 	case TWL4030_REG_VIO:
 	case TWL4030_REG_VDD1:
 	case TWL4030_REG_VDD2:
@@ -623,7 +621,12 @@ static int __devinit twlreg_probe(struct platform_device *pdev)
 		break;
 	}
 
-	rdev = regulator_register(&info->desc, &pdev->dev, initdata, info);
+	config.dev = &pdev->dev;
+	config.init_data = initdata;
+	config.driver_data = info;
+	config.of_node = pdev->dev.of_node;
+
+	rdev = devm_regulator_register(&pdev->dev, &info->desc, &config);
 	if (IS_ERR(rdev)) {
 		dev_err(&pdev->dev, "can't register %s, %ld\n",
 				info->desc.name, PTR_ERR(rdev));
@@ -631,8 +634,7 @@ static int __devinit twlreg_probe(struct platform_device *pdev)
 	}
 	platform_set_drvdata(pdev, rdev);
 
-	twlreg_write(info, TWL_MODULE_PM_RECEIVER, VREG_REMAP,
-						info->remap);
+	twlreg_write(info, TWL_MODULE_PM_RECEIVER, VREG_REMAP, info->remap);
 
 	/* NOTE:  many regulators support short-circuit IRQs (presentable
 	 * as REGULATOR_OVER_CURRENT notifications?) configured via:
@@ -645,22 +647,17 @@ static int __devinit twlreg_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int __devexit twlreg_remove(struct platform_device *pdev)
-{
-	regulator_unregister(platform_get_drvdata(pdev));
-	return 0;
-}
-
-MODULE_ALIAS("platform:twl_reg");
+MODULE_ALIAS("platform:twl4030_reg");
 
 static struct platform_driver twlreg_driver = {
 	.probe		= twlreg_probe,
-	.remove		= __devexit_p(twlreg_remove),
 	/* NOTE: short name, to work around driver model truncation of
 	 * "twl_regulator.12" (and friends) to "twl_regulator.1".
 	 */
-	.driver.name	= "twl_reg",
-	.driver.owner	= THIS_MODULE,
+	.driver  = {
+		.name  = "twl4030_reg",
+		.of_match_table = of_match_ptr(twl_of_match),
+	},
 };
 
 static int __init twlreg_init(void)
@@ -675,5 +672,5 @@ static void __exit twlreg_exit(void)
 }
 module_exit(twlreg_exit)
 
-MODULE_DESCRIPTION("TWL regulator driver");
+MODULE_DESCRIPTION("TWL4030 regulator driver");
 MODULE_LICENSE("GPL");

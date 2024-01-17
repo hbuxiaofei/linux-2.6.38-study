@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * HTC Herald board configuration
  * Copyright (C) 2009 Cory Maccarrone <darkstar6262@gmail.com>
@@ -6,51 +7,33 @@
  * Based on the board-htcwizard.c file from the linwizard project:
  * Copyright (C) 2006 Unai Uribarri
  * Copyright (C) 2008 linwizard.sourceforge.net
- *
- * This  program is  free  software; you  can  redistribute it  and/or
- * modify  it under the  terms of  the GNU  General Public  License as
- * published by the Free Software  Foundation; either version 2 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT  ANY  WARRANTY;  without   even  the  implied  warranty  of
- * MERCHANTABILITY or  FITNESS FOR A PARTICULAR PURPOSE.   See the GNU
- * General Public License for more details.
- *
- * You should have  received a copy of the  GNU General Public License
- * along  with  this program;  if  not,  write  to the  Free  Software
- * Foundation,  Inc.,  51 Franklin  Street,  Fifth  Floor, Boston,  MA
- * 02110-1301, USA.
- *
  */
-
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/platform_device.h>
 #include <linux/input.h>
-#include <linux/io.h>
+#include <linux/delay.h>
 #include <linux/gpio.h>
 #include <linux/gpio_keys.h>
 #include <linux/i2c.h>
-#include <linux/i2c-gpio.h>
+#include <linux/platform_data/i2c-gpio.h>
 #include <linux/htcpld.h>
 #include <linux/leds.h>
 #include <linux/spi/spi.h>
 #include <linux/spi/ads7846.h>
+#include <linux/omapfb.h>
+#include <linux/platform_data/keypad-omap.h>
+#include <linux/soc/ti/omap1-io.h>
 
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
 
-#include <plat/omap7xx.h>
-#include <plat/common.h>
-#include <plat/board.h>
-#include <plat/keypad.h>
-#include <plat/usb.h>
-#include <plat/mmc.h>
-
-#include <mach/irqs.h>
-
-#include <linux/delay.h>
+#include "hardware.h"
+#include "omap7xx.h"
+#include "mmc.h"
+#include "irqs.h"
+#include "usb.h"
+#include "common.h"
 
 /* LCD register definition */
 #define       OMAP_LCDC_CONTROL               (0xfffec000 + 0x00)
@@ -158,13 +141,6 @@
 #define HTCPLD_GPIO_DOWN_DPAD		HTCPLD_BASE(7, 4)
 #define HTCPLD_GPIO_ENTER_DPAD		HTCPLD_BASE(7, 3)
 
-/*
- * The htcpld chip requires a gpio write to a specific line
- * to re-enable interrupts after one has occurred.
- */
-#define HTCPLD_GPIO_INT_RESET_HI	HTCPLD_BASE(2, 7)
-#define HTCPLD_GPIO_INT_RESET_LO	HTCPLD_BASE(2, 0)
-
 /* Chip 5 */
 #define HTCPLD_IRQ_RIGHT_KBD		HTCPLD_IRQ(0, 7)
 #define HTCPLD_IRQ_UP_KBD		HTCPLD_IRQ(0, 6)
@@ -187,7 +163,7 @@ static const unsigned int htc_herald_keymap[] = {
 	KEY(3, 0, KEY_VOLUMEUP), /* Volume up */
 	KEY(4, 0, KEY_F2),  /* Right bar (landscape) */
 	KEY(5, 0, KEY_MAIL), /* Win key (portrait) */
-	KEY(6, 0, KEY_DIRECTORY), /* Right bar (protrait) */
+	KEY(6, 0, KEY_DIRECTORY), /* Right bar (portrait) */
 	KEY(0, 1, KEY_LEFTCTRL), /* Windows key */
 	KEY(1, 1, KEY_COMMA),
 	KEY(2, 1, KEY_M),
@@ -294,7 +270,7 @@ static struct platform_device herald_gpiokeys_device = {
 };
 
 /* LEDs for the Herald.  These connect to the HTCPLD GPIO device. */
-static struct gpio_led gpio_leds[] = {
+static const struct gpio_led gpio_leds[] = {
 	{"dpad",        NULL, HTCPLD_GPIO_LED_DPAD,        0, 0, LEDS_GPIO_DEFSTATE_OFF},
 	{"kbd",         NULL, HTCPLD_GPIO_LED_KBD,         0, 0, LEDS_GPIO_DEFSTATE_OFF},
 	{"vibrate",     NULL, HTCPLD_GPIO_LED_VIBRATE,     0, 0, LEDS_GPIO_DEFSTATE_OFF},
@@ -325,13 +301,11 @@ static struct platform_device gpio_leds_device = {
 
 static struct resource htcpld_resources[] = {
 	[0] = {
-		.start  = OMAP_GPIO_IRQ(HTCHERALD_GIRQ_BTNS),
-		.end    = OMAP_GPIO_IRQ(HTCHERALD_GIRQ_BTNS),
 		.flags  = IORESOURCE_IRQ,
 	},
 };
 
-struct htcpld_chip_platform_data htcpld_chips[] = {
+static struct htcpld_chip_platform_data htcpld_chips[] = {
 	[0] = {
 		.addr		= 0x03,
 		.reset		= 0x04,
@@ -366,9 +340,7 @@ struct htcpld_chip_platform_data htcpld_chips[] = {
 	},
 };
 
-struct htcpld_core_platform_data htcpld_pfdata = {
-	.int_reset_gpio_hi = HTCPLD_GPIO_INT_RESET_HI,
-	.int_reset_gpio_lo = HTCPLD_GPIO_INT_RESET_LO,
+static struct htcpld_core_platform_data htcpld_pfdata = {
 	.i2c_adapter_id	   = 1,
 
 	.chip		   = htcpld_chips,
@@ -395,12 +367,8 @@ static struct omap_usb_config htcherald_usb_config __initdata = {
 };
 
 /* LCD Device resources */
-static struct omap_lcd_config htcherald_lcd_config __initdata = {
+static const struct omap_lcd_config htcherald_lcd_config __initconst = {
 	.ctrl_name	= "internal",
-};
-
-static struct omap_board_config_kernel htcherald_config[] __initdata = {
-	{ OMAP_TAG_LCD, &htcherald_lcd_config },
 };
 
 static struct platform_device lcd_device = {
@@ -409,7 +377,7 @@ static struct platform_device lcd_device = {
 };
 
 /* MMC Card */
-#if defined(CONFIG_MMC_OMAP) || defined(CONFIG_MMC_OMAP_MODULE)
+#if IS_ENABLED(CONFIG_MMC_OMAP)
 static struct omap_mmc_platform_data htc_mmc1_data = {
 	.nr_slots                       = 1,
 	.switch_slot                    = NULL,
@@ -455,7 +423,6 @@ static struct spi_board_info __initdata htcherald_spi_board_info[] = {
 	{
 		.modalias		= "ads7846",
 		.platform_data		= &htcherald_ts_platform_data,
-		.irq			= OMAP_GPIO_IRQ(HTCHERALD_GPIO_TS),
 		.max_speed_hz		= 2500000,
 		.bus_num		= 2,
 		.chip_select		= 1,
@@ -484,8 +451,7 @@ static void __init htcherald_lcd_init(void)
 				break;
 		}
 		if (!tries)
-			printk(KERN_WARNING "Timeout waiting for end of frame "
-			       "-- LCD may not be available\n");
+			pr_err("Timeout waiting for end of frame -- LCD may not be available\n");
 
 		/* turn off DMA */
 		reg = omap_readw(OMAP_DMA_LCD_CCR);
@@ -500,7 +466,7 @@ static void __init htcherald_lcd_init(void)
 
 static void __init htcherald_map_io(void)
 {
-	omap1_map_common_io();
+	omap7xx_map_io();
 
 	/*
 	 * The LCD panel must be disabled and DMA turned off here, as doing
@@ -581,8 +547,8 @@ static void __init htcherald_init(void)
 	printk(KERN_INFO "HTC Herald init.\n");
 
 	/* Do board initialization before we register all the devices */
-	omap_board_config = htcherald_config;
-	omap_board_config_size = ARRAY_SIZE(htcherald_config);
+	htcpld_resources[0].start = gpio_to_irq(HTCHERALD_GIRQ_BTNS);
+	htcpld_resources[0].end = gpio_to_irq(HTCHERALD_GIRQ_BTNS);
 	platform_add_devices(devices, ARRAY_SIZE(devices));
 
 	htcherald_disable_watchdog();
@@ -590,31 +556,30 @@ static void __init htcherald_init(void)
 	htcherald_usb_enable();
 	omap1_usb_init(&htcherald_usb_config);
 
+	htcherald_spi_board_info[0].irq = gpio_to_irq(HTCHERALD_GPIO_TS);
 	spi_register_board_info(htcherald_spi_board_info,
 		ARRAY_SIZE(htcherald_spi_board_info));
 
 	omap_register_i2c_bus(1, 100, NULL, 0);
 
-#if defined(CONFIG_MMC_OMAP) || defined(CONFIG_MMC_OMAP_MODULE)
+#if IS_ENABLED(CONFIG_MMC_OMAP)
 	htc_mmc_data[0] = &htc_mmc1_data;
 	omap1_init_mmc(htc_mmc_data, 1);
 #endif
-}
 
-static void __init htcherald_init_irq(void)
-{
-	printk(KERN_INFO "htcherald_init_irq.\n");
-	omap1_init_common_hw();
-	omap_init_irq();
+	omapfb_set_lcd_config(&htcherald_lcd_config);
 }
 
 MACHINE_START(HERALD, "HTC Herald")
 	/* Maintainer: Cory Maccarrone <darkstar6262@gmail.com> */
 	/* Maintainer: wing-linux.sourceforge.net */
-	.boot_params    = 0x10000100,
+	.atag_offset    = 0x100,
 	.map_io         = htcherald_map_io,
-	.reserve	= omap_reserve,
-	.init_irq       = htcherald_init_irq,
+	.init_early     = omap1_init_early,
+	.init_irq       = omap1_init_irq,
+	.handle_irq	= omap1_handle_irq,
 	.init_machine   = htcherald_init,
-	.timer          = &omap_timer,
+	.init_late	= omap1_init_late,
+	.init_time	= omap1_timer_init,
+	.restart	= omap1_restart,
 MACHINE_END

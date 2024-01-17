@@ -1,14 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  c 2001 PPC 64 Team, IBM Corp
  *
- *      This program is free software; you can redistribute it and/or
- *      modify it under the terms of the GNU General Public License
- *      as published by the Free Software Foundation; either version
- *      2 of the License, or (at your option) any later version.
- *
  * /dev/nvram driver for PPC64
- *
- * This perhaps should live in drivers/char
  */
 
 
@@ -16,10 +10,12 @@
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/spinlock.h>
-#include <asm/uaccess.h>
+#include <linux/slab.h>
+#include <linux/ctype.h>
+#include <linux/uaccess.h>
+#include <linux/of.h>
 #include <asm/nvram.h>
 #include <asm/rtas.h>
-#include <asm/prom.h>
 #include <asm/machdep.h>
 
 /* Max bytes to read/write in one go */
@@ -30,17 +26,13 @@ static int nvram_fetch, nvram_store;
 static char nvram_buf[NVRW_CNT];	/* assume this is in the first 4GB */
 static DEFINE_SPINLOCK(nvram_lock);
 
-static long nvram_error_log_index = -1;
-static long nvram_error_log_size = 0;
+/* See clobbering_unread_rtas_event() */
+#define NVRAM_RTAS_READ_TIMEOUT 5		/* seconds */
+static time64_t last_unread_rtas_event;		/* timestamp */
 
-struct err_log_info {
-	int error_type;
-	unsigned int seq_num;
-};
-#define NVRAM_MAX_REQ		2079
-#define NVRAM_MIN_REQ		1055
-
-#define NVRAM_LOG_PART_NAME	"ibm,rtas-log"
+#ifdef CONFIG_PSTORE
+time64_t last_rtas_event;
+#endif
 
 static ssize_t pSeries_nvram_read(char *buf, size_t count, loff_t *index)
 {
@@ -133,106 +125,35 @@ static ssize_t pSeries_nvram_get_size(void)
 	return nvram_size ? nvram_size : -ENODEV;
 }
 
-
 /* nvram_write_error_log
  *
  * We need to buffer the error logs into nvram to ensure that we have
- * the failure information to decode.  If we have a severe error there
- * is no way to guarantee that the OS or the machine is in a state to
- * get back to user land and write the error to disk.  For example if
- * the SCSI device driver causes a Machine Check by writing to a bad
- * IO address, there is no way of guaranteeing that the device driver
- * is in any state that is would also be able to write the error data
- * captured to disk, thus we buffer it in NVRAM for analysis on the
- * next boot.
- *
- * In NVRAM the partition containing the error log buffer will looks like:
- * Header (in bytes):
- * +-----------+----------+--------+------------+------------------+
- * | signature | checksum | length | name       | data             |
- * |0          |1         |2      3|4         15|16        length-1|
- * +-----------+----------+--------+------------+------------------+
- *
- * The 'data' section would look like (in bytes):
- * +--------------+------------+-----------------------------------+
- * | event_logged | sequence # | error log                         |
- * |0            3|4          7|8            nvram_error_log_size-1|
- * +--------------+------------+-----------------------------------+
- *
- * event_logged: 0 if event has not been logged to syslog, 1 if it has
- * sequence #: The unique sequence # for each event. (until it wraps)
- * error log: The error log from event_scan
+ * the failure information to decode.
  */
 int nvram_write_error_log(char * buff, int length,
                           unsigned int err_type, unsigned int error_log_cnt)
 {
-	int rc;
-	loff_t tmp_index;
-	struct err_log_info info;
-	
-	if (nvram_error_log_index == -1) {
-		return -ESPIPE;
+	int rc = nvram_write_os_partition(&rtas_log_partition, buff, length,
+						err_type, error_log_cnt);
+	if (!rc) {
+		last_unread_rtas_event = ktime_get_real_seconds();
+#ifdef CONFIG_PSTORE
+		last_rtas_event = ktime_get_real_seconds();
+#endif
 	}
 
-	if (length > nvram_error_log_size) {
-		length = nvram_error_log_size;
-	}
-
-	info.error_type = err_type;
-	info.seq_num = error_log_cnt;
-
-	tmp_index = nvram_error_log_index;
-
-	rc = ppc_md.nvram_write((char *)&info, sizeof(struct err_log_info), &tmp_index);
-	if (rc <= 0) {
-		printk(KERN_ERR "nvram_write_error_log: Failed nvram_write (%d)\n", rc);
-		return rc;
-	}
-
-	rc = ppc_md.nvram_write(buff, length, &tmp_index);
-	if (rc <= 0) {
-		printk(KERN_ERR "nvram_write_error_log: Failed nvram_write (%d)\n", rc);
-		return rc;
-	}
-	
-	return 0;
+	return rc;
 }
 
 /* nvram_read_error_log
  *
  * Reads nvram for error log for at most 'length'
  */
-int nvram_read_error_log(char * buff, int length,
-                         unsigned int * err_type, unsigned int * error_log_cnt)
+int nvram_read_error_log(char *buff, int length,
+			unsigned int *err_type, unsigned int *error_log_cnt)
 {
-	int rc;
-	loff_t tmp_index;
-	struct err_log_info info;
-	
-	if (nvram_error_log_index == -1)
-		return -1;
-
-	if (length > nvram_error_log_size)
-		length = nvram_error_log_size;
-
-	tmp_index = nvram_error_log_index;
-
-	rc = ppc_md.nvram_read((char *)&info, sizeof(struct err_log_info), &tmp_index);
-	if (rc <= 0) {
-		printk(KERN_ERR "nvram_read_error_log: Failed nvram_read (%d)\n", rc);
-		return rc;
-	}
-
-	rc = ppc_md.nvram_read(buff, length, &tmp_index);
-	if (rc <= 0) {
-		printk(KERN_ERR "nvram_read_error_log: Failed nvram_read (%d)\n", rc);
-		return rc;
-	}
-
-	*error_log_cnt = info.seq_num;
-	*err_type = info.error_type;
-
-	return 0;
+	return nvram_read_partition(&rtas_log_partition, buff, length,
+						err_type, error_log_cnt);
 }
 
 /* This doesn't actually zero anything, but it sets the event_logged
@@ -244,90 +165,54 @@ int nvram_clear_error_log(void)
 	int clear_word = ERR_FLAG_ALREADY_LOGGED;
 	int rc;
 
-	if (nvram_error_log_index == -1)
+	if (rtas_log_partition.index == -1)
 		return -1;
 
-	tmp_index = nvram_error_log_index;
+	tmp_index = rtas_log_partition.index;
 	
 	rc = ppc_md.nvram_write((char *)&clear_word, sizeof(int), &tmp_index);
 	if (rc <= 0) {
 		printk(KERN_ERR "nvram_clear_error_log: Failed nvram_write (%d)\n", rc);
 		return rc;
 	}
+	last_unread_rtas_event = 0;
 
 	return 0;
 }
 
-/* pseries_nvram_init_log_partition
+/*
+ * Are we using the ibm,rtas-log for oops/panic reports?  And if so,
+ * would logging this oops/panic overwrite an RTAS event that rtas_errd
+ * hasn't had a chance to read and process?  Return 1 if so, else 0.
  *
- * This will setup the partition we need for buffering the
- * error logs and cleanup partitions if needed.
- *
- * The general strategy is the following:
- * 1.) If there is log partition large enough then use it.
- * 2.) If there is none large enough, search
- * for a free partition that is large enough.
- * 3.) If there is not a free partition large enough remove 
- * _all_ OS partitions and consolidate the space.
- * 4.) Will first try getting a chunk that will satisfy the maximum
- * error log size (NVRAM_MAX_REQ).
- * 5.) If the max chunk cannot be allocated then try finding a chunk
- * that will satisfy the minum needed (NVRAM_MIN_REQ).
+ * We assume that if rtas_errd hasn't read the RTAS event in
+ * NVRAM_RTAS_READ_TIMEOUT seconds, it's probably not going to.
  */
-static int __init pseries_nvram_init_log_partition(void)
+int clobbering_unread_rtas_event(void)
 {
-	loff_t p;
-	int size;
+	return (oops_log_partition.index == rtas_log_partition.index
+		&& last_unread_rtas_event
+		&& ktime_get_real_seconds() - last_unread_rtas_event <=
+						NVRAM_RTAS_READ_TIMEOUT);
+}
+
+static int __init pseries_nvram_init_log_partitions(void)
+{
+	int rc;
 
 	/* Scan nvram for partitions */
 	nvram_scan_partitions();
 
-	/* Lookg for ours */
-	p = nvram_find_partition(NVRAM_LOG_PART_NAME, NVRAM_SIG_OS, &size);
-
-	/* Found one but too small, remove it */
-	if (p && size < NVRAM_MIN_REQ) {
-		pr_info("nvram: Found too small "NVRAM_LOG_PART_NAME" partition"
-			",removing it...");
-		nvram_remove_partition(NVRAM_LOG_PART_NAME, NVRAM_SIG_OS);
-		p = 0;
-	}
-
-	/* Create one if we didn't find */
-	if (!p) {
-		p = nvram_create_partition(NVRAM_LOG_PART_NAME, NVRAM_SIG_OS,
-					   NVRAM_MAX_REQ, NVRAM_MIN_REQ);
-		/* No room for it, try to get rid of any OS partition
-		 * and try again
-		 */
-		if (p == -ENOSPC) {
-			pr_info("nvram: No room to create "NVRAM_LOG_PART_NAME
-				" partition, deleting all OS partitions...");
-			nvram_remove_partition(NULL, NVRAM_SIG_OS);
-			p = nvram_create_partition(NVRAM_LOG_PART_NAME,
-						   NVRAM_SIG_OS, NVRAM_MAX_REQ,
-						   NVRAM_MIN_REQ);
-		}
-	}
-
-	if (p <= 0) {
-		pr_err("nvram: Failed to find or create "NVRAM_LOG_PART_NAME
-		       " partition, err %d\n", (int)p);
-		return 0;
-	}
-
-	nvram_error_log_index = p;
-	nvram_error_log_size = nvram_get_partition_size(p) -
-		sizeof(struct err_log_info);
-	
+	rc = nvram_init_os_partition(&rtas_log_partition);
+	nvram_init_oops_partition(rc == 0);
 	return 0;
 }
-machine_arch_initcall(pseries, pseries_nvram_init_log_partition);
+machine_arch_initcall(pseries, pseries_nvram_init_log_partitions);
 
 int __init pSeries_nvram_init(void)
 {
 	struct device_node *nvram;
-	const unsigned int *nbytes_p;
+	const __be32 *nbytes_p;
 	unsigned int proplen;
 
 	nvram = of_find_node_by_type(NULL, "nvram");
@@ -340,7 +225,7 @@ int __init pSeries_nvram_init(void)
 		return -EIO;
 	}
 
-	nvram_size = *nbytes_p;
+	nvram_size = be32_to_cpup(nbytes_p);
 
 	nvram_fetch = rtas_token("nvram-fetch");
 	nvram_store = rtas_token("nvram-store");
@@ -353,3 +238,4 @@ int __init pSeries_nvram_init(void)
 
 	return 0;
 }
+

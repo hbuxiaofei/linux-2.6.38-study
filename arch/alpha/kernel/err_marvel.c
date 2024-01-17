@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *	linux/arch/alpha/kernel/err_marvel.c
  *
@@ -1027,7 +1028,7 @@ marvel_process_logout_frame(struct ev7_lf_subpackets *lf_subpackets, int print)
 	 * normal operation, dismiss them.
 	 *
 	 * Dismiss if:
-	 *	C_STAT		= 0x14 		(Error Reponse)
+	 *	C_STAT		= 0x14 		(Error Response)
 	 *	C_STS<3>	= 0    		(C_ADDR valid)
 	 *	C_ADDR<42>	= 1    		(I/O)
 	 *	C_ADDR<31:22>	= 111110xxb	(PCI Config space)

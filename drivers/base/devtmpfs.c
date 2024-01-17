@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * devtmpfs - kernel-maintained tmpfs-based /dev
  *
@@ -7,34 +8,49 @@
  * devtmpfs, a tmpfs-based filesystem is created. Every driver-core
  * device which requests a device node, will add a node in this
  * filesystem.
- * By default, all devices are named after the the name of the
- * device, owned by root and have a default mode of 0600. Subsystems
- * can overwrite the default setting if needed.
+ * By default, all devices are named after the name of the device,
+ * owned by root and have a default mode of 0600. Subsystems can
+ * overwrite the default setting if needed.
  */
 
 #include <linux/kernel.h>
 #include <linux/syscalls.h>
 #include <linux/mount.h>
 #include <linux/device.h>
-#include <linux/genhd.h>
+#include <linux/blkdev.h>
 #include <linux/namei.h>
 #include <linux/fs.h>
 #include <linux/shmem_fs.h>
 #include <linux/ramfs.h>
-#include <linux/cred.h>
 #include <linux/sched.h>
-#include <linux/init_task.h>
 #include <linux/slab.h>
+#include <linux/kthread.h>
+#include <linux/init_syscalls.h>
+#include <uapi/linux/mount.h>
+#include "base.h"
 
-static struct vfsmount *dev_mnt;
-
-#if defined CONFIG_DEVTMPFS_MOUNT
-static int mount_dev = 1;
+#ifdef CONFIG_DEVTMPFS_SAFE
+#define DEVTMPFS_MFLAGS       (MS_SILENT | MS_NOEXEC | MS_NOSUID)
 #else
-static int mount_dev;
+#define DEVTMPFS_MFLAGS       (MS_SILENT)
 #endif
 
-static DEFINE_MUTEX(dirlock);
+static struct task_struct *thread;
+
+static int __initdata mount_dev = IS_ENABLED(CONFIG_DEVTMPFS_MOUNT);
+
+static DEFINE_SPINLOCK(req_lock);
+
+static struct req {
+	struct req *next;
+	struct completion done;
+	int err;
+	const char *name;
+	umode_t mode;	/* 0 => delete */
+	kuid_t uid;
+	kgid_t gid;
+	struct device *dev;
+} *requests;
 
 static int __init mount_param(char *str)
 {
@@ -43,20 +59,37 @@ static int __init mount_param(char *str)
 }
 __setup("devtmpfs.mount=", mount_param);
 
-static struct dentry *dev_mount(struct file_system_type *fs_type, int flags,
+static struct vfsmount *mnt;
+
+static struct dentry *public_dev_mount(struct file_system_type *fs_type, int flags,
 		      const char *dev_name, void *data)
 {
-#ifdef CONFIG_TMPFS
-	return mount_single(fs_type, flags, data, shmem_fill_super);
-#else
-	return mount_single(fs_type, flags, data, ramfs_fill_super);
-#endif
+	struct super_block *s = mnt->mnt_sb;
+	int err;
+
+	atomic_inc(&s->s_active);
+	down_write(&s->s_umount);
+	err = reconfigure_single(s, flags, data);
+	if (err < 0) {
+		deactivate_locked_super(s);
+		return ERR_PTR(err);
+	}
+	return dget(s->s_root);
 }
+
+static struct file_system_type internal_fs_type = {
+	.name = "devtmpfs",
+#ifdef CONFIG_TMPFS
+	.init_fs_context = shmem_init_fs_context,
+#else
+	.init_fs_context = ramfs_init_fs_context,
+#endif
+	.kill_sb = kill_litter_super,
+};
 
 static struct file_system_type dev_fs_type = {
 	.name = "devtmpfs",
-	.mount = dev_mount,
-	.kill_sb = kill_litter_super,
+	.mount = public_dev_mount,
 };
 
 #ifdef CONFIG_BLOCK
@@ -68,177 +101,181 @@ static inline int is_blockdev(struct device *dev)
 static inline int is_blockdev(struct device *dev) { return 0; }
 #endif
 
-static int dev_mkdir(const char *name, mode_t mode)
+static int devtmpfs_submit_req(struct req *req, const char *tmp)
 {
-	struct nameidata nd;
-	struct dentry *dentry;
-	int err;
+	init_completion(&req->done);
 
-	err = vfs_path_lookup(dev_mnt->mnt_root, dev_mnt,
-			      name, LOOKUP_PARENT, &nd);
-	if (err)
-		return err;
+	spin_lock(&req_lock);
+	req->next = requests;
+	requests = req;
+	spin_unlock(&req_lock);
 
-	dentry = lookup_create(&nd, 1);
-	if (!IS_ERR(dentry)) {
-		err = vfs_mkdir(nd.path.dentry->d_inode, dentry, mode);
-		if (!err)
-			/* mark as kernel-created inode */
-			dentry->d_inode->i_private = &dev_mnt;
-		dput(dentry);
-	} else {
-		err = PTR_ERR(dentry);
-	}
+	wake_up_process(thread);
+	wait_for_completion(&req->done);
 
-	mutex_unlock(&nd.path.dentry->d_inode->i_mutex);
-	path_put(&nd.path);
-	return err;
-}
+	kfree(tmp);
 
-static int create_path(const char *nodepath)
-{
-	int err;
-
-	mutex_lock(&dirlock);
-	err = dev_mkdir(nodepath, 0755);
-	if (err == -ENOENT) {
-		char *path;
-		char *s;
-
-		/* parent directories do not exist, create them */
-		path = kstrdup(nodepath, GFP_KERNEL);
-		if (!path) {
-			err = -ENOMEM;
-			goto out;
-		}
-		s = path;
-		for (;;) {
-			s = strchr(s, '/');
-			if (!s)
-				break;
-			s[0] = '\0';
-			err = dev_mkdir(path, 0755);
-			if (err && err != -EEXIST)
-				break;
-			s[0] = '/';
-			s++;
-		}
-		kfree(path);
-	}
-out:
-	mutex_unlock(&dirlock);
-	return err;
+	return req->err;
 }
 
 int devtmpfs_create_node(struct device *dev)
 {
 	const char *tmp = NULL;
-	const char *nodename;
-	const struct cred *curr_cred;
-	mode_t mode = 0;
-	struct nameidata nd;
-	struct dentry *dentry;
-	int err;
+	struct req req;
 
-	if (!dev_mnt)
+	if (!thread)
 		return 0;
 
-	nodename = device_get_devnode(dev, &mode, &tmp);
-	if (!nodename)
+	req.mode = 0;
+	req.uid = GLOBAL_ROOT_UID;
+	req.gid = GLOBAL_ROOT_GID;
+	req.name = device_get_devnode(dev, &req.mode, &req.uid, &req.gid, &tmp);
+	if (!req.name)
 		return -ENOMEM;
 
-	if (mode == 0)
-		mode = 0600;
+	if (req.mode == 0)
+		req.mode = 0600;
 	if (is_blockdev(dev))
-		mode |= S_IFBLK;
+		req.mode |= S_IFBLK;
 	else
-		mode |= S_IFCHR;
+		req.mode |= S_IFCHR;
 
-	curr_cred = override_creds(&init_cred);
+	req.dev = dev;
 
-	err = vfs_path_lookup(dev_mnt->mnt_root, dev_mnt,
-			      nodename, LOOKUP_PARENT, &nd);
-	if (err == -ENOENT) {
+	return devtmpfs_submit_req(&req, tmp);
+}
+
+int devtmpfs_delete_node(struct device *dev)
+{
+	const char *tmp = NULL;
+	struct req req;
+
+	if (!thread)
+		return 0;
+
+	req.name = device_get_devnode(dev, NULL, NULL, NULL, &tmp);
+	if (!req.name)
+		return -ENOMEM;
+
+	req.mode = 0;
+	req.dev = dev;
+
+	return devtmpfs_submit_req(&req, tmp);
+}
+
+static int dev_mkdir(const char *name, umode_t mode)
+{
+	struct dentry *dentry;
+	struct path path;
+	int err;
+
+	dentry = kern_path_create(AT_FDCWD, name, &path, LOOKUP_DIRECTORY);
+	if (IS_ERR(dentry))
+		return PTR_ERR(dentry);
+
+	err = vfs_mkdir(&init_user_ns, d_inode(path.dentry), dentry, mode);
+	if (!err)
+		/* mark as kernel-created inode */
+		d_inode(dentry)->i_private = &thread;
+	done_path_create(&path, dentry);
+	return err;
+}
+
+static int create_path(const char *nodepath)
+{
+	char *path;
+	char *s;
+	int err = 0;
+
+	/* parent directories do not exist, create them */
+	path = kstrdup(nodepath, GFP_KERNEL);
+	if (!path)
+		return -ENOMEM;
+
+	s = path;
+	for (;;) {
+		s = strchr(s, '/');
+		if (!s)
+			break;
+		s[0] = '\0';
+		err = dev_mkdir(path, 0755);
+		if (err && err != -EEXIST)
+			break;
+		s[0] = '/';
+		s++;
+	}
+	kfree(path);
+	return err;
+}
+
+static int handle_create(const char *nodename, umode_t mode, kuid_t uid,
+			 kgid_t gid, struct device *dev)
+{
+	struct dentry *dentry;
+	struct path path;
+	int err;
+
+	dentry = kern_path_create(AT_FDCWD, nodename, &path, 0);
+	if (dentry == ERR_PTR(-ENOENT)) {
 		create_path(nodename);
-		err = vfs_path_lookup(dev_mnt->mnt_root, dev_mnt,
-				      nodename, LOOKUP_PARENT, &nd);
+		dentry = kern_path_create(AT_FDCWD, nodename, &path, 0);
 	}
-	if (err)
-		goto out;
+	if (IS_ERR(dentry))
+		return PTR_ERR(dentry);
 
-	dentry = lookup_create(&nd, 0);
-	if (!IS_ERR(dentry)) {
-		err = vfs_mknod(nd.path.dentry->d_inode,
-				dentry, mode, dev->devt);
-		if (!err) {
-			struct iattr newattrs;
+	err = vfs_mknod(&init_user_ns, d_inode(path.dentry), dentry, mode,
+			dev->devt);
+	if (!err) {
+		struct iattr newattrs;
 
-			/* fixup possibly umasked mode */
-			newattrs.ia_mode = mode;
-			newattrs.ia_valid = ATTR_MODE;
-			mutex_lock(&dentry->d_inode->i_mutex);
-			notify_change(dentry, &newattrs);
-			mutex_unlock(&dentry->d_inode->i_mutex);
+		newattrs.ia_mode = mode;
+		newattrs.ia_uid = uid;
+		newattrs.ia_gid = gid;
+		newattrs.ia_valid = ATTR_MODE|ATTR_UID|ATTR_GID;
+		inode_lock(d_inode(dentry));
+		notify_change(&init_user_ns, dentry, &newattrs, NULL);
+		inode_unlock(d_inode(dentry));
 
-			/* mark as kernel-created inode */
-			dentry->d_inode->i_private = &dev_mnt;
-		}
-		dput(dentry);
-	} else {
-		err = PTR_ERR(dentry);
+		/* mark as kernel-created inode */
+		d_inode(dentry)->i_private = &thread;
 	}
-
-	mutex_unlock(&nd.path.dentry->d_inode->i_mutex);
-	path_put(&nd.path);
-out:
-	kfree(tmp);
-	revert_creds(curr_cred);
+	done_path_create(&path, dentry);
 	return err;
 }
 
 static int dev_rmdir(const char *name)
 {
-	struct nameidata nd;
+	struct path parent;
 	struct dentry *dentry;
 	int err;
 
-	err = vfs_path_lookup(dev_mnt->mnt_root, dev_mnt,
-			      name, LOOKUP_PARENT, &nd);
-	if (err)
-		return err;
-
-	mutex_lock_nested(&nd.path.dentry->d_inode->i_mutex, I_MUTEX_PARENT);
-	dentry = lookup_one_len(nd.last.name, nd.path.dentry, nd.last.len);
-	if (!IS_ERR(dentry)) {
-		if (dentry->d_inode) {
-			if (dentry->d_inode->i_private == &dev_mnt)
-				err = vfs_rmdir(nd.path.dentry->d_inode,
-						dentry);
-			else
-				err = -EPERM;
-		} else {
-			err = -ENOENT;
-		}
-		dput(dentry);
+	dentry = kern_path_locked(name, &parent);
+	if (IS_ERR(dentry))
+		return PTR_ERR(dentry);
+	if (d_really_is_positive(dentry)) {
+		if (d_inode(dentry)->i_private == &thread)
+			err = vfs_rmdir(&init_user_ns, d_inode(parent.dentry),
+					dentry);
+		else
+			err = -EPERM;
 	} else {
-		err = PTR_ERR(dentry);
+		err = -ENOENT;
 	}
-
-	mutex_unlock(&nd.path.dentry->d_inode->i_mutex);
-	path_put(&nd.path);
+	dput(dentry);
+	inode_unlock(d_inode(parent.dentry));
+	path_put(&parent);
 	return err;
 }
 
 static int delete_path(const char *nodepath)
 {
-	const char *path;
+	char *path;
 	int err = 0;
 
 	path = kstrdup(nodepath, GFP_KERNEL);
 	if (!path)
 		return -ENOMEM;
 
-	mutex_lock(&dirlock);
 	for (;;) {
 		char *base;
 
@@ -250,7 +287,6 @@ static int delete_path(const char *nodepath)
 		if (err)
 			break;
 	}
-	mutex_unlock(&dirlock);
 
 	kfree(path);
 	return err;
@@ -259,7 +295,7 @@ static int delete_path(const char *nodepath)
 static int dev_mynode(struct device *dev, struct inode *inode, struct kstat *stat)
 {
 	/* did we create it */
-	if (inode->i_private != &dev_mnt)
+	if (inode->i_private != &thread)
 		return 0;
 
 	/* does the dev_t match */
@@ -277,69 +313,50 @@ static int dev_mynode(struct device *dev, struct inode *inode, struct kstat *sta
 	return 1;
 }
 
-int devtmpfs_delete_node(struct device *dev)
+static int handle_remove(const char *nodename, struct device *dev)
 {
-	const char *tmp = NULL;
-	const char *nodename;
-	const struct cred *curr_cred;
-	struct nameidata nd;
+	struct path parent;
 	struct dentry *dentry;
-	struct kstat stat;
-	int deleted = 1;
+	int deleted = 0;
 	int err;
 
-	if (!dev_mnt)
-		return 0;
+	dentry = kern_path_locked(nodename, &parent);
+	if (IS_ERR(dentry))
+		return PTR_ERR(dentry);
 
-	nodename = device_get_devnode(dev, NULL, &tmp);
-	if (!nodename)
-		return -ENOMEM;
-
-	curr_cred = override_creds(&init_cred);
-	err = vfs_path_lookup(dev_mnt->mnt_root, dev_mnt,
-			      nodename, LOOKUP_PARENT, &nd);
-	if (err)
-		goto out;
-
-	mutex_lock_nested(&nd.path.dentry->d_inode->i_mutex, I_MUTEX_PARENT);
-	dentry = lookup_one_len(nd.last.name, nd.path.dentry, nd.last.len);
-	if (!IS_ERR(dentry)) {
-		if (dentry->d_inode) {
-			err = vfs_getattr(nd.path.mnt, dentry, &stat);
-			if (!err && dev_mynode(dev, dentry->d_inode, &stat)) {
-				struct iattr newattrs;
-				/*
-				 * before unlinking this node, reset permissions
-				 * of possible references like hardlinks
-				 */
-				newattrs.ia_uid = 0;
-				newattrs.ia_gid = 0;
-				newattrs.ia_mode = stat.mode & ~0777;
-				newattrs.ia_valid =
-					ATTR_UID|ATTR_GID|ATTR_MODE;
-				mutex_lock(&dentry->d_inode->i_mutex);
-				notify_change(dentry, &newattrs);
-				mutex_unlock(&dentry->d_inode->i_mutex);
-				err = vfs_unlink(nd.path.dentry->d_inode,
-						 dentry);
-				if (!err || err == -ENOENT)
-					deleted = 1;
-			}
-		} else {
-			err = -ENOENT;
+	if (d_really_is_positive(dentry)) {
+		struct kstat stat;
+		struct path p = {.mnt = parent.mnt, .dentry = dentry};
+		err = vfs_getattr(&p, &stat, STATX_TYPE | STATX_MODE,
+				  AT_STATX_SYNC_AS_STAT);
+		if (!err && dev_mynode(dev, d_inode(dentry), &stat)) {
+			struct iattr newattrs;
+			/*
+			 * before unlinking this node, reset permissions
+			 * of possible references like hardlinks
+			 */
+			newattrs.ia_uid = GLOBAL_ROOT_UID;
+			newattrs.ia_gid = GLOBAL_ROOT_GID;
+			newattrs.ia_mode = stat.mode & ~0777;
+			newattrs.ia_valid =
+				ATTR_UID|ATTR_GID|ATTR_MODE;
+			inode_lock(d_inode(dentry));
+			notify_change(&init_user_ns, dentry, &newattrs, NULL);
+			inode_unlock(d_inode(dentry));
+			err = vfs_unlink(&init_user_ns, d_inode(parent.dentry),
+					 dentry, NULL);
+			if (!err || err == -ENOENT)
+				deleted = 1;
 		}
-		dput(dentry);
 	} else {
-		err = PTR_ERR(dentry);
+		err = -ENOENT;
 	}
-	mutex_unlock(&nd.path.dentry->d_inode->i_mutex);
+	dput(dentry);
+	inode_unlock(d_inode(parent.dentry));
 
-	path_put(&nd.path);
+	path_put(&parent);
 	if (deleted && strchr(nodename, '/'))
 		delete_path(nodename);
-out:
-	kfree(tmp);
-	revert_creds(curr_cred);
 	return err;
 }
 
@@ -347,22 +364,89 @@ out:
  * If configured, or requested by the commandline, devtmpfs will be
  * auto-mounted after the kernel mounted the root filesystem.
  */
-int devtmpfs_mount(const char *mntdir)
+int __init devtmpfs_mount(void)
 {
 	int err;
 
 	if (!mount_dev)
 		return 0;
 
-	if (!dev_mnt)
+	if (!thread)
 		return 0;
 
-	err = sys_mount("devtmpfs", (char *)mntdir, "devtmpfs", MS_SILENT, NULL);
+	err = init_mount("devtmpfs", "dev", "devtmpfs", DEVTMPFS_MFLAGS, NULL);
 	if (err)
 		printk(KERN_INFO "devtmpfs: error mounting %i\n", err);
 	else
 		printk(KERN_INFO "devtmpfs: mounted\n");
 	return err;
+}
+
+static __initdata DECLARE_COMPLETION(setup_done);
+
+static int handle(const char *name, umode_t mode, kuid_t uid, kgid_t gid,
+		  struct device *dev)
+{
+	if (mode)
+		return handle_create(name, mode, uid, gid, dev);
+	else
+		return handle_remove(name, dev);
+}
+
+static void __noreturn devtmpfs_work_loop(void)
+{
+	while (1) {
+		spin_lock(&req_lock);
+		while (requests) {
+			struct req *req = requests;
+			requests = NULL;
+			spin_unlock(&req_lock);
+			while (req) {
+				struct req *next = req->next;
+				req->err = handle(req->name, req->mode,
+						  req->uid, req->gid, req->dev);
+				complete(&req->done);
+				req = next;
+			}
+			spin_lock(&req_lock);
+		}
+		__set_current_state(TASK_INTERRUPTIBLE);
+		spin_unlock(&req_lock);
+		schedule();
+	}
+}
+
+static noinline int __init devtmpfs_setup(void *p)
+{
+	int err;
+
+	err = ksys_unshare(CLONE_NEWNS);
+	if (err)
+		goto out;
+	err = init_mount("devtmpfs", "/", "devtmpfs", DEVTMPFS_MFLAGS, NULL);
+	if (err)
+		goto out;
+	init_chdir("/.."); /* will traverse into overmounted root */
+	init_chroot(".");
+out:
+	*(int *)p = err;
+	return err;
+}
+
+/*
+ * The __ref is because devtmpfs_setup needs to be __init for the routines it
+ * calls.  That call is done while devtmpfs_init, which is marked __init,
+ * synchronously waits for it to complete.
+ */
+static int __ref devtmpfsd(void *p)
+{
+	int err = devtmpfs_setup(p);
+
+	complete(&setup_done);
+	if (err)
+		return err;
+	devtmpfs_work_loop();
+	return 0;
 }
 
 /*
@@ -371,10 +455,15 @@ int devtmpfs_mount(const char *mntdir)
  */
 int __init devtmpfs_init(void)
 {
+	char opts[] = "mode=0755";
 	int err;
-	struct vfsmount *mnt;
-	char options[] = "mode=0755";
 
+	mnt = vfs_kern_mount(&internal_fs_type, 0, "devtmpfs", opts);
+	if (IS_ERR(mnt)) {
+		printk(KERN_ERR "devtmpfs: unable to create devtmpfs %ld\n",
+				PTR_ERR(mnt));
+		return PTR_ERR(mnt);
+	}
 	err = register_filesystem(&dev_fs_type);
 	if (err) {
 		printk(KERN_ERR "devtmpfs: unable to register devtmpfs "
@@ -382,14 +471,20 @@ int __init devtmpfs_init(void)
 		return err;
 	}
 
-	mnt = kern_mount_data(&dev_fs_type, options);
-	if (IS_ERR(mnt)) {
-		err = PTR_ERR(mnt);
+	thread = kthread_run(devtmpfsd, &err, "kdevtmpfs");
+	if (!IS_ERR(thread)) {
+		wait_for_completion(&setup_done);
+	} else {
+		err = PTR_ERR(thread);
+		thread = NULL;
+	}
+
+	if (err) {
 		printk(KERN_ERR "devtmpfs: unable to create devtmpfs %i\n", err);
 		unregister_filesystem(&dev_fs_type);
+		thread = NULL;
 		return err;
 	}
-	dev_mnt = mnt;
 
 	printk(KERN_INFO "devtmpfs: initialized\n");
 	return 0;

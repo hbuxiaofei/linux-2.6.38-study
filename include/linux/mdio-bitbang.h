@@ -1,8 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __LINUX_MDIO_BITBANG_H
 #define __LINUX_MDIO_BITBANG_H
 
 #include <linux/phy.h>
-#include <linux/module.h>
+
+struct module;
 
 struct mdiobb_ctrl;
 
@@ -31,7 +33,13 @@ struct mdiobb_ops {
 
 struct mdiobb_ctrl {
 	const struct mdiobb_ops *ops;
+	unsigned int override_op_c22;
+	u8 op_c22_read;
+	u8 op_c22_write;
 };
+
+int mdiobb_read(struct mii_bus *bus, int phy, int reg);
+int mdiobb_write(struct mii_bus *bus, int phy, int reg, u16 val);
 
 /* The returned bus is not yet registered with the phy layer. */
 struct mii_bus *alloc_mdio_bitbang(struct mdiobb_ctrl *ctrl);

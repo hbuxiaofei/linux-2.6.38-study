@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _FSM_H_
 #define _FSM_H_
 
@@ -8,7 +9,7 @@
 #include <linux/slab.h>
 #include <linux/sched.h>
 #include <linux/string.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 
 /**
  * Define this to get debugging messages.

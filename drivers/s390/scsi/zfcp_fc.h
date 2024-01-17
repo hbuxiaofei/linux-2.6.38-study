@@ -1,10 +1,11 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * zfcp device driver
  *
  * Fibre Channel related definitions and inline functions for the zfcp
  * device driver
  *
- * Copyright IBM Corporation 2009
+ * Copyright IBM Corp. 2009, 2017
  */
 
 #ifndef ZFCP_FC_H
@@ -64,31 +65,14 @@ struct zfcp_fc_gid_pn_req {
 } __packed;
 
 /**
- * struct zfcp_fc_gid_pn_resp - container for ct header plus gid_pn response
+ * struct zfcp_fc_gid_pn_rsp - container for ct header plus gid_pn response
  * @ct_hdr: FC GS common transport header
  * @gid_pn: GID_PN response
  */
-struct zfcp_fc_gid_pn_resp {
+struct zfcp_fc_gid_pn_rsp {
 	struct fc_ct_hdr	ct_hdr;
 	struct fc_gid_pn_resp	gid_pn;
 } __packed;
-
-/**
- * struct zfcp_fc_gid_pn - everything required in zfcp for gid_pn request
- * @ct: data passed to zfcp_fsf for issuing fsf request
- * @sg_req: scatterlist entry for request data
- * @sg_resp: scatterlist entry for response data
- * @gid_pn_req: GID_PN request data
- * @gid_pn_resp: GID_PN response data
- */
-struct zfcp_fc_gid_pn {
-	struct zfcp_fsf_ct_els ct;
-	struct scatterlist sg_req;
-	struct scatterlist sg_resp;
-	struct zfcp_fc_gid_pn_req gid_pn_req;
-	struct zfcp_fc_gid_pn_resp gid_pn_resp;
-	struct zfcp_port *port;
-};
 
 /**
  * struct zfcp_fc_gpn_ft - container for ct header plus gpn_ft request
@@ -101,41 +85,87 @@ struct zfcp_fc_gpn_ft_req {
 } __packed;
 
 /**
- * struct zfcp_fc_gpn_ft_resp - container for ct header plus gpn_ft response
+ * struct zfcp_fc_gspn_req - container for ct header plus GSPN_ID request
  * @ct_hdr: FC GS common transport header
- * @gpn_ft: Array of gpn_ft response data to fill one memory page
+ * @gspn: GSPN_ID request
  */
-struct zfcp_fc_gpn_ft_resp {
+struct zfcp_fc_gspn_req {
 	struct fc_ct_hdr	ct_hdr;
-	struct fc_gpn_ft_resp	gpn_ft[ZFCP_FC_GPN_FT_ENT_PAGE];
+	struct fc_gid_pn_resp	gspn;
 } __packed;
 
 /**
- * struct zfcp_fc_gpn_ft - zfcp data for gpn_ft request
- * @ct: data passed to zfcp_fsf for issuing fsf request
- * @sg_req: scatter list entry for gpn_ft request
- * @sg_resp: scatter list entries for gpn_ft responses (per memory page)
+ * struct zfcp_fc_gspn_rsp - container for ct header plus GSPN_ID response
+ * @ct_hdr: FC GS common transport header
+ * @gspn: GSPN_ID response
+ * @name: The name string of the GSPN_ID response
  */
-struct zfcp_fc_gpn_ft {
-	struct zfcp_fsf_ct_els ct;
-	struct scatterlist sg_req;
-	struct scatterlist sg_resp[ZFCP_FC_GPN_FT_NUM_BUFS];
-};
+struct zfcp_fc_gspn_rsp {
+	struct fc_ct_hdr	ct_hdr;
+	struct fc_gspn_resp	gspn;
+	char			name[FC_SYMBOLIC_NAME_SIZE];
+} __packed;
 
 /**
- * struct zfcp_fc_els_adisc - everything required in zfcp for issuing ELS ADISC
- * @els: data required for issuing els fsf command
- * @req: scatterlist entry for ELS ADISC request
- * @resp: scatterlist entry for ELS ADISC response
- * @adisc_req: ELS ADISC request data
- * @adisc_resp: ELS ADISC response data
+ * struct zfcp_fc_rspn_req - container for ct header plus RSPN_ID request
+ * @ct_hdr: FC GS common transport header
+ * @rspn: RSPN_ID request
+ * @name: The name string of the RSPN_ID request
  */
-struct zfcp_fc_els_adisc {
-	struct zfcp_fsf_ct_els els;
-	struct scatterlist req;
-	struct scatterlist resp;
-	struct fc_els_adisc adisc_req;
-	struct fc_els_adisc adisc_resp;
+struct zfcp_fc_rspn_req {
+	struct fc_ct_hdr	ct_hdr;
+	struct fc_ns_rspn	rspn;
+	char			name[FC_SYMBOLIC_NAME_SIZE];
+} __packed;
+
+/**
+ * struct zfcp_fc_req - Container for FC ELS and CT requests sent from zfcp
+ * @ct_els: data required for issuing fsf command
+ * @sg_req: scatterlist entry for request data, refers to embedded @u submember
+ * @sg_rsp: scatterlist entry for response data, refers to embedded @u submember
+ * @u: request and response specific data
+ * @u.adisc: ADISC specific data
+ * @u.adisc.req: ADISC request
+ * @u.adisc.rsp: ADISC response
+ * @u.gid_pn: GID_PN specific data
+ * @u.gid_pn.req: GID_PN request
+ * @u.gid_pn.rsp: GID_PN response
+ * @u.gpn_ft: GPN_FT specific data
+ * @u.gpn_ft.sg_rsp2: GPN_FT response, not embedded here, allocated elsewhere
+ * @u.gpn_ft.req: GPN_FT request
+ * @u.gspn: GSPN specific data
+ * @u.gspn.req: GSPN request
+ * @u.gspn.rsp: GSPN response
+ * @u.rspn: RSPN specific data
+ * @u.rspn.req: RSPN request
+ * @u.rspn.rsp: RSPN response
+ */
+struct zfcp_fc_req {
+	struct zfcp_fsf_ct_els				ct_els;
+	struct scatterlist				sg_req;
+	struct scatterlist				sg_rsp;
+	union {
+		struct {
+			struct fc_els_adisc		req;
+			struct fc_els_adisc		rsp;
+		} adisc;
+		struct {
+			struct zfcp_fc_gid_pn_req	req;
+			struct zfcp_fc_gid_pn_rsp	rsp;
+		} gid_pn;
+		struct {
+			struct scatterlist sg_rsp2[ZFCP_FC_GPN_FT_NUM_BUFS - 1];
+			struct zfcp_fc_gpn_ft_req	req;
+		} gpn_ft;
+		struct {
+			struct zfcp_fc_gspn_req		req;
+			struct zfcp_fc_gspn_rsp		rsp;
+		} gspn;
+		struct {
+			struct zfcp_fc_rspn_req		req;
+			struct fc_ct_hdr		rsp;
+		} rspn;
+	} u;
 };
 
 /**
@@ -155,7 +185,8 @@ enum zfcp_fc_wka_status {
 /**
  * struct zfcp_fc_wka_port - representation of well-known-address (WKA) FC port
  * @adapter: Pointer to adapter structure this WKA port belongs to
- * @completion_wq: Wait for completion of open/close command
+ * @opened: Wait for completion of open command
+ * @closed: Wait for completion of close command
  * @status: Current status of WKA port
  * @refcount: Reference count to keep port open as long as it is in use
  * @d_id: FC destination id or well-known-address
@@ -165,7 +196,8 @@ enum zfcp_fc_wka_status {
  */
 struct zfcp_fc_wka_port {
 	struct zfcp_adapter	*adapter;
-	wait_queue_head_t	completion_wq;
+	wait_queue_head_t	opened;
+	wait_queue_head_t	closed;
 	enum zfcp_fc_wka_status	status;
 	atomic_t		refcount;
 	u32			d_id;
@@ -196,21 +228,11 @@ struct zfcp_fc_wka_ports {
 static inline
 void zfcp_fc_scsi_to_fcp(struct fcp_cmnd *fcp, struct scsi_cmnd *scsi)
 {
-	char tag[2];
+	u32 datalen;
 
 	int_to_scsilun(scsi->device->lun, (struct scsi_lun *) &fcp->fc_lun);
 
-	if (scsi_populate_tag_msg(scsi, tag)) {
-		switch (tag[0]) {
-		case MSG_ORDERED_TAG:
-			fcp->fc_pri_ta |= FCP_PTA_ORDERED;
-			break;
-		case MSG_SIMPLE_TAG:
-			fcp->fc_pri_ta |= FCP_PTA_SIMPLE;
-			break;
-		};
-	} else
-		fcp->fc_pri_ta = FCP_PTA_SIMPLE;
+	fcp->fc_pri_ta = FCP_PTA_SIMPLE;
 
 	if (scsi->sc_data_direction == DMA_FROM_DEVICE)
 		fcp->fc_flags |= FCP_CFL_RDDATA;
@@ -219,23 +241,26 @@ void zfcp_fc_scsi_to_fcp(struct fcp_cmnd *fcp, struct scsi_cmnd *scsi)
 
 	memcpy(fcp->fc_cdb, scsi->cmnd, scsi->cmd_len);
 
-	fcp->fc_dl = scsi_bufflen(scsi);
+	datalen = scsi_bufflen(scsi);
+	fcp->fc_dl = cpu_to_be32(datalen);
 
-	if (scsi_get_prot_type(scsi) == SCSI_PROT_DIF_TYPE1)
-		fcp->fc_dl += fcp->fc_dl / scsi->device->sector_size * 8;
+	if (scsi_get_prot_type(scsi) == SCSI_PROT_DIF_TYPE1) {
+		datalen += datalen / scsi->device->sector_size * 8;
+		fcp->fc_dl = cpu_to_be32(datalen);
+	}
 }
 
 /**
- * zfcp_fc_fcp_tm - setup FCP command as task management command
- * @fcp: fcp_cmnd to setup
- * @dev: scsi_device where to send the task management command
- * @tm: task management flags to setup tm command
+ * zfcp_fc_fcp_tm() - Setup FCP command as task management command.
+ * @fcp: Pointer to FCP_CMND IU to set up.
+ * @dev: Pointer to SCSI_device where to send the task management command.
+ * @tm_flags: Task management flags to setup tm command.
  */
 static inline
 void zfcp_fc_fcp_tm(struct fcp_cmnd *fcp, struct scsi_device *dev, u8 tm_flags)
 {
 	int_to_scsilun(dev->lun, (struct scsi_lun *) &fcp->fc_lun);
-	fcp->fc_tm_flags |= tm_flags;
+	fcp->fc_tm_flags = tm_flags;
 }
 
 /**
@@ -252,7 +277,6 @@ void zfcp_fc_eval_fcp_rsp(struct fcp_resp_with_ext *fcp_rsp,
 	u32 sense_len, resid;
 	u8 rsp_flags;
 
-	set_msg_byte(scsi, COMMAND_COMPLETE);
 	scsi->result |= fcp_rsp->resp.fr_status;
 
 	rsp_flags = fcp_rsp->resp.fr_flags;
@@ -270,18 +294,22 @@ void zfcp_fc_eval_fcp_rsp(struct fcp_resp_with_ext *fcp_rsp,
 	if (unlikely(rsp_flags & FCP_SNS_LEN_VAL)) {
 		sense = (char *) &fcp_rsp[1];
 		if (rsp_flags & FCP_RSP_LEN_VAL)
-			sense += fcp_rsp->ext.fr_rsp_len;
-		sense_len = min(fcp_rsp->ext.fr_sns_len,
-				(u32) SCSI_SENSE_BUFFERSIZE);
+			sense += be32_to_cpu(fcp_rsp->ext.fr_rsp_len);
+		sense_len = min_t(u32, be32_to_cpu(fcp_rsp->ext.fr_sns_len),
+				  SCSI_SENSE_BUFFERSIZE);
 		memcpy(scsi->sense_buffer, sense, sense_len);
 	}
 
 	if (unlikely(rsp_flags & FCP_RESID_UNDER)) {
-		resid = fcp_rsp->ext.fr_resid;
+		resid = be32_to_cpu(fcp_rsp->ext.fr_resid);
 		scsi_set_resid(scsi, resid);
 		if (scsi_bufflen(scsi) - resid < scsi->underflow &&
 		     !(rsp_flags & FCP_SNS_LEN_VAL) &&
 		     fcp_rsp->resp.fr_status == SAM_STAT_GOOD)
+			set_host_byte(scsi, DID_ERROR);
+	} else if (unlikely(rsp_flags & FCP_RESID_OVER)) {
+		/* FCP_DL was not sufficient for SCSI data length */
+		if (fcp_rsp->resp.fr_status == SAM_STAT_GOOD)
 			set_host_byte(scsi, DID_ERROR);
 	}
 }

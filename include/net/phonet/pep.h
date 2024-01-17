@@ -1,34 +1,23 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * File: pep.h
  *
  * Phonet Pipe End Point sockets definitions
  *
  * Copyright (C) 2008 Nokia Corporation.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
- * 02110-1301 USA
  */
 
 #ifndef NET_PHONET_PEP_H
 #define NET_PHONET_PEP_H
+
+#include <linux/skbuff.h>
+#include <net/phonet/phonet.h>
 
 struct pep_sock {
 	struct pn_sock		pn_sk;
 
 	/* XXX: union-ify listening vs connected stuff ? */
 	/* Listening socket stuff: */
-	struct hlist_head	ackq;
 	struct hlist_head	hlist;
 
 	/* Connected socket stuff: */
@@ -45,10 +34,6 @@ struct pep_sock {
 	u8			tx_fc;	/* TX flow control */
 	u8			init_enable;	/* auto-enable at creation */
 	u8			aligned;
-#ifdef CONFIG_PHONET_PIPECTRLR
-	u8			pipe_state;
-	struct sockaddr_pn	remote_pep;
-#endif
 };
 
 static inline struct pep_sock *pep_sk(struct sock *sk)
@@ -68,10 +53,11 @@ struct pnpipehdr {
 		u8		state_after_reset;	/* reset request */
 		u8		error_code;		/* any response */
 		u8		pep_type;		/* status indication */
-		u8		data[1];
+		u8		data0;			/* anything else */
 	};
+	u8			data[];
 };
-#define other_pep_type		data[1]
+#define other_pep_type		data[0]
 
 static inline struct pnpipehdr *pnp_hdr(struct sk_buff *skb)
 {
@@ -158,6 +144,7 @@ enum {
 	PN_LEGACY_FLOW_CONTROL,
 	PN_ONE_CREDIT_FLOW_CONTROL,
 	PN_MULTI_CREDIT_FLOW_CONTROL,
+	PN_MAX_FLOW_CONTROL,
 };
 
 #define pn_flow_safe(fc) ((fc) >> 1)
@@ -168,22 +155,5 @@ enum {
 	PEP_IND_BUSY,
 	PEP_IND_READY,
 };
-
-#ifdef CONFIG_PHONET_PIPECTRLR
-#define PNS_PEP_CONNECT_UTID           0x02
-#define PNS_PIPE_CREATED_IND_UTID      0x04
-#define PNS_PIPE_ENABLE_UTID           0x0A
-#define PNS_PIPE_ENABLED_IND_UTID      0x0C
-#define PNS_PIPE_DISABLE_UTID          0x0F
-#define PNS_PIPE_DISABLED_IND_UTID     0x11
-#define PNS_PEP_DISCONNECT_UTID        0x06
-
-/* Used for tracking state of a pipe */
-enum {
-	PIPE_IDLE,
-	PIPE_DISABLED,
-	PIPE_ENABLED,
-};
-#endif /* CONFIG_PHONET_PIPECTRLR */
 
 #endif

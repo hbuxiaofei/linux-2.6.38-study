@@ -1,21 +1,17 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Functions for setting up and using a MPC106 northbridge
  * Extracted from arch/powerpc/platforms/powermac/pci.c.
  *
  * Copyright (C) 2003 Benjamin Herrenschmuidt (benh@kernel.crashing.org)
  * Copyright (C) 1997 Paul Mackerras (paulus@samba.org)
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
  */
 #include <linux/kernel.h>
 #include <linux/pci.h>
 #include <linux/init.h>
+#include <linux/of.h>
 
 #include <asm/io.h>
-#include <asm/prom.h>
 #include <asm/pci-bridge.h>
 #include <asm/grackle.h>
 
@@ -57,7 +53,7 @@ void __init setup_grackle(struct pci_controller *hose)
 {
 	setup_indirect_pci(hose, 0xfec00000, 0xfee00000, 0);
 	if (of_machine_is_compatible("PowerMac1,1"))
-		ppc_pci_add_flags(PPC_PCI_REASSIGN_ALL_BUS);
+		pci_add_flags(PCI_REASSIGN_ALL_BUS);
 	if (of_machine_is_compatible("AAPL,PowerBook1998"))
 		grackle_set_loop_snoop(hose, 1);
 #if 0	/* Disabled for now, HW problems ??? */

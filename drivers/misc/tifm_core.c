@@ -1,18 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  tifm_core.c - TI FlashMedia driver
  *
  *  Copyright (C) 2006 Alex Dubov <oakad@yahoo.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
  */
 
 #include <linux/tifm.h>
 #include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/idr.h>
+#include <linux/module.h>
 
 #define DRIVER_NAME "tifm_core"
 #define DRIVER_VERSION "0.8"
@@ -90,7 +87,7 @@ static void tifm_dummy_event(struct tifm_dev *sock)
 	return;
 }
 
-static int tifm_device_remove(struct device *dev)
+static void tifm_device_remove(struct device *dev)
 {
 	struct tifm_dev *sock = container_of(dev, struct tifm_dev, dev);
 	struct tifm_driver *drv = container_of(dev->driver, struct tifm_driver,
@@ -104,7 +101,6 @@ static int tifm_device_remove(struct device *dev)
 	}
 
 	put_device(dev);
-	return 0;
 }
 
 #ifdef CONFIG_PM
@@ -144,15 +140,17 @@ static ssize_t type_show(struct device *dev, struct device_attribute *attr,
 	struct tifm_dev *sock = container_of(dev, struct tifm_dev, dev);
 	return sprintf(buf, "%x", sock->type);
 }
+static DEVICE_ATTR_RO(type);
 
-static struct device_attribute tifm_dev_attrs[] = {
-	__ATTR(type, S_IRUGO, type_show, NULL),
-	__ATTR_NULL
+static struct attribute *tifm_dev_attrs[] = {
+	&dev_attr_type.attr,
+	NULL,
 };
+ATTRIBUTE_GROUPS(tifm_dev);
 
 static struct bus_type tifm_bus_type = {
 	.name      = "tifm",
-	.dev_attrs = tifm_dev_attrs,
+	.dev_groups = tifm_dev_groups,
 	.match     = tifm_bus_match,
 	.uevent    = tifm_uevent,
 	.probe     = tifm_device_probe,
@@ -178,8 +176,7 @@ struct tifm_adapter *tifm_alloc_adapter(unsigned int num_sockets,
 {
 	struct tifm_adapter *fm;
 
-	fm = kzalloc(sizeof(struct tifm_adapter)
-		     + sizeof(struct tifm_dev*) * num_sockets, GFP_KERNEL);
+	fm = kzalloc(struct_size(fm, sockets, num_sockets), GFP_KERNEL);
 	if (fm) {
 		fm->dev.class = &tifm_adapter_class;
 		fm->dev.parent = dev;
@@ -195,13 +192,14 @@ int tifm_add_adapter(struct tifm_adapter *fm)
 {
 	int rc;
 
-	if (!idr_pre_get(&tifm_adapter_idr, GFP_KERNEL))
-		return -ENOMEM;
-
+	idr_preload(GFP_KERNEL);
 	spin_lock(&tifm_adapter_lock);
-	rc = idr_get_new(&tifm_adapter_idr, fm, &fm->id);
+	rc = idr_alloc(&tifm_adapter_idr, fm, 0, 0, GFP_NOWAIT);
+	if (rc >= 0)
+		fm->id = rc;
 	spin_unlock(&tifm_adapter_lock);
-	if (rc)
+	idr_preload_end();
+	if (rc < 0)
 		return rc;
 
 	dev_set_name(&fm->dev, "tifm%u", fm->id);
@@ -294,14 +292,15 @@ EXPORT_SYMBOL(tifm_has_ms_pif);
 int tifm_map_sg(struct tifm_dev *sock, struct scatterlist *sg, int nents,
 		int direction)
 {
-	return pci_map_sg(to_pci_dev(sock->dev.parent), sg, nents, direction);
+	return dma_map_sg(&to_pci_dev(sock->dev.parent)->dev, sg, nents,
+			  direction);
 }
 EXPORT_SYMBOL(tifm_map_sg);
 
 void tifm_unmap_sg(struct tifm_dev *sock, struct scatterlist *sg, int nents,
 		   int direction)
 {
-	pci_unmap_sg(to_pci_dev(sock->dev.parent), sg, nents, direction);
+	dma_unmap_sg(&to_pci_dev(sock->dev.parent)->dev, sg, nents, direction);
 }
 EXPORT_SYMBOL(tifm_unmap_sg);
 

@@ -1,7 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *	fs/bfs/file.c
  *	BFS file operations.
- *	Copyright (C) 1999,2000 Tigran Aivazian <tigran@veritas.com>
+ *	Copyright (C) 1999-2018 Tigran Aivazian <aivazian.tigran@gmail.com>
  *
  *	Make the file block allocation algorithm understand the size
  *	of the underlying block device.
@@ -23,10 +24,8 @@
 
 const struct file_operations bfs_file_operations = {
 	.llseek 	= generic_file_llseek,
-	.read		= do_sync_read,
-	.aio_read	= generic_file_aio_read,
-	.write		= do_sync_write,
-	.aio_write	= generic_file_aio_write,
+	.read_iter	= generic_file_read_iter,
+	.write_iter	= generic_file_write_iter,
 	.mmap		= generic_file_mmap,
 	.splice_read	= generic_file_splice_read,
 };
@@ -156,24 +155,28 @@ static int bfs_writepage(struct page *page, struct writeback_control *wbc)
 	return block_write_full_page(page, bfs_get_block, wbc);
 }
 
-static int bfs_readpage(struct file *file, struct page *page)
+static int bfs_read_folio(struct file *file, struct folio *folio)
 {
-	return block_read_full_page(page, bfs_get_block);
+	return block_read_full_folio(folio, bfs_get_block);
+}
+
+static void bfs_write_failed(struct address_space *mapping, loff_t to)
+{
+	struct inode *inode = mapping->host;
+
+	if (to > inode->i_size)
+		truncate_pagecache(inode, inode->i_size);
 }
 
 static int bfs_write_begin(struct file *file, struct address_space *mapping,
-			loff_t pos, unsigned len, unsigned flags,
+			loff_t pos, unsigned len,
 			struct page **pagep, void **fsdata)
 {
 	int ret;
 
-	ret = block_write_begin(mapping, pos, len, flags, pagep,
-				bfs_get_block);
-	if (unlikely(ret)) {
-		loff_t isize = mapping->host->i_size;
-		if (pos + len > isize)
-			vmtruncate(mapping->host, isize);
-	}
+	ret = block_write_begin(mapping, pos, len, pagep, bfs_get_block);
+	if (unlikely(ret))
+		bfs_write_failed(mapping, pos + len);
 
 	return ret;
 }
@@ -184,9 +187,10 @@ static sector_t bfs_bmap(struct address_space *mapping, sector_t block)
 }
 
 const struct address_space_operations bfs_aops = {
-	.readpage	= bfs_readpage,
+	.dirty_folio	= block_dirty_folio,
+	.invalidate_folio = block_invalidate_folio,
+	.read_folio	= bfs_read_folio,
 	.writepage	= bfs_writepage,
-	.sync_page	= block_sync_page,
 	.write_begin	= bfs_write_begin,
 	.write_end	= generic_write_end,
 	.bmap		= bfs_bmap,

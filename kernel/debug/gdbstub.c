@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Kernel Debug Core
  *
@@ -22,15 +23,13 @@
  *
  * Original KGDB stub: David Grothe <dave@gcom.com>,
  * Tigran Aivazian <tigran@sco.com>
- *
- * This file is licensed under the terms of the GNU General Public License
- * version 2. This program is licensed "as is" without any warranty of any
- * kind, whether express or implied.
  */
 
 #include <linux/kernel.h>
+#include <linux/sched/signal.h>
 #include <linux/kgdb.h>
 #include <linux/kdb.h>
+#include <linux/serial_core.h>
 #include <linux/reboot.h>
 #include <linux/uaccess.h>
 #include <asm/cacheflush.h>
@@ -42,6 +41,8 @@
 /* Our I/O buffers. */
 static char			remcom_in_buffer[BUFMAX];
 static char			remcom_out_buffer[BUFMAX];
+static int			gdbstub_use_prev_in_buf;
+static int			gdbstub_prev_in_buf_pos;
 
 /* Storage for the registers, in GDB format. */
 static unsigned long		gdb_regs[(NUMREGBYTES +
@@ -57,6 +58,13 @@ static int gdbstub_read_wait(void)
 {
 	int ret = -1;
 	int i;
+
+	if (unlikely(gdbstub_use_prev_in_buf)) {
+		if (gdbstub_prev_in_buf_pos < gdbstub_use_prev_in_buf)
+			return remcom_in_buffer[gdbstub_prev_in_buf_pos++];
+		else
+			gdbstub_use_prev_in_buf = 0;
+	}
 
 	/* poll any additional I/O interfaces that are defined */
 	while (ret < 0)
@@ -109,7 +117,6 @@ static void get_packet(char *buffer)
 			buffer[count] = ch;
 			count = count + 1;
 		}
-		buffer[count] = 0;
 
 		if (ch == '#') {
 			xmitcsum = hex_to_bin(gdbstub_read_wait()) << 4;
@@ -124,6 +131,7 @@ static void get_packet(char *buffer)
 			if (dbg_io_ops->flush)
 				dbg_io_ops->flush();
 		}
+		buffer[count] = 0;
 	} while (checksum != xmitcsum);
 }
 
@@ -208,7 +216,7 @@ void gdbstub_msg_write(const char *s, int len)
 
 		/* Pack in hex chars */
 		for (i = 0; i < wcount; i++)
-			bufptr = pack_hex_byte(bufptr, s[i]);
+			bufptr = hex_byte_pack(bufptr, s[i]);
 		*bufptr = '\0';
 
 		/* Move up */
@@ -236,11 +244,11 @@ char *kgdb_mem2hex(char *mem, char *buf, int count)
 	 */
 	tmp = buf + count;
 
-	err = probe_kernel_read(tmp, mem, count);
+	err = copy_from_kernel_nofault(tmp, mem, count);
 	if (err)
 		return NULL;
 	while (count > 0) {
-		buf = pack_hex_byte(buf, *tmp);
+		buf = hex_byte_pack(buf, *tmp);
 		tmp++;
 		count--;
 	}
@@ -272,7 +280,7 @@ int kgdb_hex2mem(char *buf, char *mem, int count)
 		*tmp_raw |= hex_to_bin(*tmp_hex--) << 4;
 	}
 
-	return probe_kernel_write(mem, tmp_raw, count);
+	return copy_to_kernel_nofault(mem, tmp_raw, count);
 }
 
 /*
@@ -310,7 +318,7 @@ int kgdb_hex2long(char **ptr, unsigned long *long_val)
 /*
  * Copy the binary array pointed to by buf into mem.  Fix $, #, and
  * 0x7d escaped with 0x7d. Return -EFAULT on failure or 0 on success.
- * The input buf is overwitten with the result to write to mem.
+ * The input buf is overwritten with the result to write to mem.
  */
 static int kgdb_ebin2mem(char *buf, char *mem, int count)
 {
@@ -324,7 +332,7 @@ static int kgdb_ebin2mem(char *buf, char *mem, int count)
 		size++;
 	}
 
-	return probe_kernel_write(mem, c, size);
+	return copy_to_kernel_nofault(mem, c, size);
 }
 
 #if DBG_MAX_REG_NUM > 0
@@ -402,14 +410,14 @@ static char *pack_threadid(char *pkt, unsigned char *id)
 	limit = id + (BUF_THREAD_ID_SIZE / 2);
 	while (id < limit) {
 		if (!lzero || *id != 0) {
-			pkt = pack_hex_byte(pkt, *id);
+			pkt = hex_byte_pack(pkt, *id);
 			lzero = 0;
 		}
 		id++;
 	}
 
 	if (lzero)
-		pkt = pack_hex_byte(pkt, 0);
+		pkt = hex_byte_pack(pkt, 0);
 
 	return pkt;
 }
@@ -477,7 +485,7 @@ static void gdb_cmd_status(struct kgdb_state *ks)
 	dbg_remove_all_break();
 
 	remcom_out_buffer[0] = 'S';
-	pack_hex_byte(&remcom_out_buffer[1], ks->signo);
+	hex_byte_pack(&remcom_out_buffer[1], ks->signo);
 }
 
 static void gdb_get_regs_helper(struct kgdb_state *ks)
@@ -584,7 +592,7 @@ static char *gdb_hex_reg_helper(int regnum, char *out)
 			    dbg_reg_def[i].size);
 }
 
-/* Handle the 'p' individual regster get */
+/* Handle the 'p' individual register get */
 static void gdb_cmd_reg_get(struct kgdb_state *ks)
 {
 	unsigned long regnum;
@@ -599,7 +607,7 @@ static void gdb_cmd_reg_get(struct kgdb_state *ks)
 	gdb_hex_reg_helper(regnum, remcom_out_buffer);
 }
 
-/* Handle the 'P' individual regster set */
+/* Handle the 'P' individual register set */
 static void gdb_cmd_reg_set(struct kgdb_state *ks)
 {
 	unsigned long regnum;
@@ -714,7 +722,7 @@ static void gdb_cmd_query(struct kgdb_state *ks)
 			}
 		}
 
-		do_each_thread(g, p) {
+		for_each_process_thread(g, p) {
 			if (i >= ks->thr_query && !finished) {
 				int_to_threadref(thref, p->pid);
 				ptr = pack_threadid(ptr, thref);
@@ -724,7 +732,7 @@ static void gdb_cmd_query(struct kgdb_state *ks)
 					finished = 1;
 			}
 			i++;
-		} while_each_thread(g, p);
+		}
 
 		*(--ptr) = '\0';
 		break;
@@ -773,11 +781,27 @@ static void gdb_cmd_query(struct kgdb_state *ks)
 			len = len / 2;
 			remcom_out_buffer[len++] = 0;
 
+			kdb_common_init_state(ks);
 			kdb_parse(remcom_out_buffer);
+			kdb_common_deinit_state();
+
 			strcpy(remcom_out_buffer, "OK");
 		}
 		break;
 #endif
+#ifdef CONFIG_HAVE_ARCH_KGDB_QXFER_PKT
+	case 'S':
+		if (!strncmp(remcom_in_buffer, "qSupported:", 11))
+			strcpy(remcom_out_buffer, kgdb_arch_gdb_stub_feature);
+		break;
+	case 'X':
+		if (!strncmp(remcom_in_buffer, "qXfer:", 6))
+			kgdb_arch_handle_qxfer_pkt(remcom_in_buffer,
+						   remcom_out_buffer);
+		break;
+#endif
+	default:
+		break;
 	}
 }
 
@@ -925,7 +949,7 @@ static int gdb_cmd_exception_pass(struct kgdb_state *ks)
 }
 
 /*
- * This function performs all gdbserial command procesing
+ * This function performs all gdbserial command processing
  */
 int gdb_serial_stub(struct kgdb_state *ks)
 {
@@ -945,7 +969,7 @@ int gdb_serial_stub(struct kgdb_state *ks)
 		/* Reply to host that an exception has occurred */
 		ptr = remcom_out_buffer;
 		*ptr++ = 'T';
-		ptr = pack_hex_byte(ptr, ks->signo);
+		ptr = hex_byte_pack(ptr, ks->signo);
 		ptr += strlen(strcpy(ptr, "thread:"));
 		int_to_threadref(thref, shadow_pid(current->pid));
 		ptr = pack_threadid(ptr, thref);
@@ -1018,6 +1042,7 @@ int gdb_serial_stub(struct kgdb_state *ks)
 				gdb_cmd_detachkill(ks);
 				return DBG_PASS_EVENT;
 			}
+			fallthrough;
 #endif
 		case 'C': /* Exception passing */
 			tmp = gdb_cmd_exception_pass(ks);
@@ -1025,7 +1050,7 @@ int gdb_serial_stub(struct kgdb_state *ks)
 				goto default_handle;
 			if (tmp == 0)
 				break;
-			/* Fall through on tmp < 0 */
+			fallthrough;	/* on tmp < 0 */
 		case 'c': /* Continue packet */
 		case 's': /* Single step packet */
 			if (kgdb_contthread && kgdb_contthread != current) {
@@ -1033,8 +1058,7 @@ int gdb_serial_stub(struct kgdb_state *ks)
 				error_packet(remcom_out_buffer, -EINVAL);
 				break;
 			}
-			dbg_activate_sw_breakpoints();
-			/* Fall through to default processing */
+			fallthrough;	/* to default processing */
 		default:
 default_handle:
 			error = kgdb_arch_handle_exception(ks->ex_vector,
@@ -1080,16 +1104,53 @@ int gdbstub_state(struct kgdb_state *ks, char *cmd)
 		return error;
 	case 's':
 	case 'c':
-		strcpy(remcom_in_buffer, cmd);
+		strscpy(remcom_in_buffer, cmd, sizeof(remcom_in_buffer));
 		return 0;
-	case '?':
-		gdb_cmd_status(ks);
-		break;
-	case '\0':
-		strcpy(remcom_out_buffer, "");
-		break;
+	case '$':
+		strscpy(remcom_in_buffer, cmd, sizeof(remcom_in_buffer));
+		gdbstub_use_prev_in_buf = strlen(remcom_in_buffer);
+		gdbstub_prev_in_buf_pos = 0;
+		return 0;
 	}
 	dbg_io_ops->write_char('+');
 	put_packet(remcom_out_buffer);
 	return 0;
+}
+
+/**
+ * gdbstub_exit - Send an exit message to GDB
+ * @status: The exit code to report.
+ */
+void gdbstub_exit(int status)
+{
+	unsigned char checksum, ch, buffer[3];
+	int loop;
+
+	if (!kgdb_connected)
+		return;
+	kgdb_connected = 0;
+
+	if (!dbg_io_ops || dbg_kdb_mode)
+		return;
+
+	buffer[0] = 'W';
+	buffer[1] = hex_asc_hi(status);
+	buffer[2] = hex_asc_lo(status);
+
+	dbg_io_ops->write_char('$');
+	checksum = 0;
+
+	for (loop = 0; loop < 3; loop++) {
+		ch = buffer[loop];
+		checksum += ch;
+		dbg_io_ops->write_char(ch);
+	}
+
+	dbg_io_ops->write_char('#');
+	dbg_io_ops->write_char(hex_asc_hi(checksum));
+	dbg_io_ops->write_char(hex_asc_lo(checksum));
+
+	/* make sure the output is flushed, lest the bootloader clobber it */
+	if (dbg_io_ops->flush)
+		dbg_io_ops->flush();
 }

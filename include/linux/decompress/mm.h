@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * linux/compr_mm.h
  *
@@ -16,12 +17,20 @@
 
 /*
  * Some architectures want to ensure there is no local data in their
- * pre-boot environment, so that data can arbitarily relocated (via
+ * pre-boot environment, so that data can arbitrarily relocated (via
  * GOT references).  This is achieved by defining STATIC_RW_DATA to
  * be null.
  */
 #ifndef STATIC_RW_DATA
 #define STATIC_RW_DATA static
+#endif
+
+/*
+ * When an architecture needs to share the malloc()/free() implementation
+ * between compilation units, it needs to have non-local visibility.
+ */
+#ifndef MALLOC_VISIBLE
+#define MALLOC_VISIBLE static
 #endif
 
 /* A trivial malloc implementation, adapted from
@@ -30,7 +39,7 @@
 STATIC_RW_DATA unsigned long malloc_ptr;
 STATIC_RW_DATA int malloc_count;
 
-static void *malloc(int size)
+MALLOC_VISIBLE void *malloc(int size)
 {
 	void *p;
 
@@ -51,7 +60,7 @@ static void *malloc(int size)
 	return p;
 }
 
-static void free(void *where)
+MALLOC_VISIBLE void free(void *where)
 {
 	malloc_count--;
 	if (!malloc_count)

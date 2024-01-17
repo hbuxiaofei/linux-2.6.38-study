@@ -1,22 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Squashfs - a compressed read only filesystem for Linux
  *
  * Copyright (c) 2002, 2003, 2004, 2005, 2006, 2007, 2008
- * Phillip Lougher <phillip@lougher.demon.co.uk>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2,
- * or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
+ * Phillip Lougher <phillip@squashfs.org.uk>
  *
  * export.c
  */
@@ -54,11 +41,16 @@ static long long squashfs_inode_lookup(struct super_block *sb, int ino_num)
 	struct squashfs_sb_info *msblk = sb->s_fs_info;
 	int blk = SQUASHFS_LOOKUP_BLOCK(ino_num - 1);
 	int offset = SQUASHFS_LOOKUP_BLOCK_OFFSET(ino_num - 1);
-	u64 start = le64_to_cpu(msblk->inode_lookup_table[blk]);
+	u64 start;
 	__le64 ino;
 	int err;
 
 	TRACE("Entered squashfs_inode_lookup, inode_number = %d\n", ino_num);
+
+	if (ino_num == 0 || (ino_num - 1) >= msblk->inodes)
+		return -EINVAL;
+
+	start = le64_to_cpu(msblk->inode_lookup_table[blk]);
 
 	err = squashfs_read_metadata(sb, &ino, &start, &offset, sizeof(ino));
 	if (err < 0)
@@ -110,7 +102,7 @@ static struct dentry *squashfs_fh_to_parent(struct super_block *sb,
 
 static struct dentry *squashfs_get_parent(struct dentry *child)
 {
-	struct inode *inode = child->d_inode;
+	struct inode *inode = d_inode(child);
 	unsigned int parent_ino = squashfs_i(inode)->parent;
 
 	return squashfs_export_iget(inode->i_sb, parent_ino);
@@ -121,30 +113,62 @@ static struct dentry *squashfs_get_parent(struct dentry *child)
  * Read uncompressed inode lookup table indexes off disk into memory
  */
 __le64 *squashfs_read_inode_lookup_table(struct super_block *sb,
-		u64 lookup_table_start, unsigned int inodes)
+		u64 lookup_table_start, u64 next_table, unsigned int inodes)
 {
 	unsigned int length = SQUASHFS_LOOKUP_BLOCK_BYTES(inodes);
-	__le64 *inode_lookup_table;
-	int err;
+	unsigned int indexes = SQUASHFS_LOOKUP_BLOCKS(inodes);
+	int n;
+	__le64 *table;
+	u64 start, end;
 
 	TRACE("In read_inode_lookup_table, length %d\n", length);
 
-	/* Allocate inode lookup table indexes */
-	inode_lookup_table = kmalloc(length, GFP_KERNEL);
-	if (inode_lookup_table == NULL) {
-		ERROR("Failed to allocate inode lookup table\n");
-		return ERR_PTR(-ENOMEM);
+	/* Sanity check values */
+
+	/* there should always be at least one inode */
+	if (inodes == 0)
+		return ERR_PTR(-EINVAL);
+
+	/*
+	 * The computed size of the lookup table (length bytes) should exactly
+	 * match the table start and end points
+	 */
+	if (length != (next_table - lookup_table_start))
+		return ERR_PTR(-EINVAL);
+
+	table = squashfs_read_table(sb, lookup_table_start, length);
+	if (IS_ERR(table))
+		return table;
+
+	/*
+	 * table0], table[1], ... table[indexes - 1] store the locations
+	 * of the compressed inode lookup blocks.  Each entry should be
+	 * less than the next (i.e. table[0] < table[1]), and the difference
+	 * between them should be SQUASHFS_METADATA_SIZE or less.
+	 * table[indexes - 1] should  be less than lookup_table_start, and
+	 * again the difference should be SQUASHFS_METADATA_SIZE or less
+	 */
+	for (n = 0; n < (indexes - 1); n++) {
+		start = le64_to_cpu(table[n]);
+		end = le64_to_cpu(table[n + 1]);
+
+		if (start >= end
+		    || (end - start) >
+		    (SQUASHFS_METADATA_SIZE + SQUASHFS_BLOCK_OFFSET)) {
+			kfree(table);
+			return ERR_PTR(-EINVAL);
+		}
 	}
 
-	err = squashfs_read_table(sb, inode_lookup_table, lookup_table_start,
-			length);
-	if (err < 0) {
-		ERROR("unable to read inode lookup table\n");
-		kfree(inode_lookup_table);
-		return ERR_PTR(err);
+	start = le64_to_cpu(table[indexes - 1]);
+	if (start >= lookup_table_start ||
+	    (lookup_table_start - start) >
+	    (SQUASHFS_METADATA_SIZE + SQUASHFS_BLOCK_OFFSET)) {
+		kfree(table);
+		return ERR_PTR(-EINVAL);
 	}
 
-	return inode_lookup_table;
+	return table;
 }
 
 

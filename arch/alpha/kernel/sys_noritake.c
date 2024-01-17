@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *	linux/arch/alpha/kernel/sys_noritake.c
  *
@@ -18,12 +19,11 @@
 #include <linux/bitops.h>
 
 #include <asm/ptrace.h>
-#include <asm/system.h>
+#include <asm/mce.h>
 #include <asm/dma.h>
 #include <asm/irq.h>
 #include <asm/mmu_context.h>
 #include <asm/io.h>
-#include <asm/pgtable.h>
 #include <asm/core_apecs.h>
 #include <asm/core_cia.h>
 #include <asm/tlbflush.h>
@@ -127,7 +127,8 @@ noritake_init_irq(void)
 	outw(0, 0x54c);
 
 	for (i = 16; i < 48; ++i) {
-		set_irq_chip_and_handler(i, &noritake_irq_type, handle_level_irq);
+		irq_set_chip_and_handler(i, &noritake_irq_type,
+					 handle_level_irq);
 		irq_set_status_flags(i, IRQ_LEVEL);
 	}
 
@@ -192,10 +193,10 @@ noritake_init_irq(void)
  * comes in on.  This makes interrupt processing much easier.
  */
 
-static int __init
-noritake_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+static int
+noritake_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
-	static char irq_tab[15][5] __initdata = {
+	static char irq_tab[15][5] = {
 		/*INT    INTA   INTB   INTC   INTD */
 		/* note: IDSELs 16, 17, and 25 are CORELLE only */
 		{ 16+1,  16+1,  16+1,  16+1,  16+1},  /* IdSel 16,  QLOGIC */
@@ -220,7 +221,7 @@ noritake_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 	return COMMON_TABLE_LOOKUP;
 }
 
-static u8 __init
+static u8
 noritake_swizzle(struct pci_dev *dev, u8 *pinp)
 {
 	int slot, pin = *pinp;

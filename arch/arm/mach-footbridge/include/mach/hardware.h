@@ -1,11 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  *  arch/arm/mach-footbridge/include/mach/hardware.h
  *
  *  Copyright (C) 1998-1999 Russell King.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  *  This file contains the hardware definitions of the EBSA-285.
  */
@@ -23,6 +20,7 @@
  * 0xf9000000	0x50000000	1MB	Cache flush
  * 0xf0000000	0x80000000	16MB	ISA memory
  */
+
 #define XBUS_SIZE		0x00100000
 #define XBUS_BASE		0xff800000
 
@@ -44,11 +42,7 @@
 #define PCIMEM_SIZE		0x01000000
 #define PCIMEM_BASE		0xf0000000
 
-#define XBUS_LEDS		((volatile unsigned char *)(XBUS_BASE + 0x12000))
-#define XBUS_LED_AMBER		(1 << 0)
-#define XBUS_LED_GREEN		(1 << 1)
-#define XBUS_LED_RED		(1 << 2)
-#define XBUS_LED_TOGGLE		(1 << 8)
+#define XBUS_CS2		0x40012000
 
 #define XBUS_SWITCH		((volatile unsigned char *)(XBUS_BASE + 0x12000))
 #define XBUS_SWITCH_SWITCH	((*XBUS_SWITCH) & 15)
@@ -56,7 +50,7 @@
 #define XBUS_SWITCH_J17_11	((*XBUS_SWITCH) & (1 << 5))
 #define XBUS_SWITCH_J17_9	((*XBUS_SWITCH) & (1 << 6))
 
-#define UNCACHEABLE_ADDR	(ARMCSR_BASE + 0x108)
+#define UNCACHEABLE_ADDR	(ARMCSR_BASE + 0x108)	/* CSR_ROMBASEMASK */
 
 
 /* PIC irq control */
@@ -86,16 +80,11 @@
 #define CPLD_FLASH_WR_ENABLE	1
 
 #ifndef __ASSEMBLY__
-extern spinlock_t nw_gpio_lock;
+extern raw_spinlock_t nw_gpio_lock;
 extern void nw_gpio_modify_op(unsigned int mask, unsigned int set);
 extern void nw_gpio_modify_io(unsigned int mask, unsigned int in);
 extern unsigned int nw_gpio_read(void);
 extern void nw_cpld_modify(unsigned int mask, unsigned int set);
 #endif
-
-#define pcibios_assign_all_busses()	1
-
-#define PCIBIOS_MIN_IO		0x1000
-#define PCIBIOS_MIN_MEM 	0x81000000
 
 #endif

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  *  linux/arch/arm/mach-ep93xx/micro9.c
  *
@@ -5,10 +6,6 @@
  *                    Manfred Gruber <m.gruber@tirol.com>
  * Copyright (C) 2009 Contec Steuerungstechnik & Automation GmbH
  *                    Hubert Feurstein <hubert.feurstein@contec.at>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/kernel.h>
@@ -16,11 +13,12 @@
 #include <linux/platform_device.h>
 #include <linux/io.h>
 
-#include <mach/hardware.h>
+#include "hardware.h"
 
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
 
+#include "soc.h"
 
 /*************************************************************************
  * Micro9 NOR Flash
@@ -77,43 +75,51 @@ static void __init micro9_init_machine(void)
 #ifdef CONFIG_MACH_MICRO9H
 MACHINE_START(MICRO9, "Contec Micro9-High")
 	/* Maintainer: Hubert Feurstein <hubert.feurstein@contec.at> */
-	.boot_params	= EP93XX_SDCE3_PHYS_BASE_SYNC + 0x100,
+	.atag_offset	= 0x100,
+	.nr_irqs	= NR_EP93XX_IRQS,
 	.map_io		= ep93xx_map_io,
 	.init_irq	= ep93xx_init_irq,
-	.timer		= &ep93xx_timer,
+	.init_time	= ep93xx_timer_init,
 	.init_machine	= micro9_init_machine,
+	.restart	= ep93xx_restart,
 MACHINE_END
 #endif
 
 #ifdef CONFIG_MACH_MICRO9M
 MACHINE_START(MICRO9M, "Contec Micro9-Mid")
 	/* Maintainer: Hubert Feurstein <hubert.feurstein@contec.at> */
-	.boot_params	= EP93XX_SDCE3_PHYS_BASE_ASYNC + 0x100,
+	.atag_offset	= 0x100,
+	.nr_irqs	= NR_EP93XX_IRQS,
 	.map_io		= ep93xx_map_io,
 	.init_irq	= ep93xx_init_irq,
-	.timer		= &ep93xx_timer,
+	.init_time	= ep93xx_timer_init,
 	.init_machine	= micro9_init_machine,
+	.restart	= ep93xx_restart,
 MACHINE_END
 #endif
 
 #ifdef CONFIG_MACH_MICRO9L
 MACHINE_START(MICRO9L, "Contec Micro9-Lite")
 	/* Maintainer: Hubert Feurstein <hubert.feurstein@contec.at> */
-	.boot_params	= EP93XX_SDCE3_PHYS_BASE_SYNC + 0x100,
+	.atag_offset	= 0x100,
+	.nr_irqs	= NR_EP93XX_IRQS,
 	.map_io		= ep93xx_map_io,
 	.init_irq	= ep93xx_init_irq,
-	.timer		= &ep93xx_timer,
+	.init_time	= ep93xx_timer_init,
 	.init_machine	= micro9_init_machine,
+	.restart	= ep93xx_restart,
 MACHINE_END
 #endif
 
 #ifdef CONFIG_MACH_MICRO9S
 MACHINE_START(MICRO9S, "Contec Micro9-Slim")
 	/* Maintainer: Hubert Feurstein <hubert.feurstein@contec.at> */
-	.boot_params	= EP93XX_SDCE3_PHYS_BASE_ASYNC + 0x100,
+	.atag_offset	= 0x100,
+	.nr_irqs	= NR_EP93XX_IRQS,
 	.map_io		= ep93xx_map_io,
 	.init_irq	= ep93xx_init_irq,
-	.timer		= &ep93xx_timer,
+	.init_time	= ep93xx_timer_init,
 	.init_machine	= micro9_init_machine,
+	.restart	= ep93xx_restart,
 MACHINE_END
 #endif

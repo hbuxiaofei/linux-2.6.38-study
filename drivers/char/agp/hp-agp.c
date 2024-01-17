@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * HP zx1 AGPGART routines.
  *
  * (c) Copyright 2002, 2003 Hewlett-Packard Development Company, L.P.
  *	Bjorn Helgaas <bjorn.helgaas@hp.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/acpi.h>
@@ -336,7 +333,8 @@ hp_zx1_insert_memory (struct agp_memory *mem, off_t pg_start, int type)
 	off_t j, io_pg_start;
 	int io_pg_count;
 
-	if (type != 0 || mem->type != 0) {
+	if (type != mem->type ||
+		agp_bridge->driver->agp_type_to_mask_type(agp_bridge, type)) {
 		return -EINVAL;
 	}
 
@@ -380,7 +378,8 @@ hp_zx1_remove_memory (struct agp_memory *mem, off_t pg_start, int type)
 	struct _hp_private *hp = &hp_private;
 	int i, io_pg_start, io_pg_count;
 
-	if (type != 0 || mem->type != 0) {
+	if (type != mem->type ||
+		agp_bridge->driver->agp_type_to_mask_type(agp_bridge, type)) {
 		return -EINVAL;
 	}
 

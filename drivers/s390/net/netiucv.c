@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * IUCV network driver
  *
@@ -18,21 +19,6 @@
  *    Denis Joseph Barrow (djbarrow@de.ibm.com,barrow_dj@yahoo.com)
  *    Martin Schwidefsky (schwidefsky@de.ibm.com)
  *    Alan Altmark (Alan_Altmark@us.ibm.com)  Sept. 2000
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
  */
 
 #define KMSG_COMPONENT "netiucv"
@@ -62,7 +48,8 @@
 #include <net/dst.h>
 
 #include <asm/io.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
+#include <asm/ebcdic.h>
 
 #include <net/iucv/iucv.h>
 #include "fsm.h"
@@ -71,11 +58,11 @@ MODULE_AUTHOR
     ("(C) 2001 IBM Corporation by Fritz Elfert (felfert@millenux.com)");
 MODULE_DESCRIPTION ("Linux for S/390 IUCV network driver");
 
-/**
+/*
  * Debug Facility stuff
  */
 #define IUCV_DBF_SETUP_NAME "iucv_setup"
-#define IUCV_DBF_SETUP_LEN 32
+#define IUCV_DBF_SETUP_LEN 64
 #define IUCV_DBF_SETUP_PAGES 2
 #define IUCV_DBF_SETUP_NR_AREAS 1
 #define IUCV_DBF_SETUP_LEVEL 3
@@ -104,15 +91,9 @@ MODULE_DESCRIPTION ("Linux for S/390 IUCV network driver");
 
 DECLARE_PER_CPU(char[256], iucv_dbf_txt_buf);
 
-/* Allow to sort out low debug levels early to avoid wasted sprints */
-static inline int iucv_dbf_passes(debug_info_t *dbf_grp, int level)
-{
-	return (level <= dbf_grp->level);
-}
-
 #define IUCV_DBF_TEXT_(name, level, text...) \
 	do { \
-		if (iucv_dbf_passes(iucv_dbf_##name, level)) { \
+		if (debug_level_enabled(iucv_dbf_##name, level)) { \
 			char* __buf = get_cpu_var(iucv_dbf_txt_buf); \
 			sprintf(__buf, text); \
 			debug_text_event(iucv_dbf_##name, level, __buf); \
@@ -126,74 +107,18 @@ static inline int iucv_dbf_passes(debug_info_t *dbf_grp, int level)
 		debug_sprintf_event(iucv_dbf_trace, level, text ); \
 	} while (0)
 
-/**
+/*
  * some more debug stuff
  */
-#define IUCV_HEXDUMP16(importance,header,ptr) \
-PRINT_##importance(header "%02x %02x %02x %02x  %02x %02x %02x %02x  " \
-		   "%02x %02x %02x %02x  %02x %02x %02x %02x\n", \
-		   *(((char*)ptr)),*(((char*)ptr)+1),*(((char*)ptr)+2), \
-		   *(((char*)ptr)+3),*(((char*)ptr)+4),*(((char*)ptr)+5), \
-		   *(((char*)ptr)+6),*(((char*)ptr)+7),*(((char*)ptr)+8), \
-		   *(((char*)ptr)+9),*(((char*)ptr)+10),*(((char*)ptr)+11), \
-		   *(((char*)ptr)+12),*(((char*)ptr)+13), \
-		   *(((char*)ptr)+14),*(((char*)ptr)+15)); \
-PRINT_##importance(header "%02x %02x %02x %02x  %02x %02x %02x %02x  " \
-		   "%02x %02x %02x %02x  %02x %02x %02x %02x\n", \
-		   *(((char*)ptr)+16),*(((char*)ptr)+17), \
-		   *(((char*)ptr)+18),*(((char*)ptr)+19), \
-		   *(((char*)ptr)+20),*(((char*)ptr)+21), \
-		   *(((char*)ptr)+22),*(((char*)ptr)+23), \
-		   *(((char*)ptr)+24),*(((char*)ptr)+25), \
-		   *(((char*)ptr)+26),*(((char*)ptr)+27), \
-		   *(((char*)ptr)+28),*(((char*)ptr)+29), \
-		   *(((char*)ptr)+30),*(((char*)ptr)+31));
-
 #define PRINTK_HEADER " iucv: "       /* for debugging */
-
-/* dummy device to make sure netiucv_pm functions are called */
-static struct device *netiucv_dev;
-
-static int netiucv_pm_prepare(struct device *);
-static void netiucv_pm_complete(struct device *);
-static int netiucv_pm_freeze(struct device *);
-static int netiucv_pm_restore_thaw(struct device *);
-
-static const struct dev_pm_ops netiucv_pm_ops = {
-	.prepare = netiucv_pm_prepare,
-	.complete = netiucv_pm_complete,
-	.freeze = netiucv_pm_freeze,
-	.thaw = netiucv_pm_restore_thaw,
-	.restore = netiucv_pm_restore_thaw,
-};
 
 static struct device_driver netiucv_driver = {
 	.owner = THIS_MODULE,
 	.name = "netiucv",
 	.bus  = &iucv_bus,
-	.pm = &netiucv_pm_ops,
 };
 
-static int netiucv_callback_connreq(struct iucv_path *,
-				    u8 ipvmid[8], u8 ipuser[16]);
-static void netiucv_callback_connack(struct iucv_path *, u8 ipuser[16]);
-static void netiucv_callback_connrej(struct iucv_path *, u8 ipuser[16]);
-static void netiucv_callback_connsusp(struct iucv_path *, u8 ipuser[16]);
-static void netiucv_callback_connres(struct iucv_path *, u8 ipuser[16]);
-static void netiucv_callback_rx(struct iucv_path *, struct iucv_message *);
-static void netiucv_callback_txdone(struct iucv_path *, struct iucv_message *);
-
-static struct iucv_handler netiucv_handler = {
-	.path_pending	  = netiucv_callback_connreq,
-	.path_complete	  = netiucv_callback_connack,
-	.path_severed	  = netiucv_callback_connrej,
-	.path_quiesced	  = netiucv_callback_connsusp,
-	.path_resumed	  = netiucv_callback_connres,
-	.message_pending  = netiucv_callback_rx,
-	.message_complete = netiucv_callback_txdone
-};
-
-/**
+/*
  * Per connection profiling data
  */
 struct connection_profile {
@@ -203,12 +128,12 @@ struct connection_profile {
 	unsigned long doios_multi;
 	unsigned long txlen;
 	unsigned long tx_time;
-	struct timespec send_stamp;
+	unsigned long send_stamp;
 	unsigned long tx_pending;
 	unsigned long tx_max_pending;
 };
 
-/**
+/*
  * Representation of one iucv connection
  */
 struct iucv_connection {
@@ -226,15 +151,16 @@ struct iucv_connection {
 	struct net_device         *netdev;
 	struct connection_profile prof;
 	char                      userid[9];
+	char			  userdata[17];
 };
 
-/**
+/*
  * Linked list of all connection structs.
  */
 static LIST_HEAD(iucv_connection_list);
 static DEFINE_RWLOCK(iucv_connection_rwlock);
 
-/**
+/*
  * Representation of event-data for the
  * connection state machine.
  */
@@ -243,7 +169,7 @@ struct iucv_event {
 	void                   *data;
 };
 
-/**
+/*
  * Private part of the network device structure
  */
 struct netiucv_priv {
@@ -252,10 +178,9 @@ struct netiucv_priv {
 	fsm_instance            *fsm;
         struct iucv_connection  *conn;
 	struct device           *dev;
-	int			 pm_state;
 };
 
-/**
+/*
  * Link level header for a packet.
  */
 struct ll_header {
@@ -263,37 +188,42 @@ struct ll_header {
 };
 
 #define NETIUCV_HDRLEN		 (sizeof(struct ll_header))
-#define NETIUCV_BUFSIZE_MAX      32768
+#define NETIUCV_BUFSIZE_MAX	 65537
 #define NETIUCV_BUFSIZE_DEFAULT  NETIUCV_BUFSIZE_MAX
 #define NETIUCV_MTU_MAX          (NETIUCV_BUFSIZE_MAX - NETIUCV_HDRLEN)
 #define NETIUCV_MTU_DEFAULT      9216
 #define NETIUCV_QUEUELEN_DEFAULT 50
 #define NETIUCV_TIMEOUT_5SEC     5000
 
-/**
+/*
  * Compatibility macros for busy handling
  * of network devices.
  */
-static inline void netiucv_clear_busy(struct net_device *dev)
+static void netiucv_clear_busy(struct net_device *dev)
 {
 	struct netiucv_priv *priv = netdev_priv(dev);
 	clear_bit(0, &priv->tbusy);
 	netif_wake_queue(dev);
 }
 
-static inline int netiucv_test_and_set_busy(struct net_device *dev)
+static int netiucv_test_and_set_busy(struct net_device *dev)
 {
 	struct netiucv_priv *priv = netdev_priv(dev);
 	netif_stop_queue(dev);
 	return test_and_set_bit(0, &priv->tbusy);
 }
 
-static u8 iucvMagic[16] = {
+static u8 iucvMagic_ascii[16] = {
+	0x30, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+	0x30, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20
+};
+
+static u8 iucvMagic_ebcdic[16] = {
 	0xF0, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40,
 	0xF0, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40
 };
 
-/**
+/*
  * Convert an iucv userId to its printable
  * form (strip whitespace at end).
  *
@@ -301,19 +231,38 @@ static u8 iucvMagic[16] = {
  *
  * @returns The printable string (static data!!)
  */
-static char *netiucv_printname(char *name)
+static char *netiucv_printname(char *name, int len)
 {
-	static char tmp[9];
+	static char tmp[17];
 	char *p = tmp;
-	memcpy(tmp, name, 8);
-	tmp[8] = '\0';
-	while (*p && (!isspace(*p)))
+	memcpy(tmp, name, len);
+	tmp[len] = '\0';
+	while (*p && ((p - tmp) < len) && (!isspace(*p)))
 		p++;
 	*p = '\0';
 	return tmp;
 }
 
-/**
+static char *netiucv_printuser(struct iucv_connection *conn)
+{
+	static char tmp_uid[9];
+	static char tmp_udat[17];
+	static char buf[100];
+
+	if (memcmp(conn->userdata, iucvMagic_ebcdic, 16)) {
+		tmp_uid[8] = '\0';
+		tmp_udat[16] = '\0';
+		memcpy(tmp_uid, netiucv_printname(conn->userid, 8), 8);
+		memcpy(tmp_udat, conn->userdata, 16);
+		EBCASC(tmp_udat, 16);
+		memcpy(tmp_udat, netiucv_printname(tmp_udat, 16), 16);
+		sprintf(buf, "%s.%s", tmp_uid, tmp_udat);
+		return buf;
+	} else
+		return netiucv_printname(conn->userid, 8);
+}
+
+/*
  * States of the interface statemachine.
  */
 enum dev_states {
@@ -321,7 +270,7 @@ enum dev_states {
 	DEV_STATE_STARTWAIT,
 	DEV_STATE_STOPWAIT,
 	DEV_STATE_RUNNING,
-	/**
+	/*
 	 * MUST be always the last element!!
 	 */
 	NR_DEV_STATES
@@ -334,7 +283,7 @@ static const char *dev_state_names[] = {
 	"Running",
 };
 
-/**
+/*
  * Events of the interface statemachine.
  */
 enum dev_events {
@@ -342,7 +291,7 @@ enum dev_events {
 	DEV_EVENT_STOP,
 	DEV_EVENT_CONUP,
 	DEV_EVENT_CONDOWN,
-	/**
+	/*
 	 * MUST be always the last element!!
 	 */
 	NR_DEV_EVENTS
@@ -355,11 +304,11 @@ static const char *dev_event_names[] = {
 	"Connection down",
 };
 
-/**
+/*
  * Events of the connection statemachine
  */
 enum conn_events {
-	/**
+	/*
 	 * Events, representing callbacks from
 	 * lowlevel iucv layer)
 	 */
@@ -371,23 +320,23 @@ enum conn_events {
 	CONN_EVENT_RX,
 	CONN_EVENT_TXDONE,
 
-	/**
+	/*
 	 * Events, representing errors return codes from
 	 * calls to lowlevel iucv layer
 	 */
 
-	/**
+	/*
 	 * Event, representing timer expiry.
 	 */
 	CONN_EVENT_TIMER,
 
-	/**
+	/*
 	 * Events, representing commands from upper levels.
 	 */
 	CONN_EVENT_START,
 	CONN_EVENT_STOP,
 
-	/**
+	/*
 	 * MUST be always the last element!!
 	 */
 	NR_CONN_EVENTS,
@@ -408,55 +357,55 @@ static const char *conn_event_names[] = {
 	"Stop",
 };
 
-/**
+/*
  * States of the connection statemachine.
  */
 enum conn_states {
-	/**
+	/*
 	 * Connection not assigned to any device,
 	 * initial state, invalid
 	 */
 	CONN_STATE_INVALID,
 
-	/**
+	/*
 	 * Userid assigned but not operating
 	 */
 	CONN_STATE_STOPPED,
 
-	/**
+	/*
 	 * Connection registered,
 	 * no connection request sent yet,
 	 * no connection request received
 	 */
 	CONN_STATE_STARTWAIT,
 
-	/**
+	/*
 	 * Connection registered and connection request sent,
 	 * no acknowledge and no connection request received yet.
 	 */
 	CONN_STATE_SETUPWAIT,
 
-	/**
+	/*
 	 * Connection up and running idle
 	 */
 	CONN_STATE_IDLE,
 
-	/**
+	/*
 	 * Data sent, awaiting CONN_EVENT_TXDONE
 	 */
 	CONN_STATE_TX,
 
-	/**
+	/*
 	 * Error during registration.
 	 */
 	CONN_STATE_REGERR,
 
-	/**
+	/*
 	 * Error during registration.
 	 */
 	CONN_STATE_CONNERR,
 
-	/**
+	/*
 	 * MUST be always the last element!!
 	 */
 	NR_CONN_STATES,
@@ -475,7 +424,7 @@ static const char *conn_state_names[] = {
 };
 
 
-/**
+/*
  * Debug Facility Stuff
  */
 static debug_info_t *iucv_dbf_setup = NULL;
@@ -486,12 +435,9 @@ DEFINE_PER_CPU(char[256], iucv_dbf_txt_buf);
 
 static void iucv_unregister_dbf_views(void)
 {
-	if (iucv_dbf_setup)
-		debug_unregister(iucv_dbf_setup);
-	if (iucv_dbf_data)
-		debug_unregister(iucv_dbf_data);
-	if (iucv_dbf_trace)
-		debug_unregister(iucv_dbf_trace);
+	debug_unregister(iucv_dbf_setup);
+	debug_unregister(iucv_dbf_data);
+	debug_unregister(iucv_dbf_trace);
 }
 static int iucv_register_dbf_views(void)
 {
@@ -558,20 +504,23 @@ static void netiucv_callback_connack(struct iucv_path *path, u8 ipuser[16])
 	fsm_event(conn->fsm, CONN_EVENT_CONN_ACK, conn);
 }
 
-static int netiucv_callback_connreq(struct iucv_path *path,
-				    u8 ipvmid[8], u8 ipuser[16])
+static int netiucv_callback_connreq(struct iucv_path *path, u8 *ipvmid,
+				    u8 *ipuser)
 {
 	struct iucv_connection *conn = path->private;
 	struct iucv_event ev;
+	static char tmp_user[9];
+	static char tmp_udat[17];
 	int rc;
 
-	if (memcmp(iucvMagic, ipuser, 16))
-		/* ipuser must match iucvMagic. */
-		return -EINVAL;
 	rc = -EINVAL;
+	memcpy(tmp_user, netiucv_printname(ipvmid, 8), 8);
+	memcpy(tmp_udat, ipuser, 16);
+	EBCASC(tmp_udat, 16);
 	read_lock_bh(&iucv_connection_rwlock);
 	list_for_each_entry(conn, &iucv_connection_list, list) {
-		if (strncmp(ipvmid, conn->userid, 8))
+		if (strncmp(ipvmid, conn->userid, 8) ||
+		    strncmp(ipuser, conn->userdata, 16))
 			continue;
 		/* Found a matching connection for this path. */
 		conn->path = path;
@@ -580,32 +529,34 @@ static int netiucv_callback_connreq(struct iucv_path *path,
 		fsm_event(conn->fsm, CONN_EVENT_CONN_REQ, &ev);
 		rc = 0;
 	}
+	IUCV_DBF_TEXT_(setup, 2, "Connection requested for %s.%s\n",
+		       tmp_user, netiucv_printname(tmp_udat, 16));
 	read_unlock_bh(&iucv_connection_rwlock);
 	return rc;
 }
 
-static void netiucv_callback_connrej(struct iucv_path *path, u8 ipuser[16])
+static void netiucv_callback_connrej(struct iucv_path *path, u8 *ipuser)
 {
 	struct iucv_connection *conn = path->private;
 
 	fsm_event(conn->fsm, CONN_EVENT_CONN_REJ, conn);
 }
 
-static void netiucv_callback_connsusp(struct iucv_path *path, u8 ipuser[16])
+static void netiucv_callback_connsusp(struct iucv_path *path, u8 *ipuser)
 {
 	struct iucv_connection *conn = path->private;
 
 	fsm_event(conn->fsm, CONN_EVENT_CONN_SUS, conn);
 }
 
-static void netiucv_callback_connres(struct iucv_path *path, u8 ipuser[16])
+static void netiucv_callback_connres(struct iucv_path *path, u8 *ipuser)
 {
 	struct iucv_connection *conn = path->private;
 
 	fsm_event(conn->fsm, CONN_EVENT_CONN_RES, conn);
 }
 
-/**
+/*
  * NOP action for statemachines
  */
 static void netiucv_action_nop(fsm_instance *fi, int event, void *arg)
@@ -616,7 +567,7 @@ static void netiucv_action_nop(fsm_instance *fi, int event, void *arg)
  * Actions of the connection statemachine
  */
 
-/**
+/*
  * netiucv_unpack_skb
  * @conn: The connection where this skb has been received.
  * @pskb: The received skb.
@@ -634,7 +585,7 @@ static void netiucv_unpack_skb(struct iucv_connection *conn,
 	skb_put(pskb, NETIUCV_HDRLEN);
 	pskb->dev = dev;
 	pskb->ip_summed = CHECKSUM_NONE;
-	pskb->protocol = ntohs(ETH_P_IP);
+	pskb->protocol = cpu_to_be16(ETH_P_IP);
 
 	while (1) {
 		struct sk_buff *skb;
@@ -669,11 +620,7 @@ static void netiucv_unpack_skb(struct iucv_connection *conn,
 		pskb->ip_summed = CHECKSUM_UNNECESSARY;
 		privptr->stats.rx_packets++;
 		privptr->stats.rx_bytes += skb->len;
-		/*
-		 * Since receiving is always initiated from a tasklet (in iucv.c),
-		 * we must use netif_rx_ni() instead of netif_rx()
-		 */
-		netif_rx_ni(skb);
+		netif_rx(skb);
 		skb_pull(pskb, header->next);
 		skb_put(pskb, NETIUCV_HDRLEN);
 	}
@@ -733,12 +680,16 @@ static void conn_action_txdone(fsm_instance *fi, int event, void *arg)
 
 	IUCV_DBF_TEXT(trace, 4, __func__);
 
-	if (conn && conn->netdev)
-		privptr = netdev_priv(conn->netdev);
+	if (!conn || !conn->netdev) {
+		IUCV_DBF_TEXT(data, 2,
+			      "Send confirmation for unlinked connection\n");
+		return;
+	}
+	privptr = netdev_priv(conn->netdev);
 	conn->prof.tx_pending--;
 	if (single_flag) {
 		if ((skb = skb_dequeue(&conn->commit_queue))) {
-			atomic_dec(&skb->users);
+			refcount_dec(&skb->users);
 			if (privptr) {
 				privptr->stats.tx_packets++;
 				privptr->stats.tx_bytes +=
@@ -754,15 +705,14 @@ static void conn_action_txdone(fsm_instance *fi, int event, void *arg)
 	spin_lock_irqsave(&conn->collect_lock, saveflags);
 	while ((skb = skb_dequeue(&conn->collect_queue))) {
 		header.next = conn->tx_buff->len + skb->len + NETIUCV_HDRLEN;
-		memcpy(skb_put(conn->tx_buff, NETIUCV_HDRLEN), &header,
-		       NETIUCV_HDRLEN);
+		skb_put_data(conn->tx_buff, &header, NETIUCV_HDRLEN);
 		skb_copy_from_linear_data(skb,
 					  skb_put(conn->tx_buff, skb->len),
 					  skb->len);
 		txbytes += skb->len;
 		txpackets++;
 		stat_maxcq++;
-		atomic_dec(&skb->users);
+		refcount_dec(&skb->users);
 		dev_kfree_skb_any(skb);
 	}
 	if (conn->collect_len > conn->prof.maxmulti)
@@ -775,8 +725,8 @@ static void conn_action_txdone(fsm_instance *fi, int event, void *arg)
 	}
 
 	header.next = 0;
-	memcpy(skb_put(conn->tx_buff, NETIUCV_HDRLEN), &header, NETIUCV_HDRLEN);
-	conn->prof.send_stamp = current_kernel_time();
+	skb_put_data(conn->tx_buff, &header, NETIUCV_HDRLEN);
+	conn->prof.send_stamp = jiffies;
 	txmsg.class = 0;
 	txmsg.tag = 0;
 	rc = iucv_message_send(conn->path, &txmsg, 0, 0,
@@ -802,6 +752,16 @@ static void conn_action_txdone(fsm_instance *fi, int event, void *arg)
 	}
 }
 
+static struct iucv_handler netiucv_handler = {
+	.path_pending	  = netiucv_callback_connreq,
+	.path_complete	  = netiucv_callback_connack,
+	.path_severed	  = netiucv_callback_connrej,
+	.path_quiesced	  = netiucv_callback_connsusp,
+	.path_resumed	  = netiucv_callback_connres,
+	.message_pending  = netiucv_callback_rx,
+	.message_complete = netiucv_callback_txdone,
+};
+
 static void conn_action_connaccept(fsm_instance *fi, int event, void *arg)
 {
 	struct iucv_event *ev = arg;
@@ -816,7 +776,7 @@ static void conn_action_connaccept(fsm_instance *fi, int event, void *arg)
 	conn->path = path;
 	path->msglim = NETIUCV_QUEUELEN_DEFAULT;
 	path->flags = 0;
-	rc = iucv_path_accept(path, &netiucv_handler, NULL, conn);
+	rc = iucv_path_accept(path, &netiucv_handler, conn->userdata , conn);
 	if (rc) {
 		IUCV_DBF_TEXT_(setup, 2, "rc %d from iucv_accept", rc);
 		return;
@@ -854,7 +814,7 @@ static void conn_action_conntimsev(fsm_instance *fi, int event, void *arg)
 
 	IUCV_DBF_TEXT(trace, 3, __func__);
 	fsm_deltimer(&conn->timer);
-	iucv_path_sever(conn->path, NULL);
+	iucv_path_sever(conn->path, conn->userdata);
 	fsm_newstate(fi, CONN_STATE_STARTWAIT);
 }
 
@@ -867,9 +827,9 @@ static void conn_action_connsever(fsm_instance *fi, int event, void *arg)
 	IUCV_DBF_TEXT(trace, 3, __func__);
 
 	fsm_deltimer(&conn->timer);
-	iucv_path_sever(conn->path, NULL);
-	dev_info(privptr->dev, "The peer interface of the IUCV device"
-		" has closed the connection\n");
+	iucv_path_sever(conn->path, conn->userdata);
+	dev_info(privptr->dev, "The peer z/VM guest %s has closed the "
+			       "connection\n", netiucv_printuser(conn));
 	IUCV_DBF_TEXT(data, 2,
 		      "conn_action_connsever: Remote dropped connection\n");
 	fsm_newstate(fi, CONN_STATE_STARTWAIT);
@@ -886,8 +846,6 @@ static void conn_action_start(fsm_instance *fi, int event, void *arg)
 	IUCV_DBF_TEXT(trace, 3, __func__);
 
 	fsm_newstate(fi, CONN_STATE_STARTWAIT);
-	IUCV_DBF_TEXT_(setup, 2, "%s('%s'): connecting ...\n",
-		netdev->name, conn->userid);
 
 	/*
 	 * We must set the state before calling iucv_connect because the
@@ -897,8 +855,11 @@ static void conn_action_start(fsm_instance *fi, int event, void *arg)
 
 	fsm_newstate(fi, CONN_STATE_SETUPWAIT);
 	conn->path = iucv_path_alloc(NETIUCV_QUEUELEN_DEFAULT, 0, GFP_KERNEL);
+	IUCV_DBF_TEXT_(setup, 2, "%s: connecting to %s ...\n",
+		netdev->name, netiucv_printuser(conn));
+
 	rc = iucv_path_connect(conn->path, &netiucv_handler, conn->userid,
-			       NULL, iucvMagic, conn);
+			       NULL, conn->userdata, conn);
 	switch (rc) {
 	case 0:
 		netdev->tx_queue_len = conn->path->msglim;
@@ -908,13 +869,13 @@ static void conn_action_start(fsm_instance *fi, int event, void *arg)
 	case 11:
 		dev_warn(privptr->dev,
 			"The IUCV device failed to connect to z/VM guest %s\n",
-			netiucv_printname(conn->userid));
+			netiucv_printname(conn->userid, 8));
 		fsm_newstate(fi, CONN_STATE_STARTWAIT);
 		break;
 	case 12:
 		dev_warn(privptr->dev,
 			"The IUCV device failed to connect to the peer on z/VM"
-			" guest %s\n", netiucv_printname(conn->userid));
+			" guest %s\n", netiucv_printname(conn->userid, 8));
 		fsm_newstate(fi, CONN_STATE_STARTWAIT);
 		break;
 	case 13:
@@ -927,7 +888,7 @@ static void conn_action_start(fsm_instance *fi, int event, void *arg)
 		dev_err(privptr->dev,
 			"z/VM guest %s has too many IUCV connections"
 			" to connect with the IUCV device\n",
-			netiucv_printname(conn->userid));
+			netiucv_printname(conn->userid, 8));
 		fsm_newstate(fi, CONN_STATE_CONNERR);
 		break;
 	case 15:
@@ -953,7 +914,7 @@ static void netiucv_purge_skb_queue(struct sk_buff_head *q)
 	struct sk_buff *skb;
 
 	while ((skb = skb_dequeue(q))) {
-		atomic_dec(&skb->users);
+		refcount_dec(&skb->users);
 		dev_kfree_skb_any(skb);
 	}
 }
@@ -972,7 +933,7 @@ static void conn_action_stop(fsm_instance *fi, int event, void *arg)
 	netiucv_purge_skb_queue(&conn->collect_queue);
 	if (conn->path) {
 		IUCV_DBF_TEXT(trace, 5, "calling iucv_path_sever\n");
-		iucv_path_sever(conn->path, iucvMagic);
+		iucv_path_sever(conn->path, conn->userdata);
 		kfree(conn->path);
 		conn->path = NULL;
 	}
@@ -1028,7 +989,7 @@ static const int CONN_FSM_LEN = sizeof(conn_fsm) / sizeof(fsm_node);
  * Actions for interface - statemachine.
  */
 
-/**
+/*
  * dev_action_start
  * @fi: An instance of an interface statemachine.
  * @event: The event, just happened.
@@ -1047,7 +1008,7 @@ static void dev_action_start(fsm_instance *fi, int event, void *arg)
 	fsm_event(privptr->conn->fsm, CONN_EVENT_START, privptr->conn);
 }
 
-/**
+/*
  * Shutdown connection by sending CONN_EVENT_STOP to it.
  *
  * @param fi    An instance of an interface statemachine.
@@ -1069,7 +1030,7 @@ dev_action_stop(fsm_instance *fi, int event, void *arg)
 	fsm_event(privptr->conn->fsm, CONN_EVENT_STOP, &ev);
 }
 
-/**
+/*
  * Called from connection statemachine
  * when a connection is up and running.
  *
@@ -1090,7 +1051,8 @@ dev_action_connup(fsm_instance *fi, int event, void *arg)
 			fsm_newstate(fi, DEV_STATE_RUNNING);
 			dev_info(privptr->dev,
 				"The IUCV device has been connected"
-				" successfully to %s\n", privptr->conn->userid);
+				" successfully to %s\n",
+				netiucv_printuser(privptr->conn));
 			IUCV_DBF_TEXT(setup, 3,
 				"connection is up and running\n");
 			break;
@@ -1101,7 +1063,7 @@ dev_action_connup(fsm_instance *fi, int event, void *arg)
 	}
 }
 
-/**
+/*
  * Called from connection statemachine
  * when a connection has been shutdown.
  *
@@ -1141,7 +1103,7 @@ static const fsm_node dev_fsm[] = {
 
 static const int DEV_FSM_LEN = sizeof(dev_fsm) / sizeof(fsm_node);
 
-/**
+/*
  * Transmit a packet.
  * This is a helper function for netiucv_tx().
  *
@@ -1170,7 +1132,7 @@ static int netiucv_transmit_skb(struct iucv_connection *conn,
 			IUCV_DBF_TEXT(data, 2,
 				      "EBUSY from netiucv_transmit_skb\n");
 		} else {
-			atomic_inc(&skb->users);
+			refcount_inc(&skb->users);
 			skb_queue_tail(&conn->collect_queue, skb);
 			conn->collect_len += l;
 			rc = 0;
@@ -1178,7 +1140,7 @@ static int netiucv_transmit_skb(struct iucv_connection *conn,
 		spin_unlock_irqrestore(&conn->collect_lock, saveflags);
 	} else {
 		struct sk_buff *nskb = skb;
-		/**
+		/*
 		 * Copy the skb to a new allocated skb in lowmem only if the
 		 * data is located above 2G in memory or tailroom is < 2.
 		 */
@@ -1194,21 +1156,20 @@ static int netiucv_transmit_skb(struct iucv_connection *conn,
 				return rc;
 			} else {
 				skb_reserve(nskb, NETIUCV_HDRLEN);
-				memcpy(skb_put(nskb, skb->len),
-				       skb->data, skb->len);
+				skb_put_data(nskb, skb->data, skb->len);
 			}
 			copied = 1;
 		}
-		/**
+		/*
 		 * skb now is below 2G and has enough room. Add headers.
 		 */
 		header.next = nskb->len + NETIUCV_HDRLEN;
 		memcpy(skb_push(nskb, NETIUCV_HDRLEN), &header, NETIUCV_HDRLEN);
 		header.next = 0;
-		memcpy(skb_put(nskb, NETIUCV_HDRLEN), &header,  NETIUCV_HDRLEN);
+		skb_put_data(nskb, &header, NETIUCV_HDRLEN);
 
 		fsm_newstate(conn->fsm, CONN_STATE_TX);
-		conn->prof.send_stamp = current_kernel_time();
+		conn->prof.send_stamp = jiffies;
 
 		msg.tag = 1;
 		msg.class = 0;
@@ -1229,7 +1190,7 @@ static int netiucv_transmit_skb(struct iucv_connection *conn,
 			if (copied)
 				dev_kfree_skb(nskb);
 			else {
-				/**
+				/*
 				 * Remove our headers. They get added
 				 * again on retransmit.
 				 */
@@ -1240,7 +1201,7 @@ static int netiucv_transmit_skb(struct iucv_connection *conn,
 		} else {
 			if (copied)
 				dev_kfree_skb(skb);
-			atomic_inc(&nskb->users);
+			refcount_inc(&nskb->users);
 			skb_queue_tail(&conn->commit_queue, nskb);
 		}
 	}
@@ -1252,7 +1213,7 @@ static int netiucv_transmit_skb(struct iucv_connection *conn,
  * Interface API for upper network layers
  */
 
-/**
+/*
  * Open an interface.
  * Called from generic network layer when ifconfig up is run.
  *
@@ -1268,7 +1229,7 @@ static int netiucv_open(struct net_device *dev)
 	return 0;
 }
 
-/**
+/*
  * Close an interface.
  * Called from generic network layer when ifconfig down is run.
  *
@@ -1284,90 +1245,17 @@ static int netiucv_close(struct net_device *dev)
 	return 0;
 }
 
-static int netiucv_pm_prepare(struct device *dev)
-{
-	IUCV_DBF_TEXT(trace, 3, __func__);
-	return 0;
-}
-
-static void netiucv_pm_complete(struct device *dev)
-{
-	IUCV_DBF_TEXT(trace, 3, __func__);
-	return;
-}
-
-/**
- * netiucv_pm_freeze() - Freeze PM callback
- * @dev:	netiucv device
- *
- * close open netiucv interfaces
- */
-static int netiucv_pm_freeze(struct device *dev)
-{
-	struct netiucv_priv *priv = dev_get_drvdata(dev);
-	struct net_device *ndev = NULL;
-	int rc = 0;
-
-	IUCV_DBF_TEXT(trace, 3, __func__);
-	if (priv && priv->conn)
-		ndev = priv->conn->netdev;
-	if (!ndev)
-		goto out;
-	netif_device_detach(ndev);
-	priv->pm_state = fsm_getstate(priv->fsm);
-	rc = netiucv_close(ndev);
-out:
-	return rc;
-}
-
-/**
- * netiucv_pm_restore_thaw() - Thaw and restore PM callback
- * @dev:	netiucv device
- *
- * re-open netiucv interfaces closed during freeze
- */
-static int netiucv_pm_restore_thaw(struct device *dev)
-{
-	struct netiucv_priv *priv = dev_get_drvdata(dev);
-	struct net_device *ndev = NULL;
-	int rc = 0;
-
-	IUCV_DBF_TEXT(trace, 3, __func__);
-	if (priv && priv->conn)
-		ndev = priv->conn->netdev;
-	if (!ndev)
-		goto out;
-	switch (priv->pm_state) {
-	case DEV_STATE_RUNNING:
-	case DEV_STATE_STARTWAIT:
-		rc = netiucv_open(ndev);
-		break;
-	default:
-		break;
-	}
-	netif_device_attach(ndev);
-out:
-	return rc;
-}
-
-/**
+/*
  * Start transmission of a packet.
  * Called from generic network device layer.
- *
- * @param skb Pointer to buffer containing the packet.
- * @param dev Pointer to interface struct.
- *
- * @return 0 if packet consumed, !0 if packet rejected.
- *         Note: If we return !0, then the packet is free'd by
- *               the generic network layer.
  */
-static int netiucv_tx(struct sk_buff *skb, struct net_device *dev)
+static netdev_tx_t netiucv_tx(struct sk_buff *skb, struct net_device *dev)
 {
 	struct netiucv_priv *privptr = netdev_priv(dev);
 	int rc;
 
 	IUCV_DBF_TEXT(trace, 4, __func__);
-	/**
+	/*
 	 * Some sanity checks ...
 	 */
 	if (skb == NULL) {
@@ -1383,7 +1271,7 @@ static int netiucv_tx(struct sk_buff *skb, struct net_device *dev)
 		return NETDEV_TX_OK;
 	}
 
-	/**
+	/*
 	 * If connection is not running, try to restart it
 	 * and throw away packet.
 	 */
@@ -1399,13 +1287,13 @@ static int netiucv_tx(struct sk_buff *skb, struct net_device *dev)
 		IUCV_DBF_TEXT(data, 2, "EBUSY from netiucv_tx\n");
 		return NETDEV_TX_BUSY;
 	}
-	dev->trans_start = jiffies;
+	netif_trans_update(dev);
 	rc = netiucv_transmit_skb(privptr->conn, skb);
 	netiucv_clear_busy(dev);
 	return rc ? NETDEV_TX_BUSY : NETDEV_TX_OK;
 }
 
-/**
+/*
  * netiucv_stats
  * @dev: Pointer to interface struct.
  *
@@ -1421,27 +1309,6 @@ static struct net_device_stats *netiucv_stats (struct net_device * dev)
 	return &priv->stats;
 }
 
-/**
- * netiucv_change_mtu
- * @dev: Pointer to interface struct.
- * @new_mtu: The new MTU to use for this interface.
- *
- * Sets MTU of an interface.
- *
- * Returns 0 on success, -EINVAL if MTU is out of valid range.
- *         (valid range is 576 .. NETIUCV_MTU_MAX).
- */
-static int netiucv_change_mtu(struct net_device * dev, int new_mtu)
-{
-	IUCV_DBF_TEXT(trace, 3, __func__);
-	if (new_mtu < 576 || new_mtu > NETIUCV_MTU_MAX) {
-		IUCV_DBF_TEXT(setup, 2, "given MTU out of valid range\n");
-		return -EINVAL;
-	}
-	dev->mtu = new_mtu;
-	return 0;
-}
-
 /*
  * attributes in sysfs
  */
@@ -1452,7 +1319,55 @@ static ssize_t user_show(struct device *dev, struct device_attribute *attr,
 	struct netiucv_priv *priv = dev_get_drvdata(dev);
 
 	IUCV_DBF_TEXT(trace, 5, __func__);
-	return sprintf(buf, "%s\n", netiucv_printname(priv->conn->userid));
+	return sprintf(buf, "%s\n", netiucv_printuser(priv->conn));
+}
+
+static int netiucv_check_user(const char *buf, size_t count, char *username,
+			      char *userdata)
+{
+	const char *p;
+	int i;
+
+	p = strchr(buf, '.');
+	if ((p && ((count > 26) ||
+		   ((p - buf) > 8) ||
+		   (buf + count - p > 18))) ||
+	    (!p && (count > 9))) {
+		IUCV_DBF_TEXT(setup, 2, "conn_write: too long\n");
+		return -EINVAL;
+	}
+
+	for (i = 0, p = buf; i < 8 && *p && *p != '.'; i++, p++) {
+		if (isalnum(*p) || *p == '$') {
+			username[i] = toupper(*p);
+			continue;
+		}
+		if (*p == '\n')
+			/* trailing lf, grr */
+			break;
+		IUCV_DBF_TEXT_(setup, 2,
+			       "conn_write: invalid character %02x\n", *p);
+		return -EINVAL;
+	}
+	while (i < 8)
+		username[i++] = ' ';
+	username[8] = '\0';
+
+	if (*p == '.') {
+		p++;
+		for (i = 0; i < 16 && *p; i++, p++) {
+			if (*p == '\n')
+				break;
+			userdata[i] = toupper(*p);
+		}
+		while (i > 0 && i < 16)
+			userdata[i++] = ' ';
+	} else
+		memcpy(userdata, iucvMagic_ascii, 16);
+	userdata[16] = '\0';
+	ASCEBC(userdata, 16);
+
+	return 0;
 }
 
 static ssize_t user_write(struct device *dev, struct device_attribute *attr,
@@ -1460,36 +1375,15 @@ static ssize_t user_write(struct device *dev, struct device_attribute *attr,
 {
 	struct netiucv_priv *priv = dev_get_drvdata(dev);
 	struct net_device *ndev = priv->conn->netdev;
-	char    *p;
-	char    *tmp;
-	char 	username[9];
-	int 	i;
+	char	username[9];
+	char	userdata[17];
+	int	rc;
 	struct iucv_connection *cp;
 
 	IUCV_DBF_TEXT(trace, 3, __func__);
-	if (count > 9) {
-		IUCV_DBF_TEXT_(setup, 2,
-			       "%d is length of username\n", (int) count);
-		return -EINVAL;
-	}
-
-	tmp = strsep((char **) &buf, "\n");
-	for (i = 0, p = tmp; i < 8 && *p; i++, p++) {
-		if (isalnum(*p) || (*p == '$')) {
-			username[i]= toupper(*p);
-			continue;
-		}
-		if (*p == '\n') {
-			/* trailing lf, grr */
-			break;
-		}
-		IUCV_DBF_TEXT_(setup, 2,
-			       "username: invalid character %c\n", *p);
-		return -EINVAL;
-	}
-	while (i < 8)
-		username[i++] = ' ';
-	username[8] = '\0';
+	rc = netiucv_check_user(buf, count, username, userdata);
+	if (rc)
+		return rc;
 
 	if (memcmp(username, priv->conn->userid, 9) &&
 	    (ndev->flags & (IFF_UP | IFF_RUNNING))) {
@@ -1499,15 +1393,17 @@ static ssize_t user_write(struct device *dev, struct device_attribute *attr,
 	}
 	read_lock_bh(&iucv_connection_rwlock);
 	list_for_each_entry(cp, &iucv_connection_list, list) {
-		if (!strncmp(username, cp->userid, 9) && cp->netdev != ndev) {
+		if (!strncmp(username, cp->userid, 9) &&
+		   !strncmp(userdata, cp->userdata, 17) && cp->netdev != ndev) {
 			read_unlock_bh(&iucv_connection_rwlock);
-			IUCV_DBF_TEXT_(setup, 2, "user_write: Connection "
-				"to %s already exists\n", username);
+			IUCV_DBF_TEXT_(setup, 2, "user_write: Connection to %s "
+				"already exists\n", netiucv_printuser(cp));
 			return -EEXIST;
 		}
 	}
 	read_unlock_bh(&iucv_connection_rwlock);
 	memcpy(priv->conn->userid, username, 9);
+	memcpy(priv->conn->userdata, userdata, 17);
 	return count;
 }
 
@@ -1527,20 +1423,21 @@ static ssize_t buffer_write (struct device *dev, struct device_attribute *attr,
 {
 	struct netiucv_priv *priv = dev_get_drvdata(dev);
 	struct net_device *ndev = priv->conn->netdev;
-	char         *e;
-	int          bs1;
+	unsigned int bs1;
+	int rc;
 
 	IUCV_DBF_TEXT(trace, 3, __func__);
 	if (count >= 39)
 		return -EINVAL;
 
-	bs1 = simple_strtoul(buf, &e, 0);
+	rc = kstrtouint(buf, 0, &bs1);
 
-	if (e && (!isspace(*e))) {
-		IUCV_DBF_TEXT_(setup, 2, "buffer_write: invalid char %c\n", *e);
+	if (rc == -EINVAL) {
+		IUCV_DBF_TEXT_(setup, 2, "buffer_write: invalid char %s\n",
+			buf);
 		return -EINVAL;
 	}
-	if (bs1 > NETIUCV_BUFSIZE_MAX) {
+	if ((rc == -ERANGE) || (bs1 > NETIUCV_BUFSIZE_MAX)) {
 		IUCV_DBF_TEXT_(setup, 2,
 			"buffer_write: buffer size %d too large\n",
 			bs1);
@@ -1790,26 +1687,11 @@ static struct attribute_group netiucv_stat_attr_group = {
 	.attrs = netiucv_stat_attrs,
 };
 
-static int netiucv_add_files(struct device *dev)
-{
-	int ret;
-
-	IUCV_DBF_TEXT(trace, 3, __func__);
-	ret = sysfs_create_group(&dev->kobj, &netiucv_attr_group);
-	if (ret)
-		return ret;
-	ret = sysfs_create_group(&dev->kobj, &netiucv_stat_attr_group);
-	if (ret)
-		sysfs_remove_group(&dev->kobj, &netiucv_attr_group);
-	return ret;
-}
-
-static void netiucv_remove_files(struct device *dev)
-{
-	IUCV_DBF_TEXT(trace, 3, __func__);
-	sysfs_remove_group(&dev->kobj, &netiucv_stat_attr_group);
-	sysfs_remove_group(&dev->kobj, &netiucv_attr_group);
-}
+static const struct attribute_group *netiucv_attr_groups[] = {
+	&netiucv_stat_attr_group,
+	&netiucv_attr_group,
+	NULL,
+};
 
 static int netiucv_register_device(struct net_device *ndev)
 {
@@ -1823,6 +1705,7 @@ static int netiucv_register_device(struct net_device *ndev)
 		dev_set_name(dev, "net%s", ndev->name);
 		dev->bus = &iucv_bus;
 		dev->parent = iucv_root;
+		dev->groups = netiucv_attr_groups;
 		/*
 		 * The release function could be called after the
 		 * module has been unloaded. It's _only_ task is to
@@ -1840,31 +1723,24 @@ static int netiucv_register_device(struct net_device *ndev)
 		put_device(dev);
 		return ret;
 	}
-	ret = netiucv_add_files(dev);
-	if (ret)
-		goto out_unreg;
 	priv->dev = dev;
 	dev_set_drvdata(dev, priv);
 	return 0;
-
-out_unreg:
-	device_unregister(dev);
-	return ret;
 }
 
 static void netiucv_unregister_device(struct device *dev)
 {
 	IUCV_DBF_TEXT(trace, 3, __func__);
-	netiucv_remove_files(dev);
 	device_unregister(dev);
 }
 
-/**
+/*
  * Allocate and initialize a new connection structure.
  * Add it to the list of netiucv connections;
  */
 static struct iucv_connection *netiucv_new_connection(struct net_device *dev,
-						      char *username)
+						      char *username,
+						      char *userdata)
 {
 	struct iucv_connection *conn;
 
@@ -1893,6 +1769,8 @@ static struct iucv_connection *netiucv_new_connection(struct net_device *dev,
 	fsm_settimer(conn->fsm, &conn->timer);
 	fsm_newstate(conn->fsm, CONN_STATE_INVALID);
 
+	if (userdata)
+		memcpy(conn->userdata, userdata, 17);
 	if (username) {
 		memcpy(conn->userid, username, 9);
 		fsm_newstate(conn->fsm, CONN_STATE_STOPPED);
@@ -1913,12 +1791,13 @@ out:
 	return NULL;
 }
 
-/**
+/*
  * Release a connection structure and remove it from the
  * list of netiucv connections.
  */
 static void netiucv_remove_connection(struct iucv_connection *conn)
 {
+
 	IUCV_DBF_TEXT(trace, 3, __func__);
 	write_lock_bh(&iucv_connection_rwlock);
 	list_del_init(&conn->list);
@@ -1926,7 +1805,7 @@ static void netiucv_remove_connection(struct iucv_connection *conn)
 	fsm_deltimer(&conn->timer);
 	netiucv_purge_skb_queue(&conn->collect_queue);
 	if (conn->path) {
-		iucv_path_sever(conn->path, iucvMagic);
+		iucv_path_sever(conn->path, conn->userdata);
 		kfree(conn->path);
 		conn->path = NULL;
 	}
@@ -1936,7 +1815,7 @@ static void netiucv_remove_connection(struct iucv_connection *conn)
 	kfree_skb(conn->tx_buff);
 }
 
-/**
+/*
  * Release everything of a net device.
  */
 static void netiucv_free_netdevice(struct net_device *dev)
@@ -1956,10 +1835,9 @@ static void netiucv_free_netdevice(struct net_device *dev)
 		privptr->conn = NULL; privptr->fsm = NULL;
 		/* privptr gets freed by free_netdev() */
 	}
-	free_netdev(dev);
 }
 
-/**
+/*
  * Initialize a net device. (Called from kernel in alloc_netdev())
  */
 static const struct net_device_ops netiucv_netdev_ops = {
@@ -1967,13 +1845,15 @@ static const struct net_device_ops netiucv_netdev_ops = {
 	.ndo_stop		= netiucv_close,
 	.ndo_get_stats		= netiucv_stats,
 	.ndo_start_xmit		= netiucv_tx,
-	.ndo_change_mtu	   	= netiucv_change_mtu,
 };
 
 static void netiucv_setup_netdevice(struct net_device *dev)
 {
 	dev->mtu	         = NETIUCV_MTU_DEFAULT;
-	dev->destructor          = netiucv_free_netdevice;
+	dev->min_mtu		 = 576;
+	dev->max_mtu		 = NETIUCV_MTU_MAX;
+	dev->needs_free_netdev   = true;
+	dev->priv_destructor     = netiucv_free_netdevice;
 	dev->hard_header_len     = NETIUCV_HDRLEN;
 	dev->addr_len            = 0;
 	dev->type                = ARPHRD_SLIP;
@@ -1982,18 +1862,19 @@ static void netiucv_setup_netdevice(struct net_device *dev)
 	dev->netdev_ops		 = &netiucv_netdev_ops;
 }
 
-/**
+/*
  * Allocate and initialize everything of a net device.
  */
-static struct net_device *netiucv_init_netdevice(char *username)
+static struct net_device *netiucv_init_netdevice(char *username, char *userdata)
 {
 	struct netiucv_priv *privptr;
 	struct net_device *dev;
 
 	dev = alloc_netdev(sizeof(struct netiucv_priv), "iucv%d",
-			   netiucv_setup_netdevice);
+			   NET_NAME_UNKNOWN, netiucv_setup_netdevice);
 	if (!dev)
 		return NULL;
+	rtnl_lock();
 	if (dev_alloc_name(dev, dev->name) < 0)
 		goto out_netdev;
 
@@ -2004,7 +1885,7 @@ static struct net_device *netiucv_init_netdevice(char *username)
 	if (!privptr->fsm)
 		goto out_netdev;
 
-	privptr->conn = netiucv_new_connection(dev, username);
+	privptr->conn = netiucv_new_connection(dev, username, userdata);
 	if (!privptr->conn) {
 		IUCV_DBF_TEXT(setup, 2, "NULL from netiucv_new_connection\n");
 		goto out_fsm;
@@ -2015,54 +1896,39 @@ static struct net_device *netiucv_init_netdevice(char *username)
 out_fsm:
 	kfree_fsm(privptr->fsm);
 out_netdev:
+	rtnl_unlock();
 	free_netdev(dev);
 	return NULL;
 }
 
-static ssize_t conn_write(struct device_driver *drv,
-			  const char *buf, size_t count)
+static ssize_t connection_store(struct device_driver *drv, const char *buf,
+				size_t count)
 {
-	const char *p;
 	char username[9];
-	int i, rc;
+	char userdata[17];
+	int rc;
 	struct net_device *dev;
 	struct netiucv_priv *priv;
 	struct iucv_connection *cp;
 
 	IUCV_DBF_TEXT(trace, 3, __func__);
-	if (count>9) {
-		IUCV_DBF_TEXT(setup, 2, "conn_write: too long\n");
-		return -EINVAL;
-	}
-
-	for (i = 0, p = buf; i < 8 && *p; i++, p++) {
-		if (isalnum(*p) || *p == '$') {
-			username[i] = toupper(*p);
-			continue;
-		}
-		if (*p == '\n')
-			/* trailing lf, grr */
-			break;
-		IUCV_DBF_TEXT_(setup, 2,
-			       "conn_write: invalid character %c\n", *p);
-		return -EINVAL;
-	}
-	while (i < 8)
-		username[i++] = ' ';
-	username[8] = '\0';
+	rc = netiucv_check_user(buf, count, username, userdata);
+	if (rc)
+		return rc;
 
 	read_lock_bh(&iucv_connection_rwlock);
 	list_for_each_entry(cp, &iucv_connection_list, list) {
-		if (!strncmp(username, cp->userid, 9)) {
+		if (!strncmp(username, cp->userid, 9) &&
+		    !strncmp(userdata, cp->userdata, 17)) {
 			read_unlock_bh(&iucv_connection_rwlock);
-			IUCV_DBF_TEXT_(setup, 2, "conn_write: Connection "
-				"to %s already exists\n", username);
+			IUCV_DBF_TEXT_(setup, 2, "conn_write: Connection to %s "
+				"already exists\n", netiucv_printuser(cp));
 			return -EEXIST;
 		}
 	}
 	read_unlock_bh(&iucv_connection_rwlock);
 
-	dev = netiucv_init_netdevice(username);
+	dev = netiucv_init_netdevice(username, userdata);
 	if (!dev) {
 		IUCV_DBF_TEXT(setup, 2, "NULL from netiucv_init_netdevice\n");
 		return -ENODEV;
@@ -2070,6 +1936,7 @@ static ssize_t conn_write(struct device_driver *drv,
 
 	rc = netiucv_register_device(dev);
 	if (rc) {
+		rtnl_unlock();
 		IUCV_DBF_TEXT_(setup, 2,
 			"ret %d from netiucv_register_device\n", rc);
 		goto out_free_ndev;
@@ -2079,12 +1946,14 @@ static ssize_t conn_write(struct device_driver *drv,
 	priv = netdev_priv(dev);
 	SET_NETDEV_DEV(dev, priv->dev);
 
-	rc = register_netdev(dev);
+	rc = register_netdevice(dev);
+	rtnl_unlock();
 	if (rc)
 		goto out_unreg;
 
-	dev_info(priv->dev, "The IUCV interface to %s has been"
-		" established successfully\n", netiucv_printname(username));
+	dev_info(priv->dev, "The IUCV interface to %s has been established "
+			    "successfully\n",
+		netiucv_printuser(priv->conn));
 
 	return count;
 
@@ -2094,11 +1963,10 @@ out_free_ndev:
 	netiucv_free_netdevice(dev);
 	return rc;
 }
+static DRIVER_ATTR_WO(connection);
 
-static DRIVER_ATTR(connection, 0200, NULL, conn_write);
-
-static ssize_t remove_write (struct device_driver *drv,
-			     const char *buf, size_t count)
+static ssize_t remove_store(struct device_driver *drv, const char *buf,
+			    size_t count)
 {
 	struct iucv_connection *cp;
         struct net_device *ndev;
@@ -2144,8 +2012,7 @@ static ssize_t remove_write (struct device_driver *drv,
 	IUCV_DBF_TEXT(data, 2, "remove_write: unknown device\n");
         return -EINVAL;
 }
-
-static DRIVER_ATTR(remove, 0200, NULL, remove_write);
+static DRIVER_ATTR_WO(remove);
 
 static struct attribute * netiucv_drv_attrs[] = {
 	&driver_attr_connection.attr,
@@ -2186,7 +2053,6 @@ static void __exit netiucv_exit(void)
 		netiucv_unregister_device(dev);
 	}
 
-	device_unregister(netiucv_dev);
 	driver_unregister(&netiucv_driver);
 	iucv_unregister(&netiucv_handler, 1);
 	iucv_unregister_dbf_views();
@@ -2212,27 +2078,10 @@ static int __init netiucv_init(void)
 		IUCV_DBF_TEXT_(setup, 2, "ret %d from driver_register\n", rc);
 		goto out_iucv;
 	}
-	/* establish dummy device */
-	netiucv_dev = kzalloc(sizeof(struct device), GFP_KERNEL);
-	if (!netiucv_dev) {
-		rc = -ENOMEM;
-		goto out_driver;
-	}
-	dev_set_name(netiucv_dev, "netiucv");
-	netiucv_dev->bus = &iucv_bus;
-	netiucv_dev->parent = iucv_root;
-	netiucv_dev->release = (void (*)(struct device *))kfree;
-	netiucv_dev->driver = &netiucv_driver;
-	rc = device_register(netiucv_dev);
-	if (rc) {
-		put_device(netiucv_dev);
-		goto out_driver;
-	}
+
 	netiucv_banner();
 	return rc;
 
-out_driver:
-	driver_unregister(&netiucv_driver);
 out_iucv:
 	iucv_unregister(&netiucv_handler, 1);
 out_dbf:

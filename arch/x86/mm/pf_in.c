@@ -1,22 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Fault Injection Test harness (FI)
  *  Copyright (C) Intel Crop.
- *
- *  This program is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU General Public License
- *  as published by the Free Software Foundation; either version 2
- *  of the License, or (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307,
- *  USA.
- *
  */
 
 /*  Id: pf_in.c,v 1.1.1.1 2002/11/12 05:56:32 brlock Exp
@@ -26,7 +11,6 @@
  *  Bjorn Steinbrink (B.Steinbrink@gmx.de), 2007
  */
 
-#include <linux/module.h>
 #include <linux/ptrace.h> /* struct pt_regs */
 #include "pf_in.h"
 
@@ -414,22 +398,17 @@ unsigned long get_ins_reg_val(unsigned long ins_addr, struct pt_regs *regs)
 	unsigned char *p;
 	struct prefix_bits prf;
 	int i;
-	unsigned long rv;
 
 	p = (unsigned char *)ins_addr;
 	p += skip_prefix(p, &prf);
 	p += get_opcode(p, &opcode);
 	for (i = 0; i < ARRAY_SIZE(reg_rop); i++)
-		if (reg_rop[i] == opcode) {
-			rv = REG_READ;
+		if (reg_rop[i] == opcode)
 			goto do_work;
-		}
 
 	for (i = 0; i < ARRAY_SIZE(reg_wop); i++)
-		if (reg_wop[i] == opcode) {
-			rv = REG_WRITE;
+		if (reg_wop[i] == opcode)
 			goto do_work;
-		}
 
 	printk(KERN_ERR "mmiotrace: Not a register instruction, opcode "
 							"0x%02x\n", opcode);
@@ -474,16 +453,13 @@ unsigned long get_ins_imm_val(unsigned long ins_addr)
 	unsigned char *p;
 	struct prefix_bits prf;
 	int i;
-	unsigned long rv;
 
 	p = (unsigned char *)ins_addr;
 	p += skip_prefix(p, &prf);
 	p += get_opcode(p, &opcode);
 	for (i = 0; i < ARRAY_SIZE(imm_wop); i++)
-		if (imm_wop[i] == opcode) {
-			rv = IMM_WRITE;
+		if (imm_wop[i] == opcode)
 			goto do_work;
-		}
 
 	printk(KERN_ERR "mmiotrace: Not an immediate instruction, opcode "
 							"0x%02x\n", opcode);

@@ -1,171 +1,95 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (C) 2010 Google, Inc.
+ * Copyright (C) 2011 Google, Inc.
  *
  * Author:
- *	Colin Cross <ccross@google.com>
+ *	Colin Cross <ccross@android.com>
  *
- * Copyright (C) 2010, NVIDIA Corporation
- *
- * This software is licensed under the terms of the GNU General Public
- * License version 2, as published by the Free Software Foundation, and
- * may be copied, distributed, and modified under those terms.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
+ * Copyright (C) 2010,2013, NVIDIA Corporation
  */
 
-#include <linux/kernel.h>
-#include <linux/init.h>
+#include <linux/cpu_pm.h>
 #include <linux/interrupt.h>
-#include <linux/irq.h>
 #include <linux/io.h>
+#include <linux/irqchip/arm-gic.h>
+#include <linux/irq.h>
+#include <linux/kernel.h>
+#include <linux/of_address.h>
+#include <linux/of.h>
+#include <linux/syscore_ops.h>
 
-#include <asm/hardware/gic.h>
-
-#include <mach/iomap.h>
+#include <soc/tegra/irq.h>
 
 #include "board.h"
+#include "iomap.h"
 
-#define INT_SYS_NR	(INT_GPIO_BASE - INT_PRI_BASE)
-#define INT_SYS_SZ	(INT_SEC_BASE - INT_PRI_BASE)
-#define PPI_NR		((INT_SYS_NR+INT_SYS_SZ-1)/INT_SYS_SZ)
+#define SGI_MASK 0xFFFF
 
-#define APBDMA_IRQ_STA_CPU  0x14
-#define APBDMA_IRQ_MASK_SET 0x20
-#define APBDMA_IRQ_MASK_CLR 0x24
-
-#define ICTLR_CPU_IER		0x20
-#define ICTLR_CPU_IER_SET	0x24
-#define ICTLR_CPU_IER_CLR	0x28
-#define ICTLR_CPU_IEP_CLASS	0x2c
-#define ICTLR_COP_IER		0x30
-#define ICTLR_COP_IER_SET	0x34
-#define ICTLR_COP_IER_CLR	0x38
-#define ICTLR_COP_IEP_CLASS	0x3c
-
-static void (*tegra_gic_mask_irq)(struct irq_data *d);
-static void (*tegra_gic_unmask_irq)(struct irq_data *d);
-
-#define irq_to_ictlr(irq) (((irq) - 32) >> 5)
-static void __iomem *tegra_ictlr_base = IO_ADDRESS(TEGRA_PRIMARY_ICTLR_BASE);
-#define ictlr_to_virt(ictlr) (tegra_ictlr_base + (ictlr) * 0x100)
-
-static void tegra_mask(struct irq_data *d)
-{
-	void __iomem *addr = ictlr_to_virt(irq_to_ictlr(d->irq));
-	tegra_gic_mask_irq(d);
-	writel(1 << (d->irq & 31), addr+ICTLR_CPU_IER_CLR);
-}
-
-static void tegra_unmask(struct irq_data *d)
-{
-	void __iomem *addr = ictlr_to_virt(irq_to_ictlr(d->irq));
-	tegra_gic_unmask_irq(d);
-	writel(1<<(d->irq&31), addr+ICTLR_CPU_IER_SET);
-}
-
-#ifdef CONFIG_PM
-
-static int tegra_set_wake(struct irq_data *d, unsigned int on)
-{
-	return 0;
-}
+#ifdef CONFIG_PM_SLEEP
+static void __iomem *tegra_gic_cpu_base;
 #endif
 
-static struct irq_chip tegra_irq = {
-	.name		= "PPI",
-	.irq_mask	= tegra_mask,
-	.irq_unmask	= tegra_unmask,
-#ifdef CONFIG_PM
-	.irq_set_wake	= tegra_set_wake,
+bool tegra_pending_sgi(void)
+{
+	u32 pending_set;
+	void __iomem *distbase = IO_ADDRESS(TEGRA_ARM_INT_DIST_BASE);
+
+	pending_set = readl_relaxed(distbase + GIC_DIST_PENDING_SET);
+
+	if (pending_set & SGI_MASK)
+		return true;
+
+	return false;
+}
+
+#ifdef CONFIG_PM_SLEEP
+static int tegra_gic_notifier(struct notifier_block *self,
+			      unsigned long cmd, void *v)
+{
+	switch (cmd) {
+	case CPU_PM_ENTER:
+		writel_relaxed(0x1E0, tegra_gic_cpu_base + GIC_CPU_CTRL);
+		break;
+	}
+
+	return NOTIFY_OK;
+}
+
+static struct notifier_block tegra_gic_notifier_block = {
+	.notifier_call = tegra_gic_notifier,
+};
+
+static const struct of_device_id tegra114_dt_gic_match[] __initconst = {
+	{ .compatible = "arm,cortex-a15-gic" },
+	{ }
+};
+
+static void __init tegra114_gic_cpu_pm_registration(void)
+{
+	struct device_node *dn;
+
+	dn = of_find_matching_node(NULL, tegra114_dt_gic_match);
+	if (!dn)
+		return;
+
+	tegra_gic_cpu_base = of_iomap(dn, 1);
+
+	cpu_pm_register_notifier(&tegra_gic_notifier_block);
+}
+#else
+static void __init tegra114_gic_cpu_pm_registration(void) { }
 #endif
+
+static const struct of_device_id tegra_ictlr_match[] __initconst = {
+	{ .compatible = "nvidia,tegra20-ictlr" },
+	{ .compatible = "nvidia,tegra30-ictlr" },
+	{ }
 };
 
 void __init tegra_init_irq(void)
 {
-	struct irq_chip *gic;
-	unsigned int i;
+	if (WARN_ON(!of_find_matching_node(NULL, tegra_ictlr_match)))
+		pr_warn("Outdated DT detected, suspend/resume will NOT work\n");
 
-	for (i = 0; i < PPI_NR; i++) {
-		writel(~0, ictlr_to_virt(i) + ICTLR_CPU_IER_CLR);
-		writel(0, ictlr_to_virt(i) + ICTLR_CPU_IEP_CLASS);
-	}
-
-	gic_init(0, 29, IO_ADDRESS(TEGRA_ARM_INT_DIST_BASE),
-		 IO_ADDRESS(TEGRA_ARM_PERIF_BASE + 0x100));
-
-	gic = get_irq_chip(29);
-	tegra_gic_unmask_irq = gic->irq_unmask;
-	tegra_gic_mask_irq = gic->irq_mask;
-	tegra_irq.irq_ack = gic->irq_ack;
-#ifdef CONFIG_SMP
-	tegra_irq.irq_set_affinity = gic->irq_set_affinity;
-#endif
-
-	for (i = INT_PRI_BASE; i < INT_GPIO_BASE; i++) {
-		set_irq_chip(i, &tegra_irq);
-		set_irq_handler(i, handle_level_irq);
-		set_irq_flags(i, IRQF_VALID);
-	}
+	tegra114_gic_cpu_pm_registration();
 }
-
-#ifdef CONFIG_PM
-static u32 cop_ier[PPI_NR];
-static u32 cpu_ier[PPI_NR];
-static u32 cpu_iep[PPI_NR];
-
-void tegra_irq_suspend(void)
-{
-	unsigned long flags;
-	int i;
-
-	for (i = INT_PRI_BASE; i < INT_GPIO_BASE; i++) {
-		struct irq_desc *desc = irq_to_desc(i);
-		if (!desc)
-			continue;
-		if (desc->status & IRQ_WAKEUP) {
-			pr_debug("irq %d is wakeup\n", i);
-			continue;
-		}
-		disable_irq(i);
-	}
-
-	local_irq_save(flags);
-	for (i = 0; i < PPI_NR; i++) {
-		void __iomem *ictlr = ictlr_to_virt(i);
-		cpu_ier[i] = readl(ictlr + ICTLR_CPU_IER);
-		cpu_iep[i] = readl(ictlr + ICTLR_CPU_IEP_CLASS);
-		cop_ier[i] = readl(ictlr + ICTLR_COP_IER);
-		writel(~0, ictlr + ICTLR_COP_IER_CLR);
-	}
-	local_irq_restore(flags);
-}
-
-void tegra_irq_resume(void)
-{
-	unsigned long flags;
-	int i;
-
-	local_irq_save(flags);
-	for (i = 0; i < PPI_NR; i++) {
-		void __iomem *ictlr = ictlr_to_virt(i);
-		writel(cpu_iep[i], ictlr + ICTLR_CPU_IEP_CLASS);
-		writel(~0ul, ictlr + ICTLR_CPU_IER_CLR);
-		writel(cpu_ier[i], ictlr + ICTLR_CPU_IER_SET);
-		writel(0, ictlr + ICTLR_COP_IEP_CLASS);
-		writel(~0ul, ictlr + ICTLR_COP_IER_CLR);
-		writel(cop_ier[i], ictlr + ICTLR_COP_IER_SET);
-	}
-	local_irq_restore(flags);
-
-	for (i = INT_PRI_BASE; i < INT_GPIO_BASE; i++) {
-		struct irq_desc *desc = irq_to_desc(i);
-		if (!desc || (desc->status & IRQ_WAKEUP))
-			continue;
-		enable_irq(i);
-	}
-}
-#endif

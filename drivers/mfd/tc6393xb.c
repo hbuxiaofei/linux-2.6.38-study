@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Toshiba TC6393XB SoC support
  *
@@ -8,10 +9,6 @@
  *
  * Based on code written by Sharp/Lineo for 2.4 kernels
  * Based on locomo.c
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/kernel.h>
@@ -24,7 +21,9 @@
 #include <linux/mfd/core.h>
 #include <linux/mfd/tmio.h>
 #include <linux/mfd/tc6393xb.h>
-#include <linux/gpio.h>
+#include <linux/gpio/driver.h>
+#include <linux/gpio/machine.h>
+#include <linux/gpio/consumer.h>
 #include <linux/slab.h>
 
 #define SCR_REVID	0x08		/* b Revision ID	*/
@@ -90,12 +89,14 @@
 
 struct tc6393xb {
 	void __iomem		*scr;
+	struct device		*dev;
 
 	struct gpio_chip	gpio;
+	struct gpio_desc	*vcc_on;
 
 	struct clk		*clk; /* 3,6 Mhz */
 
-	spinlock_t		lock; /* protects RMW cycles */
+	raw_spinlock_t		lock; /* protects RMW cycles */
 
 	struct {
 		u8		fer;
@@ -122,22 +123,21 @@ enum {
 
 static int tc6393xb_nand_enable(struct platform_device *nand)
 {
-	struct platform_device *dev = to_platform_device(nand->dev.parent);
-	struct tc6393xb *tc6393xb = platform_get_drvdata(dev);
+	struct tc6393xb *tc6393xb = dev_get_drvdata(nand->dev.parent);
 	unsigned long flags;
 
-	spin_lock_irqsave(&tc6393xb->lock, flags);
+	raw_spin_lock_irqsave(&tc6393xb->lock, flags);
 
 	/* SMD buffer on */
-	dev_dbg(&dev->dev, "SMD buffer on\n");
+	dev_dbg(nand->dev.parent, "SMD buffer on\n");
 	tmio_iowrite8(0xff, tc6393xb->scr + SCR_GPI_BCR(1));
 
-	spin_unlock_irqrestore(&tc6393xb->lock, flags);
+	raw_spin_unlock_irqrestore(&tc6393xb->lock, flags);
 
 	return 0;
 }
 
-static struct resource __devinitdata tc6393xb_nand_resources[] = {
+static const struct resource tc6393xb_nand_resources[] = {
 	{
 		.start	= 0x1000,
 		.end	= 0x1007,
@@ -155,7 +155,7 @@ static struct resource __devinitdata tc6393xb_nand_resources[] = {
 	},
 };
 
-static struct resource tc6393xb_mmc_resources[] = {
+static const struct resource tc6393xb_mmc_resources[] = {
 	{
 		.start	= 0x800,
 		.end	= 0x9ff,
@@ -196,7 +196,7 @@ static const struct resource tc6393xb_ohci_resources[] = {
 	},
 };
 
-static struct resource __devinitdata tc6393xb_fb_resources[] = {
+static const struct resource tc6393xb_fb_resources[] = {
 	{
 		.start	= 0x5000,
 		.end	= 0x51ff,
@@ -226,7 +226,7 @@ static int tc6393xb_ohci_enable(struct platform_device *dev)
 	u16 ccr;
 	u8 fer;
 
-	spin_lock_irqsave(&tc6393xb->lock, flags);
+	raw_spin_lock_irqsave(&tc6393xb->lock, flags);
 
 	ccr = tmio_ioread16(tc6393xb->scr + SCR_CCR);
 	ccr |= SCR_CCR_USBCK;
@@ -236,7 +236,7 @@ static int tc6393xb_ohci_enable(struct platform_device *dev)
 	fer |= SCR_FER_USBEN;
 	tmio_iowrite8(fer, tc6393xb->scr + SCR_FER);
 
-	spin_unlock_irqrestore(&tc6393xb->lock, flags);
+	raw_spin_unlock_irqrestore(&tc6393xb->lock, flags);
 
 	return 0;
 }
@@ -248,7 +248,7 @@ static int tc6393xb_ohci_disable(struct platform_device *dev)
 	u16 ccr;
 	u8 fer;
 
-	spin_lock_irqsave(&tc6393xb->lock, flags);
+	raw_spin_lock_irqsave(&tc6393xb->lock, flags);
 
 	fer = tmio_ioread8(tc6393xb->scr + SCR_FER);
 	fer &= ~SCR_FER_USBEN;
@@ -258,9 +258,20 @@ static int tc6393xb_ohci_disable(struct platform_device *dev)
 	ccr &= ~SCR_CCR_USBCK;
 	tmio_iowrite16(ccr, tc6393xb->scr + SCR_CCR);
 
-	spin_unlock_irqrestore(&tc6393xb->lock, flags);
+	raw_spin_unlock_irqrestore(&tc6393xb->lock, flags);
 
 	return 0;
+}
+
+static int tc6393xb_ohci_suspend(struct platform_device *dev)
+{
+	struct tc6393xb_platform_data *tcpd = dev_get_platdata(dev->dev.parent);
+
+	/* We can't properly store/restore OHCI state, so fail here */
+	if (tcpd->resume_restore)
+		return -EBUSY;
+
+	return tc6393xb_ohci_disable(dev);
 }
 
 static int tc6393xb_fb_enable(struct platform_device *dev)
@@ -269,14 +280,14 @@ static int tc6393xb_fb_enable(struct platform_device *dev)
 	unsigned long flags;
 	u16 ccr;
 
-	spin_lock_irqsave(&tc6393xb->lock, flags);
+	raw_spin_lock_irqsave(&tc6393xb->lock, flags);
 
 	ccr = tmio_ioread16(tc6393xb->scr + SCR_CCR);
 	ccr &= ~SCR_CCR_MCLK_MASK;
 	ccr |= SCR_CCR_MCLK_48;
 	tmio_iowrite16(ccr, tc6393xb->scr + SCR_CCR);
 
-	spin_unlock_irqrestore(&tc6393xb->lock, flags);
+	raw_spin_unlock_irqrestore(&tc6393xb->lock, flags);
 
 	return 0;
 }
@@ -287,26 +298,25 @@ static int tc6393xb_fb_disable(struct platform_device *dev)
 	unsigned long flags;
 	u16 ccr;
 
-	spin_lock_irqsave(&tc6393xb->lock, flags);
+	raw_spin_lock_irqsave(&tc6393xb->lock, flags);
 
 	ccr = tmio_ioread16(tc6393xb->scr + SCR_CCR);
 	ccr &= ~SCR_CCR_MCLK_MASK;
 	ccr |= SCR_CCR_MCLK_OFF;
 	tmio_iowrite16(ccr, tc6393xb->scr + SCR_CCR);
 
-	spin_unlock_irqrestore(&tc6393xb->lock, flags);
+	raw_spin_unlock_irqrestore(&tc6393xb->lock, flags);
 
 	return 0;
 }
 
 int tc6393xb_lcd_set_power(struct platform_device *fb, bool on)
 {
-	struct platform_device *dev = to_platform_device(fb->dev.parent);
-	struct tc6393xb *tc6393xb = platform_get_drvdata(dev);
+	struct tc6393xb *tc6393xb = dev_get_drvdata(fb->dev.parent);
 	u8 fer;
 	unsigned long flags;
 
-	spin_lock_irqsave(&tc6393xb->lock, flags);
+	raw_spin_lock_irqsave(&tc6393xb->lock, flags);
 
 	fer = ioread8(tc6393xb->scr + SCR_FER);
 	if (on)
@@ -315,7 +325,7 @@ int tc6393xb_lcd_set_power(struct platform_device *fb, bool on)
 		fer &= ~SCR_FER_SLCDEN;
 	iowrite8(fer, tc6393xb->scr + SCR_FER);
 
-	spin_unlock_irqrestore(&tc6393xb->lock, flags);
+	raw_spin_unlock_irqrestore(&tc6393xb->lock, flags);
 
 	return 0;
 }
@@ -323,16 +333,15 @@ EXPORT_SYMBOL(tc6393xb_lcd_set_power);
 
 int tc6393xb_lcd_mode(struct platform_device *fb,
 					const struct fb_videomode *mode) {
-	struct platform_device *dev = to_platform_device(fb->dev.parent);
-	struct tc6393xb *tc6393xb = platform_get_drvdata(dev);
+	struct tc6393xb *tc6393xb = dev_get_drvdata(fb->dev.parent);
 	unsigned long flags;
 
-	spin_lock_irqsave(&tc6393xb->lock, flags);
+	raw_spin_lock_irqsave(&tc6393xb->lock, flags);
 
 	iowrite16(mode->pixclock, tc6393xb->scr + SCR_PLL1CR + 0);
 	iowrite16(mode->pixclock >> 16, tc6393xb->scr + SCR_PLL1CR + 2);
 
-	spin_unlock_irqrestore(&tc6393xb->lock, flags);
+	raw_spin_unlock_irqrestore(&tc6393xb->lock, flags);
 
 	return 0;
 }
@@ -340,8 +349,7 @@ EXPORT_SYMBOL(tc6393xb_lcd_mode);
 
 static int tc6393xb_mmc_enable(struct platform_device *mmc)
 {
-	struct platform_device *dev = to_platform_device(mmc->dev.parent);
-	struct tc6393xb *tc6393xb = platform_get_drvdata(dev);
+	struct tc6393xb *tc6393xb = dev_get_drvdata(mmc->dev.parent);
 
 	tmio_core_mmc_enable(tc6393xb->scr + 0x200, 0,
 		tc6393xb_mmc_resources[0].start & 0xfffe);
@@ -351,8 +359,7 @@ static int tc6393xb_mmc_enable(struct platform_device *mmc)
 
 static int tc6393xb_mmc_resume(struct platform_device *mmc)
 {
-	struct platform_device *dev = to_platform_device(mmc->dev.parent);
-	struct tc6393xb *tc6393xb = platform_get_drvdata(dev);
+	struct tc6393xb *tc6393xb = dev_get_drvdata(mmc->dev.parent);
 
 	tmio_core_mmc_resume(tc6393xb->scr + 0x200, 0,
 		tc6393xb_mmc_resources[0].start & 0xfffe);
@@ -362,16 +369,14 @@ static int tc6393xb_mmc_resume(struct platform_device *mmc)
 
 static void tc6393xb_mmc_pwr(struct platform_device *mmc, int state)
 {
-	struct platform_device *dev = to_platform_device(mmc->dev.parent);
-	struct tc6393xb *tc6393xb = platform_get_drvdata(dev);
+	struct tc6393xb *tc6393xb = dev_get_drvdata(mmc->dev.parent);
 
 	tmio_core_mmc_pwr(tc6393xb->scr + 0x200, 0, state);
 }
 
 static void tc6393xb_mmc_clk_div(struct platform_device *mmc, int state)
 {
-	struct platform_device *dev = to_platform_device(mmc->dev.parent);
-	struct tc6393xb *tc6393xb = platform_get_drvdata(dev);
+	struct tc6393xb *tc6393xb = dev_get_drvdata(mmc->dev.parent);
 
 	tmio_core_mmc_clk_div(tc6393xb->scr + 0x200, 0, state);
 }
@@ -382,7 +387,7 @@ static struct tmio_mmc_data tc6393xb_mmc_data = {
 	.set_clk_div = tc6393xb_mmc_clk_div,
 };
 
-static struct mfd_cell __devinitdata tc6393xb_cells[] = {
+static struct mfd_cell tc6393xb_cells[] = {
 	[TC6393XB_CELL_NAND] = {
 		.name = "tmio-nand",
 		.enable = tc6393xb_nand_enable,
@@ -393,7 +398,8 @@ static struct mfd_cell __devinitdata tc6393xb_cells[] = {
 		.name = "tmio-mmc",
 		.enable = tc6393xb_mmc_enable,
 		.resume = tc6393xb_mmc_resume,
-		.driver_data = &tc6393xb_mmc_data,
+		.platform_data = &tc6393xb_mmc_data,
+		.pdata_size    = sizeof(tc6393xb_mmc_data),
 		.num_resources = ARRAY_SIZE(tc6393xb_mmc_resources),
 		.resources = tc6393xb_mmc_resources,
 	},
@@ -402,7 +408,7 @@ static struct mfd_cell __devinitdata tc6393xb_cells[] = {
 		.num_resources = ARRAY_SIZE(tc6393xb_ohci_resources),
 		.resources = tc6393xb_ohci_resources,
 		.enable = tc6393xb_ohci_enable,
-		.suspend = tc6393xb_ohci_disable,
+		.suspend = tc6393xb_ohci_suspend,
 		.resume = tc6393xb_ohci_enable,
 		.disable = tc6393xb_ohci_disable,
 	},
@@ -422,17 +428,17 @@ static struct mfd_cell __devinitdata tc6393xb_cells[] = {
 static int tc6393xb_gpio_get(struct gpio_chip *chip,
 		unsigned offset)
 {
-	struct tc6393xb *tc6393xb = container_of(chip, struct tc6393xb, gpio);
+	struct tc6393xb *tc6393xb = gpiochip_get_data(chip);
 
 	/* XXX: does dsr also represent inputs? */
-	return tmio_ioread8(tc6393xb->scr + SCR_GPO_DSR(offset / 8))
-		& TC_GPIO_BIT(offset);
+	return !!(tmio_ioread8(tc6393xb->scr + SCR_GPO_DSR(offset / 8))
+		  & TC_GPIO_BIT(offset));
 }
 
 static void __tc6393xb_gpio_set(struct gpio_chip *chip,
 		unsigned offset, int value)
 {
-	struct tc6393xb *tc6393xb = container_of(chip, struct tc6393xb, gpio);
+	struct tc6393xb *tc6393xb = gpiochip_get_data(chip);
 	u8  dsr;
 
 	dsr = tmio_ioread8(tc6393xb->scr + SCR_GPO_DSR(offset / 8));
@@ -447,30 +453,30 @@ static void __tc6393xb_gpio_set(struct gpio_chip *chip,
 static void tc6393xb_gpio_set(struct gpio_chip *chip,
 		unsigned offset, int value)
 {
-	struct tc6393xb *tc6393xb = container_of(chip, struct tc6393xb, gpio);
+	struct tc6393xb *tc6393xb = gpiochip_get_data(chip);
 	unsigned long flags;
 
-	spin_lock_irqsave(&tc6393xb->lock, flags);
+	raw_spin_lock_irqsave(&tc6393xb->lock, flags);
 
 	__tc6393xb_gpio_set(chip, offset, value);
 
-	spin_unlock_irqrestore(&tc6393xb->lock, flags);
+	raw_spin_unlock_irqrestore(&tc6393xb->lock, flags);
 }
 
 static int tc6393xb_gpio_direction_input(struct gpio_chip *chip,
 			unsigned offset)
 {
-	struct tc6393xb *tc6393xb = container_of(chip, struct tc6393xb, gpio);
+	struct tc6393xb *tc6393xb = gpiochip_get_data(chip);
 	unsigned long flags;
 	u8 doecr;
 
-	spin_lock_irqsave(&tc6393xb->lock, flags);
+	raw_spin_lock_irqsave(&tc6393xb->lock, flags);
 
 	doecr = tmio_ioread8(tc6393xb->scr + SCR_GPO_DOECR(offset / 8));
 	doecr &= ~TC_GPIO_BIT(offset);
 	tmio_iowrite8(doecr, tc6393xb->scr + SCR_GPO_DOECR(offset / 8));
 
-	spin_unlock_irqrestore(&tc6393xb->lock, flags);
+	raw_spin_unlock_irqrestore(&tc6393xb->lock, flags);
 
 	return 0;
 }
@@ -478,11 +484,11 @@ static int tc6393xb_gpio_direction_input(struct gpio_chip *chip,
 static int tc6393xb_gpio_direction_output(struct gpio_chip *chip,
 			unsigned offset, int value)
 {
-	struct tc6393xb *tc6393xb = container_of(chip, struct tc6393xb, gpio);
+	struct tc6393xb *tc6393xb = gpiochip_get_data(chip);
 	unsigned long flags;
 	u8 doecr;
 
-	spin_lock_irqsave(&tc6393xb->lock, flags);
+	raw_spin_lock_irqsave(&tc6393xb->lock, flags);
 
 	__tc6393xb_gpio_set(chip, offset, value);
 
@@ -490,30 +496,105 @@ static int tc6393xb_gpio_direction_output(struct gpio_chip *chip,
 	doecr |= TC_GPIO_BIT(offset);
 	tmio_iowrite8(doecr, tc6393xb->scr + SCR_GPO_DOECR(offset / 8));
 
-	spin_unlock_irqrestore(&tc6393xb->lock, flags);
+	raw_spin_unlock_irqrestore(&tc6393xb->lock, flags);
 
 	return 0;
 }
 
-static int tc6393xb_register_gpio(struct tc6393xb *tc6393xb, int gpio_base)
-{
-	tc6393xb->gpio.label = "tc6393xb";
-	tc6393xb->gpio.base = gpio_base;
-	tc6393xb->gpio.ngpio = 16;
-	tc6393xb->gpio.set = tc6393xb_gpio_set;
-	tc6393xb->gpio.get = tc6393xb_gpio_get;
-	tc6393xb->gpio.direction_input = tc6393xb_gpio_direction_input;
-	tc6393xb->gpio.direction_output = tc6393xb_gpio_direction_output;
+/*
+ * TC6393XB GPIOs as used on TOSA, are the only user of this chip.
+ * GPIOs 2, 5, 8 and 13 are not connected.
+ */
+#define TOSA_GPIO_TG_ON			0
+#define TOSA_GPIO_L_MUTE		1
+#define TOSA_GPIO_BL_C20MA		3
+#define TOSA_GPIO_CARD_VCC_ON		4
+#define TOSA_GPIO_CHARGE_OFF		6
+#define TOSA_GPIO_CHARGE_OFF_JC		7
+#define TOSA_GPIO_BAT0_V_ON		9
+#define TOSA_GPIO_BAT1_V_ON		10
+#define TOSA_GPIO_BU_CHRG_ON		11
+#define TOSA_GPIO_BAT_SW_ON		12
+#define TOSA_GPIO_BAT0_TH_ON		14
+#define TOSA_GPIO_BAT1_TH_ON		15
 
-	return gpiochip_add(&tc6393xb->gpio);
+
+GPIO_LOOKUP_SINGLE(tosa_lcd_gpio_lookup, "spi2.0", "tc6393xb",
+		   TOSA_GPIO_TG_ON, "tg #pwr", GPIO_ACTIVE_HIGH);
+
+GPIO_LOOKUP_SINGLE(tosa_lcd_bl_gpio_lookup, "i2c-tos-bl", "tc6393xb",
+		   TOSA_GPIO_BL_C20MA, "backlight", GPIO_ACTIVE_HIGH);
+
+GPIO_LOOKUP_SINGLE(tosa_audio_gpio_lookup, "tosa-audio", "tc6393xb",
+		   TOSA_GPIO_L_MUTE, NULL, GPIO_ACTIVE_HIGH);
+
+static struct gpiod_lookup_table tosa_battery_gpio_lookup = {
+	.dev_id = "wm97xx-battery",
+	.table = {
+		GPIO_LOOKUP("tc6393xb", TOSA_GPIO_CHARGE_OFF,
+			    "main charge off", GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP("tc6393xb", TOSA_GPIO_CHARGE_OFF_JC,
+			    "jacket charge off", GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP("tc6393xb", TOSA_GPIO_BAT0_V_ON,
+			    "main battery", GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP("tc6393xb", TOSA_GPIO_BAT1_V_ON,
+			    "jacket battery", GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP("tc6393xb", TOSA_GPIO_BU_CHRG_ON,
+			    "backup battery", GPIO_ACTIVE_HIGH),
+		/* BAT1 and BAT0 thermistors appear to be swapped */
+		GPIO_LOOKUP("tc6393xb", TOSA_GPIO_BAT1_TH_ON,
+			    "main battery temp", GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP("tc6393xb", TOSA_GPIO_BAT0_TH_ON,
+			    "jacket battery temp", GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP("tc6393xb", TOSA_GPIO_BAT_SW_ON,
+			    "battery switch", GPIO_ACTIVE_HIGH),
+		{ },
+	},
+};
+
+static struct gpiod_lookup_table *tc6393xb_gpio_lookups[] = {
+	&tosa_lcd_gpio_lookup,
+	&tosa_lcd_bl_gpio_lookup,
+	&tosa_audio_gpio_lookup,
+	&tosa_battery_gpio_lookup,
+};
+
+static int tc6393xb_register_gpio(struct tc6393xb *tc6393xb)
+{
+	struct gpio_chip *gc = &tc6393xb->gpio;
+	struct device *dev = tc6393xb->dev;
+	int ret;
+
+	gc->label = "tc6393xb";
+	gc->base = -1; /* Dynamic allocation */
+	gc->ngpio = 16;
+	gc->set = tc6393xb_gpio_set;
+	gc->get = tc6393xb_gpio_get;
+	gc->direction_input = tc6393xb_gpio_direction_input;
+	gc->direction_output = tc6393xb_gpio_direction_output;
+
+	ret = devm_gpiochip_add_data(dev, gc, tc6393xb);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to add GPIO chip\n");
+
+	/* Register descriptor look-ups for consumers */
+	gpiod_add_lookup_tables(tc6393xb_gpio_lookups, ARRAY_SIZE(tc6393xb_gpio_lookups));
+
+	/* Request some of our own GPIOs */
+	tc6393xb->vcc_on = gpiochip_request_own_desc(gc, TOSA_GPIO_CARD_VCC_ON, "VCC ON",
+						     GPIO_ACTIVE_HIGH, GPIOD_OUT_HIGH);
+	if (IS_ERR(tc6393xb->vcc_on))
+		return dev_err_probe(dev, PTR_ERR(tc6393xb->vcc_on),
+				     "failed to request VCC ON GPIO\n");
+
+	return 0;
 }
 
 /*--------------------------------------------------------------------------*/
 
-static void
-tc6393xb_irq(unsigned int irq, struct irq_desc *desc)
+static void tc6393xb_irq(struct irq_desc *desc)
 {
-	struct tc6393xb *tc6393xb = get_irq_data(irq);
+	struct tc6393xb *tc6393xb = irq_desc_get_handler_data(desc);
 	unsigned int isr;
 	unsigned int i, irq_base;
 
@@ -537,11 +618,11 @@ static void tc6393xb_irq_mask(struct irq_data *data)
 	unsigned long flags;
 	u8 imr;
 
-	spin_lock_irqsave(&tc6393xb->lock, flags);
+	raw_spin_lock_irqsave(&tc6393xb->lock, flags);
 	imr = tmio_ioread8(tc6393xb->scr + SCR_IMR);
 	imr |= 1 << (data->irq - tc6393xb->irq_base);
 	tmio_iowrite8(imr, tc6393xb->scr + SCR_IMR);
-	spin_unlock_irqrestore(&tc6393xb->lock, flags);
+	raw_spin_unlock_irqrestore(&tc6393xb->lock, flags);
 }
 
 static void tc6393xb_irq_unmask(struct irq_data *data)
@@ -550,11 +631,11 @@ static void tc6393xb_irq_unmask(struct irq_data *data)
 	unsigned long flags;
 	u8 imr;
 
-	spin_lock_irqsave(&tc6393xb->lock, flags);
+	raw_spin_lock_irqsave(&tc6393xb->lock, flags);
 	imr = tmio_ioread8(tc6393xb->scr + SCR_IMR);
 	imr &= ~(1 << (data->irq - tc6393xb->irq_base));
 	tmio_iowrite8(imr, tc6393xb->scr + SCR_IMR);
-	spin_unlock_irqrestore(&tc6393xb->lock, flags);
+	raw_spin_unlock_irqrestore(&tc6393xb->lock, flags);
 }
 
 static struct irq_chip tc6393xb_chip = {
@@ -572,15 +653,14 @@ static void tc6393xb_attach_irq(struct platform_device *dev)
 	irq_base = tc6393xb->irq_base;
 
 	for (irq = irq_base; irq < irq_base + TC6393XB_NR_IRQS; irq++) {
-		set_irq_chip(irq, &tc6393xb_chip);
-		set_irq_chip_data(irq, tc6393xb);
-		set_irq_handler(irq, handle_edge_irq);
-		set_irq_flags(irq, IRQF_VALID | IRQF_PROBE);
+		irq_set_chip_and_handler(irq, &tc6393xb_chip, handle_edge_irq);
+		irq_set_chip_data(irq, tc6393xb);
+		irq_clear_status_flags(irq, IRQ_NOREQUEST | IRQ_NOPROBE);
 	}
 
-	set_irq_type(tc6393xb->irq, IRQ_TYPE_EDGE_FALLING);
-	set_irq_data(tc6393xb->irq, tc6393xb);
-	set_irq_chained_handler(tc6393xb->irq, tc6393xb_irq);
+	irq_set_irq_type(tc6393xb->irq, IRQ_TYPE_EDGE_FALLING);
+	irq_set_chained_handler_and_data(tc6393xb->irq, tc6393xb_irq,
+					 tc6393xb);
 }
 
 static void tc6393xb_detach_irq(struct platform_device *dev)
@@ -588,26 +668,25 @@ static void tc6393xb_detach_irq(struct platform_device *dev)
 	struct tc6393xb *tc6393xb = platform_get_drvdata(dev);
 	unsigned int irq, irq_base;
 
-	set_irq_chained_handler(tc6393xb->irq, NULL);
-	set_irq_data(tc6393xb->irq, NULL);
+	irq_set_chained_handler_and_data(tc6393xb->irq, NULL, NULL);
 
 	irq_base = tc6393xb->irq_base;
 
 	for (irq = irq_base; irq < irq_base + TC6393XB_NR_IRQS; irq++) {
-		set_irq_flags(irq, 0);
-		set_irq_chip(irq, NULL);
-		set_irq_chip_data(irq, NULL);
+		irq_set_status_flags(irq, IRQ_NOREQUEST | IRQ_NOPROBE);
+		irq_set_chip(irq, NULL);
+		irq_set_chip_data(irq, NULL);
 	}
 }
 
 /*--------------------------------------------------------------------------*/
 
-static int __devinit tc6393xb_probe(struct platform_device *dev)
+static int tc6393xb_probe(struct platform_device *dev)
 {
-	struct tc6393xb_platform_data *tcpd = dev->dev.platform_data;
+	struct tc6393xb_platform_data *tcpd = dev_get_platdata(&dev->dev);
 	struct tc6393xb *tc6393xb;
 	struct resource *iomem, *rscr;
-	int ret, temp;
+	int ret;
 
 	iomem = platform_get_resource(dev, IORESOURCE_MEM, 0);
 	if (!iomem)
@@ -618,8 +697,9 @@ static int __devinit tc6393xb_probe(struct platform_device *dev)
 		ret = -ENOMEM;
 		goto err_kzalloc;
 	}
+	tc6393xb->dev = &dev->dev;
 
-	spin_lock_init(&tc6393xb->lock);
+	raw_spin_lock_init(&tc6393xb->lock);
 
 	platform_set_drvdata(dev, tc6393xb);
 
@@ -654,7 +734,7 @@ static int __devinit tc6393xb_probe(struct platform_device *dev)
 		goto err_ioremap;
 	}
 
-	ret = clk_enable(tc6393xb->clk);
+	ret = clk_prepare_enable(tc6393xb->clk);
 	if (ret)
 		goto err_clk_enable;
 
@@ -677,63 +757,30 @@ static int __devinit tc6393xb_probe(struct platform_device *dev)
 			tmio_ioread8(tc6393xb->scr + SCR_REVID),
 			(unsigned long) iomem->start, tc6393xb->irq);
 
-	tc6393xb->gpio.base = -1;
-
-	if (tcpd->gpio_base >= 0) {
-		ret = tc6393xb_register_gpio(tc6393xb, tcpd->gpio_base);
-		if (ret)
-			goto err_gpio_add;
-	}
+	ret = tc6393xb_register_gpio(tc6393xb);
+	if (ret)
+		goto err_gpio_add;
 
 	tc6393xb_attach_irq(dev);
 
-	if (tcpd->setup) {
-		ret = tcpd->setup(dev);
-		if (ret)
-			goto err_setup;
-	}
-
-	tc6393xb_cells[TC6393XB_CELL_NAND].driver_data = tcpd->nand_data;
-	tc6393xb_cells[TC6393XB_CELL_NAND].platform_data =
-		&tc6393xb_cells[TC6393XB_CELL_NAND];
-	tc6393xb_cells[TC6393XB_CELL_NAND].data_size =
-		sizeof(tc6393xb_cells[TC6393XB_CELL_NAND]);
-
-	tc6393xb_cells[TC6393XB_CELL_MMC].platform_data =
-		&tc6393xb_cells[TC6393XB_CELL_MMC];
-	tc6393xb_cells[TC6393XB_CELL_MMC].data_size =
-		sizeof(tc6393xb_cells[TC6393XB_CELL_MMC]);
-
-	tc6393xb_cells[TC6393XB_CELL_OHCI].platform_data =
-		&tc6393xb_cells[TC6393XB_CELL_OHCI];
-	tc6393xb_cells[TC6393XB_CELL_OHCI].data_size =
-		sizeof(tc6393xb_cells[TC6393XB_CELL_OHCI]);
-
-	tc6393xb_cells[TC6393XB_CELL_FB].driver_data = tcpd->fb_data;
-	tc6393xb_cells[TC6393XB_CELL_FB].platform_data =
-		&tc6393xb_cells[TC6393XB_CELL_FB];
-	tc6393xb_cells[TC6393XB_CELL_FB].data_size =
-		sizeof(tc6393xb_cells[TC6393XB_CELL_FB]);
+	tc6393xb_cells[TC6393XB_CELL_NAND].platform_data = tcpd->nand_data;
+	tc6393xb_cells[TC6393XB_CELL_NAND].pdata_size =
+						sizeof(*tcpd->nand_data);
+	tc6393xb_cells[TC6393XB_CELL_FB].platform_data = tcpd->fb_data;
+	tc6393xb_cells[TC6393XB_CELL_FB].pdata_size = sizeof(*tcpd->fb_data);
 
 	ret = mfd_add_devices(&dev->dev, dev->id,
-			tc6393xb_cells, ARRAY_SIZE(tc6393xb_cells),
-			iomem, tcpd->irq_base);
+			      tc6393xb_cells, ARRAY_SIZE(tc6393xb_cells),
+			      iomem, tcpd->irq_base, NULL);
 
 	if (!ret)
 		return 0;
 
-	if (tcpd->teardown)
-		tcpd->teardown(dev);
-
-err_setup:
 	tc6393xb_detach_irq(dev);
-
 err_gpio_add:
-	if (tc6393xb->gpio.base != -1)
-		temp = gpiochip_remove(&tc6393xb->gpio);
 	tcpd->disable(dev);
 err_enable:
-	clk_disable(tc6393xb->clk);
+	clk_disable_unprepare(tc6393xb->clk);
 err_clk_enable:
 	iounmap(tc6393xb->scr);
 err_ioremap:
@@ -747,42 +794,29 @@ err_kzalloc:
 	return ret;
 }
 
-static int __devexit tc6393xb_remove(struct platform_device *dev)
+static int tc6393xb_remove(struct platform_device *dev)
 {
-	struct tc6393xb_platform_data *tcpd = dev->dev.platform_data;
+	struct tc6393xb_platform_data *tcpd = dev_get_platdata(&dev->dev);
 	struct tc6393xb *tc6393xb = platform_get_drvdata(dev);
-	int ret;
 
 	mfd_remove_devices(&dev->dev);
 
-	if (tcpd->teardown)
-		tcpd->teardown(dev);
-
 	tc6393xb_detach_irq(dev);
 
-	if (tc6393xb->gpio.base != -1) {
-		ret = gpiochip_remove(&tc6393xb->gpio);
-		if (ret) {
-			dev_err(&dev->dev, "Can't remove gpio chip: %d\n", ret);
-			return ret;
-		}
-	}
-
-	ret = tcpd->disable(dev);
-	clk_disable(tc6393xb->clk);
+	tcpd->disable(dev);
+	clk_disable_unprepare(tc6393xb->clk);
 	iounmap(tc6393xb->scr);
 	release_resource(&tc6393xb->rscr);
-	platform_set_drvdata(dev, NULL);
 	clk_put(tc6393xb->clk);
 	kfree(tc6393xb);
 
-	return ret;
+	return 0;
 }
 
 #ifdef CONFIG_PM
 static int tc6393xb_suspend(struct platform_device *dev, pm_message_t state)
 {
-	struct tc6393xb_platform_data *tcpd = dev->dev.platform_data;
+	struct tc6393xb_platform_data *tcpd = dev_get_platdata(&dev->dev);
 	struct tc6393xb *tc6393xb = platform_get_drvdata(dev);
 	int i, ret;
 
@@ -798,19 +832,21 @@ static int tc6393xb_suspend(struct platform_device *dev, pm_message_t state)
 			ioread8(tc6393xb->scr + SCR_GPI_BCR(i));
 	}
 	ret = tcpd->suspend(dev);
-	clk_disable(tc6393xb->clk);
+	clk_disable_unprepare(tc6393xb->clk);
 
 	return ret;
 }
 
 static int tc6393xb_resume(struct platform_device *dev)
 {
-	struct tc6393xb_platform_data *tcpd = dev->dev.platform_data;
+	struct tc6393xb_platform_data *tcpd = dev_get_platdata(&dev->dev);
 	struct tc6393xb *tc6393xb = platform_get_drvdata(dev);
 	int ret;
 	int i;
 
-	clk_enable(tc6393xb->clk);
+	ret = clk_prepare_enable(tc6393xb->clk);
+	if (ret)
+		return ret;
 
 	ret = tcpd->resume(dev);
 	if (ret)
@@ -847,13 +883,12 @@ static int tc6393xb_resume(struct platform_device *dev)
 
 static struct platform_driver tc6393xb_driver = {
 	.probe = tc6393xb_probe,
-	.remove = __devexit_p(tc6393xb_remove),
+	.remove = tc6393xb_remove,
 	.suspend = tc6393xb_suspend,
 	.resume = tc6393xb_resume,
 
 	.driver = {
 		.name = "tc6393xb",
-		.owner = THIS_MODULE,
 	},
 };
 

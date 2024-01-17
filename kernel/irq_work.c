@@ -1,69 +1,71 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (C) 2010 Red Hat, Inc., Peter Zijlstra <pzijlstr@redhat.com>
+ * Copyright (C) 2010 Red Hat, Inc., Peter Zijlstra
  *
  * Provides a framework for enqueueing and running callbacks from hardirq
  * context. The enqueueing is NMI-safe.
  */
 
+#include <linux/bug.h>
 #include <linux/kernel.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/irq_work.h>
+#include <linux/percpu.h>
 #include <linux/hardirq.h>
+#include <linux/irqflags.h>
+#include <linux/sched.h>
+#include <linux/tick.h>
+#include <linux/cpu.h>
+#include <linux/notifier.h>
+#include <linux/smp.h>
+#include <linux/smpboot.h>
+#include <asm/processor.h>
+#include <linux/kasan.h>
 
-/*
- * An entry can be in one of four states:
- *
- * free	     NULL, 0 -> {claimed}       : free to be used
- * claimed   NULL, 3 -> {pending}       : claimed to be enqueued
- * pending   next, 3 -> {busy}          : queued, pending callback
- * busy      NULL, 2 -> {free, claimed} : callback in progress, can be claimed
- *
- * We use the lower two bits of the next pointer to keep PENDING and BUSY
- * flags.
- */
+static DEFINE_PER_CPU(struct llist_head, raised_list);
+static DEFINE_PER_CPU(struct llist_head, lazy_list);
+static DEFINE_PER_CPU(struct task_struct *, irq_workd);
 
-#define IRQ_WORK_PENDING	1UL
-#define IRQ_WORK_BUSY		2UL
-#define IRQ_WORK_FLAGS		3UL
-
-static inline bool irq_work_is_set(struct irq_work *entry, int flags)
+static void wake_irq_workd(void)
 {
-	return (unsigned long)entry->next & flags;
+	struct task_struct *tsk = __this_cpu_read(irq_workd);
+
+	if (!llist_empty(this_cpu_ptr(&lazy_list)) && tsk)
+		wake_up_process(tsk);
 }
 
-static inline struct irq_work *irq_work_next(struct irq_work *entry)
+#ifdef CONFIG_SMP
+static void irq_work_wake(struct irq_work *entry)
 {
-	unsigned long next = (unsigned long)entry->next;
-	next &= ~IRQ_WORK_FLAGS;
-	return (struct irq_work *)next;
+	wake_irq_workd();
 }
 
-static inline struct irq_work *next_flags(struct irq_work *entry, int flags)
-{
-	unsigned long next = (unsigned long)entry;
-	next |= flags;
-	return (struct irq_work *)next;
-}
+static DEFINE_PER_CPU(struct irq_work, irq_work_wakeup) =
+	IRQ_WORK_INIT_HARD(irq_work_wake);
+#endif
 
-static DEFINE_PER_CPU(struct irq_work *, irq_work_list);
+static int irq_workd_should_run(unsigned int cpu)
+{
+	return !llist_empty(this_cpu_ptr(&lazy_list));
+}
 
 /*
  * Claim the entry so that no one else will poke at it.
  */
-static bool irq_work_claim(struct irq_work *entry)
+static bool irq_work_claim(struct irq_work *work)
 {
-	struct irq_work *next, *nflags;
+	int oflags;
 
-	do {
-		next = entry->next;
-		if ((unsigned long)next & IRQ_WORK_PENDING)
-			return false;
-		nflags = next_flags(next, IRQ_WORK_FLAGS);
-	} while (cmpxchg(&entry->next, next, nflags) != next);
-
+	oflags = atomic_fetch_or(IRQ_WORK_CLAIMED | CSD_TYPE_IRQ_WORK, &work->node.a_flags);
+	/*
+	 * If the work is already pending, no need to raise the IPI.
+	 * The pairing smp_mb() in irq_work_single() makes sure
+	 * everything we did before is visible.
+	 */
+	if (oflags & IRQ_WORK_PENDING)
+		return false;
 	return true;
 }
-
 
 void __weak arch_irq_work_raise(void)
 {
@@ -72,95 +74,244 @@ void __weak arch_irq_work_raise(void)
 	 */
 }
 
-/*
- * Queue the entry and raise the IPI if needed.
- */
-static void __irq_work_queue(struct irq_work *entry)
+/* Enqueue on current CPU, work must already be claimed and preempt disabled */
+static void __irq_work_queue_local(struct irq_work *work)
 {
-	struct irq_work *next;
+	struct llist_head *list;
+	bool rt_lazy_work = false;
+	bool lazy_work = false;
+	int work_flags;
 
-	preempt_disable();
+	work_flags = atomic_read(&work->node.a_flags);
+	if (work_flags & IRQ_WORK_LAZY)
+		lazy_work = true;
+	else if (IS_ENABLED(CONFIG_PREEMPT_RT) &&
+		 !(work_flags & IRQ_WORK_HARD_IRQ))
+		rt_lazy_work = true;
 
-	do {
-		next = __this_cpu_read(irq_work_list);
-		/* Can assign non-atomic because we keep the flags set. */
-		entry->next = next_flags(next, IRQ_WORK_FLAGS);
-	} while (this_cpu_cmpxchg(irq_work_list, next, entry) != next);
+	if (lazy_work || rt_lazy_work)
+		list = this_cpu_ptr(&lazy_list);
+	else
+		list = this_cpu_ptr(&raised_list);
 
-	/* The list was empty, raise self-interrupt to start processing. */
-	if (!irq_work_next(entry))
+	if (!llist_add(&work->node.llist, list))
+		return;
+
+	/* If the work is "lazy", handle it from next tick if any */
+	if (!lazy_work || tick_nohz_tick_stopped())
 		arch_irq_work_raise();
-
-	preempt_enable();
 }
 
-/*
- * Enqueue the irq_work @entry, returns true on success, failure when the
- * @entry was already enqueued by someone else.
- *
- * Can be re-enqueued while the callback is still in progress.
- */
-bool irq_work_queue(struct irq_work *entry)
+/* Enqueue the irq work @work on the current CPU */
+bool irq_work_queue(struct irq_work *work)
 {
-	if (!irq_work_claim(entry)) {
-		/*
-		 * Already enqueued, can't do!
-		 */
+	/* Only queue if not already pending */
+	if (!irq_work_claim(work))
 		return false;
-	}
 
-	__irq_work_queue(entry);
+	/* Queue the entry and raise the IPI if needed. */
+	preempt_disable();
+	__irq_work_queue_local(work);
+	preempt_enable();
+
 	return true;
 }
 EXPORT_SYMBOL_GPL(irq_work_queue);
 
 /*
- * Run the irq_work entries on this cpu. Requires to be ran from hardirq
- * context with local IRQs disabled.
+ * Enqueue the irq_work @work on @cpu unless it's already pending
+ * somewhere.
+ *
+ * Can be re-enqueued while the callback is still in progress.
+ */
+bool irq_work_queue_on(struct irq_work *work, int cpu)
+{
+#ifndef CONFIG_SMP
+	return irq_work_queue(work);
+
+#else /* CONFIG_SMP: */
+	/* All work should have been flushed before going offline */
+	WARN_ON_ONCE(cpu_is_offline(cpu));
+
+	/* Only queue if not already pending */
+	if (!irq_work_claim(work))
+		return false;
+
+	kasan_record_aux_stack_noalloc(work);
+
+	preempt_disable();
+	if (cpu != smp_processor_id()) {
+		/* Arch remote IPI send/receive backend aren't NMI safe */
+		WARN_ON_ONCE(in_nmi());
+
+		/*
+		 * On PREEMPT_RT the items which are not marked as
+		 * IRQ_WORK_HARD_IRQ are added to the lazy list and a HARD work
+		 * item is used on the remote CPU to wake the thread.
+		 */
+		if (IS_ENABLED(CONFIG_PREEMPT_RT) &&
+		    !(atomic_read(&work->node.a_flags) & IRQ_WORK_HARD_IRQ)) {
+
+			if (!llist_add(&work->node.llist, &per_cpu(lazy_list, cpu)))
+				goto out;
+
+			work = &per_cpu(irq_work_wakeup, cpu);
+			if (!irq_work_claim(work))
+				goto out;
+		}
+
+		__smp_call_single_queue(cpu, &work->node.llist);
+	} else {
+		__irq_work_queue_local(work);
+	}
+out:
+	preempt_enable();
+
+	return true;
+#endif /* CONFIG_SMP */
+}
+
+bool irq_work_needs_cpu(void)
+{
+	struct llist_head *raised, *lazy;
+
+	raised = this_cpu_ptr(&raised_list);
+	lazy = this_cpu_ptr(&lazy_list);
+
+	if (llist_empty(raised) || arch_irq_work_has_interrupt())
+		if (llist_empty(lazy))
+			return false;
+
+	/* All work should have been flushed before going offline */
+	WARN_ON_ONCE(cpu_is_offline(smp_processor_id()));
+
+	return true;
+}
+
+void irq_work_single(void *arg)
+{
+	struct irq_work *work = arg;
+	int flags;
+
+	/*
+	 * Clear the PENDING bit, after this point the @work can be re-used.
+	 * The PENDING bit acts as a lock, and we own it, so we can clear it
+	 * without atomic ops.
+	 */
+	flags = atomic_read(&work->node.a_flags);
+	flags &= ~IRQ_WORK_PENDING;
+	atomic_set(&work->node.a_flags, flags);
+
+	/*
+	 * See irq_work_claim().
+	 */
+	smp_mb();
+
+	lockdep_irq_work_enter(flags);
+	work->func(work);
+	lockdep_irq_work_exit(flags);
+
+	/*
+	 * Clear the BUSY bit, if set, and return to the free state if no-one
+	 * else claimed it meanwhile.
+	 */
+	(void)atomic_cmpxchg(&work->node.a_flags, flags, flags & ~IRQ_WORK_BUSY);
+
+	if ((IS_ENABLED(CONFIG_PREEMPT_RT) && !irq_work_is_hard(work)) ||
+	    !arch_irq_work_has_interrupt())
+		rcuwait_wake_up(&work->irqwait);
+}
+
+static void irq_work_run_list(struct llist_head *list)
+{
+	struct irq_work *work, *tmp;
+	struct llist_node *llnode;
+
+	/*
+	 * On PREEMPT_RT IRQ-work which is not marked as HARD will be processed
+	 * in a per-CPU thread in preemptible context. Only the items which are
+	 * marked as IRQ_WORK_HARD_IRQ will be processed in hardirq context.
+	 */
+	BUG_ON(!irqs_disabled() && !IS_ENABLED(CONFIG_PREEMPT_RT));
+
+	if (llist_empty(list))
+		return;
+
+	llnode = llist_del_all(list);
+	llist_for_each_entry_safe(work, tmp, llnode, node.llist)
+		irq_work_single(work);
+}
+
+/*
+ * hotplug calls this through:
+ *  hotplug_cfd() -> flush_smp_call_function_queue()
  */
 void irq_work_run(void)
 {
-	struct irq_work *list;
-
-	if (this_cpu_read(irq_work_list) == NULL)
-		return;
-
-	BUG_ON(!in_irq());
-	BUG_ON(!irqs_disabled());
-
-	list = this_cpu_xchg(irq_work_list, NULL);
-
-	while (list != NULL) {
-		struct irq_work *entry = list;
-
-		list = irq_work_next(list);
-
-		/*
-		 * Clear the PENDING bit, after this point the @entry
-		 * can be re-used.
-		 */
-		entry->next = next_flags(NULL, IRQ_WORK_BUSY);
-		entry->func(entry);
-		/*
-		 * Clear the BUSY bit and return to the free state if
-		 * no-one else claimed it meanwhile.
-		 */
-		(void)cmpxchg(&entry->next,
-			      next_flags(NULL, IRQ_WORK_BUSY),
-			      NULL);
-	}
+	irq_work_run_list(this_cpu_ptr(&raised_list));
+	if (!IS_ENABLED(CONFIG_PREEMPT_RT))
+		irq_work_run_list(this_cpu_ptr(&lazy_list));
+	else
+		wake_irq_workd();
 }
 EXPORT_SYMBOL_GPL(irq_work_run);
+
+void irq_work_tick(void)
+{
+	struct llist_head *raised = this_cpu_ptr(&raised_list);
+
+	if (!llist_empty(raised) && !arch_irq_work_has_interrupt())
+		irq_work_run_list(raised);
+
+	if (!IS_ENABLED(CONFIG_PREEMPT_RT))
+		irq_work_run_list(this_cpu_ptr(&lazy_list));
+	else
+		wake_irq_workd();
+}
 
 /*
  * Synchronize against the irq_work @entry, ensures the entry is not
  * currently in use.
  */
-void irq_work_sync(struct irq_work *entry)
+void irq_work_sync(struct irq_work *work)
 {
-	WARN_ON_ONCE(irqs_disabled());
+	lockdep_assert_irqs_enabled();
+	might_sleep();
 
-	while (irq_work_is_set(entry, IRQ_WORK_BUSY))
+	if ((IS_ENABLED(CONFIG_PREEMPT_RT) && !irq_work_is_hard(work)) ||
+	    !arch_irq_work_has_interrupt()) {
+		rcuwait_wait_event(&work->irqwait, !irq_work_is_busy(work),
+				   TASK_UNINTERRUPTIBLE);
+		return;
+	}
+
+	while (irq_work_is_busy(work))
 		cpu_relax();
 }
 EXPORT_SYMBOL_GPL(irq_work_sync);
+
+static void run_irq_workd(unsigned int cpu)
+{
+	irq_work_run_list(this_cpu_ptr(&lazy_list));
+}
+
+static void irq_workd_setup(unsigned int cpu)
+{
+	sched_set_fifo_low(current);
+}
+
+static struct smp_hotplug_thread irqwork_threads = {
+	.store                  = &irq_workd,
+	.setup			= irq_workd_setup,
+	.thread_should_run      = irq_workd_should_run,
+	.thread_fn              = run_irq_workd,
+	.thread_comm            = "irq_work/%u",
+};
+
+static __init int irq_work_init_threads(void)
+{
+	if (IS_ENABLED(CONFIG_PREEMPT_RT))
+		BUG_ON(smpboot_register_percpu_thread(&irqwork_threads));
+	return 0;
+}
+early_initcall(irq_work_init_threads);

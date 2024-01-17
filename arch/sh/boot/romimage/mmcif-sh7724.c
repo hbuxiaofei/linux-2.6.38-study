@@ -8,7 +8,7 @@
  * for more details.
  */
 
-#include <linux/mmc/sh_mmcif.h>
+#include <linux/platform_data/sh_mmcif.h>
 #include <mach/romimage.h>
 
 #define MMCIF_BASE      (void __iomem *)0xa4ca0000
@@ -20,6 +20,13 @@
 #define PSELE		0xa4050156
 #define HIZCRC		0xa405015c
 #define DRVCRA		0xa405018a
+
+enum {
+	MMCIF_PROGRESS_ENTER,
+	MMCIF_PROGRESS_INIT,
+	MMCIF_PROGRESS_LOAD,
+	MMCIF_PROGRESS_DONE
+};
 
 /* SH7724 specific MMCIF loader
  *

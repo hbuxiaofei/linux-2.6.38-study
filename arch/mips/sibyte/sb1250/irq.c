@@ -1,19 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (C) 2000, 2001, 2002, 2003 Broadcom Corporation
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
  */
 #include <linux/kernel.h>
 #include <linux/init.h>
@@ -26,7 +13,6 @@
 
 #include <asm/errno.h>
 #include <asm/signal.h>
-#include <asm/system.h>
 #include <asm/time.h>
 #include <asm/io.h>
 
@@ -43,30 +29,9 @@
  * for interrupt lines
  */
 
-
-static void end_sb1250_irq(unsigned int irq);
-static void enable_sb1250_irq(unsigned int irq);
-static void disable_sb1250_irq(unsigned int irq);
-static void ack_sb1250_irq(unsigned int irq);
-#ifdef CONFIG_SMP
-static int sb1250_set_affinity(unsigned int irq, const struct cpumask *mask);
-#endif
-
 #ifdef CONFIG_SIBYTE_HAS_LDT
 extern unsigned long ldt_eoi_space;
 #endif
-
-static struct irq_chip sb1250_irq_type = {
-	.name = "SB1250-IMR",
-	.ack = ack_sb1250_irq,
-	.mask = disable_sb1250_irq,
-	.mask_ack = ack_sb1250_irq,
-	.unmask = enable_sb1250_irq,
-	.end = end_sb1250_irq,
-#ifdef CONFIG_SMP
-	.set_affinity = sb1250_set_affinity
-#endif
-};
 
 /* Store the CPU id (not the logical number) */
 int sb1250_irq_owner[SB1250_NR_IRQS];
@@ -102,13 +67,15 @@ void sb1250_unmask_irq(int cpu, int irq)
 }
 
 #ifdef CONFIG_SMP
-static int sb1250_set_affinity(unsigned int irq, const struct cpumask *mask)
+static int sb1250_set_affinity(struct irq_data *d, const struct cpumask *mask,
+			       bool force)
 {
 	int i = 0, old_cpu, cpu, int_on;
+	unsigned int irq = d->irq;
 	u64 cur_ints;
 	unsigned long flags;
 
-	i = cpumask_first(mask);
+	i = cpumask_first_and(mask, cpu_online_mask);
 
 	/* Convert logical CPU to physical CPU */
 	cpu = cpu_logical_map(i);
@@ -142,21 +109,24 @@ static int sb1250_set_affinity(unsigned int irq, const struct cpumask *mask)
 }
 #endif
 
-/*****************************************************************************/
-
-static void disable_sb1250_irq(unsigned int irq)
+static void disable_sb1250_irq(struct irq_data *d)
 {
+	unsigned int irq = d->irq;
+
 	sb1250_mask_irq(sb1250_irq_owner[irq], irq);
 }
 
-static void enable_sb1250_irq(unsigned int irq)
+static void enable_sb1250_irq(struct irq_data *d)
 {
+	unsigned int irq = d->irq;
+
 	sb1250_unmask_irq(sb1250_irq_owner[irq], irq);
 }
 
 
-static void ack_sb1250_irq(unsigned int irq)
+static void ack_sb1250_irq(struct irq_data *d)
 {
+	unsigned int irq = d->irq;
 #ifdef CONFIG_SIBYTE_HAS_LDT
 	u64 pending;
 
@@ -199,21 +169,23 @@ static void ack_sb1250_irq(unsigned int irq)
 	sb1250_mask_irq(sb1250_irq_owner[irq], irq);
 }
 
-
-static void end_sb1250_irq(unsigned int irq)
-{
-	if (!(irq_desc[irq].status & (IRQ_DISABLED | IRQ_INPROGRESS))) {
-		sb1250_unmask_irq(sb1250_irq_owner[irq], irq);
-	}
-}
-
+static struct irq_chip sb1250_irq_type = {
+	.name = "SB1250-IMR",
+	.irq_mask_ack = ack_sb1250_irq,
+	.irq_unmask = enable_sb1250_irq,
+	.irq_mask = disable_sb1250_irq,
+#ifdef CONFIG_SMP
+	.irq_set_affinity = sb1250_set_affinity
+#endif
+};
 
 void __init init_sb1250_irqs(void)
 {
 	int i;
 
 	for (i = 0; i < SB1250_NR_IRQS; i++) {
-		set_irq_chip_and_handler(i, &sb1250_irq_type, handle_level_irq);
+		irq_set_chip_and_handler(i, &sb1250_irq_type,
+					 handle_level_irq);
 		sb1250_irq_owner[i] = 0;
 	}
 }
@@ -279,7 +251,7 @@ void __init arch_init_irq(void)
 		     IOADDR(A_IMR_REGISTER(1, R_IMR_INTERRUPT_MAP_BASE) +
 			    (K_INT_MBOX_0 << 3)));
 
-	/* Clear the mailboxes.  The firmware may leave them dirty */
+	/* Clear the mailboxes.	 The firmware may leave them dirty */
 	__raw_writeq(0xffffffffffffffffULL,
 		     IOADDR(A_IMR_REGISTER(0, R_IMR_MAILBOX_CLR_CPU)));
 	__raw_writeq(0xffffffffffffffffULL,
@@ -289,12 +261,6 @@ void __init arch_init_irq(void)
 	tmp = ~((u64) 0) ^ (((u64) 1) << K_INT_MBOX_0);
 	__raw_writeq(tmp, IOADDR(A_IMR_REGISTER(0, R_IMR_INTERRUPT_MASK)));
 	__raw_writeq(tmp, IOADDR(A_IMR_REGISTER(1, R_IMR_INTERRUPT_MASK)));
-
-	/*
-	 * Note that the timer interrupts are also mapped, but this is
-	 * done in sb1250_time_init().  Also, the profiling driver
-	 * does its own management of IP7.
-	 */
 
 	/* Enable necessary IPs, disable the rest */
 	change_c0_status(ST0_IM, imask);
@@ -309,7 +275,7 @@ static inline void dispatch_ip2(void)
 
 	/*
 	 * Default...we've hit an IP[2] interrupt, which means we've got to
-	 * check the 1250 interrupt registers to figure out what to do.  Need
+	 * check the 1250 interrupt registers to figure out what to do.	 Need
 	 * to detect which CPU we're on, now that smp_affinity is supported.
 	 */
 	mask = __raw_readq(IOADDR(A_IMR_REGISTER(cpu,
@@ -338,7 +304,7 @@ asmlinkage void plat_irq_dispatch(void)
 	if (pending & CAUSEF_IP7) /* CPU performance counter interrupt */
 		do_IRQ(MIPS_CPU_IRQ_BASE + 7);
 	else if (pending & CAUSEF_IP4)
-		do_IRQ(K_INT_TIMER_0 + cpu); 	/* sb1250_timer_interrupt() */
+		do_IRQ(K_INT_TIMER_0 + cpu);	/* sb1250_timer_interrupt() */
 
 #ifdef CONFIG_SMP
 	else if (pending & CAUSEF_IP3)

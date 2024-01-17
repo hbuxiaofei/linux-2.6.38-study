@@ -1,23 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0+ */
 /*
- * segment.h - NILFS Segment constructor prototypes and definitions
+ * NILFS Segment constructor prototypes and definitions
  *
  * Copyright (C) 2005-2008 Nippon Telegraph and Telephone Corporation.
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
- *
- * Written by Ryusuke Konishi <ryusuke@osrg.net>
+ * Written by Ryusuke Konishi.
  *
  */
 #ifndef _NILFS_SEGMENT_H
@@ -26,8 +13,8 @@
 #include <linux/types.h>
 #include <linux/fs.h>
 #include <linux/buffer_head.h>
-#include <linux/nilfs2_fs.h>
-#include "sb.h"
+#include <linux/workqueue.h>
+#include "nilfs.h"
 
 struct nilfs_root;
 
@@ -66,14 +53,15 @@ struct nilfs_recovery_info {
 
 /**
  * struct nilfs_cstage - Context of collection stage
- * @scnt: Stage count
+ * @scnt: Stage count, must be accessed via wrappers:
+ *        nilfs_sc_cstage_inc(), nilfs_sc_cstage_set(), nilfs_sc_cstage_get()
  * @flags: State flags
  * @dirty_file_ptr: Pointer on dirty_files list, or inode of a target file
  * @gc_inode_ptr: Pointer on the list of gc-inodes
  */
 struct nilfs_cstage {
 	int			scnt;
-	unsigned		flags;
+	unsigned int		flags;
 	struct nilfs_inode_info *dirty_file_ptr;
 	struct nilfs_inode_info *gc_inode_ptr;
 };
@@ -82,18 +70,18 @@ struct nilfs_segment_buffer;
 
 struct nilfs_segsum_pointer {
 	struct buffer_head     *bh;
-	unsigned		offset; /* offset in bytes */
+	unsigned int		offset; /* offset in bytes */
 };
 
 /**
  * struct nilfs_sc_info - Segment constructor information
  * @sc_super: Back pointer to super_block struct
- * @sc_sbi: Back pointer to nilfs_sb_info struct
  * @sc_root: root object of the current filesystem tree
  * @sc_nblk_inc: Block count of current generation
  * @sc_dirty_files: List of files to be written
  * @sc_gc_inodes: List of GC inodes having blocks to be written
- * @sc_copied_buffers: List of copied buffers (buffer heads) to freeze data
+ * @sc_iput_queue: list of inodes for which iput should be done
+ * @sc_iput_work: work struct to defer iput call
  * @sc_freesegs: array of segment numbers to be freed
  * @sc_nfreesegs: number of segments on @sc_freesegs
  * @sc_dsync_inode: inode whose data pages are written for a sync operation
@@ -131,14 +119,14 @@ struct nilfs_segsum_pointer {
  */
 struct nilfs_sc_info {
 	struct super_block     *sc_super;
-	struct nilfs_sb_info   *sc_sbi;
 	struct nilfs_root      *sc_root;
 
 	unsigned long		sc_nblk_inc;
 
 	struct list_head	sc_dirty_files;
 	struct list_head	sc_gc_inodes;
-	struct list_head	sc_copied_buffers;
+	struct list_head	sc_iput_queue;
+	struct work_struct	sc_iput_work;
 
 	__u64		       *sc_freesegs;
 	size_t			sc_nfreesegs;
@@ -160,7 +148,7 @@ struct nilfs_sc_info {
 	unsigned long		sc_blk_cnt;
 	unsigned long		sc_datablk_cnt;
 	unsigned long		sc_nblk_this_inc;
-	time_t			sc_seg_ctime;
+	time64_t		sc_seg_ctime;
 	__u64			sc_cno;
 	unsigned long		sc_flags;
 
@@ -183,6 +171,7 @@ struct nilfs_sc_info {
 	unsigned long		sc_watermark;
 
 	struct timer_list	sc_timer;
+	struct task_struct     *sc_timer_task;
 	struct task_struct     *sc_task;
 };
 
@@ -191,11 +180,15 @@ enum {
 	NILFS_SC_DIRTY,		/* One or more dirty meta-data blocks exist */
 	NILFS_SC_UNCLOSED,	/* Logical segment is not closed */
 	NILFS_SC_SUPER_ROOT,	/* The latest segment has a super root */
-	NILFS_SC_PRIOR_FLUSH,	/* Requesting immediate flush without making a
-				   checkpoint */
-	NILFS_SC_HAVE_DELTA,	/* Next checkpoint will have update of files
-				   other than DAT, cpfile, sufile, or files
-				   moved by GC */
+	NILFS_SC_PRIOR_FLUSH,	/*
+				 * Requesting immediate flush without making a
+				 * checkpoint
+				 */
+	NILFS_SC_HAVE_DELTA,	/*
+				 * Next checkpoint will have update of files
+				 * other than DAT, cpfile, sufile, or files
+				 * moved by GC.
+				 */
 };
 
 /* sc_state */
@@ -205,17 +198,23 @@ enum {
 /*
  * Constant parameters
  */
-#define NILFS_SC_CLEANUP_RETRY	    3  /* Retry count of construction when
-					  destroying segctord */
+#define NILFS_SC_CLEANUP_RETRY	    3  /*
+					* Retry count of construction when
+					* destroying segctord
+					*/
 
 /*
  * Default values of timeout, in seconds.
  */
-#define NILFS_SC_DEFAULT_TIMEOUT    5   /* Timeout value of dirty blocks.
-					   It triggers construction of a
-					   logical segment with a super root */
-#define NILFS_SC_DEFAULT_SR_FREQ    30  /* Maximum frequency of super root
-					   creation */
+#define NILFS_SC_DEFAULT_TIMEOUT    5   /*
+					 * Timeout value of dirty blocks.
+					 * It triggers construction of a
+					 * logical segment with a super root.
+					 */
+#define NILFS_SC_DEFAULT_SR_FREQ    30  /*
+					 * Maximum frequency of super root
+					 * creation
+					 */
 
 /*
  * The default threshold amount of data, in block counts.
@@ -235,18 +234,16 @@ extern void nilfs_flush_segment(struct super_block *, ino_t);
 extern int nilfs_clean_segments(struct super_block *, struct nilfs_argv *,
 				void **);
 
-int nilfs_attach_segment_constructor(struct nilfs_sb_info *sbi,
-				     struct nilfs_root *root);
-extern void nilfs_detach_segment_constructor(struct nilfs_sb_info *);
+int nilfs_attach_log_writer(struct super_block *sb, struct nilfs_root *root);
+void nilfs_detach_log_writer(struct super_block *sb);
 
 /* recovery.c */
 extern int nilfs_read_super_root_block(struct the_nilfs *, sector_t,
 				       struct buffer_head **, int);
 extern int nilfs_search_super_root(struct the_nilfs *,
 				   struct nilfs_recovery_info *);
-extern int nilfs_salvage_orphan_logs(struct the_nilfs *,
-				     struct nilfs_sb_info *,
-				     struct nilfs_recovery_info *);
+int nilfs_salvage_orphan_logs(struct the_nilfs *nilfs, struct super_block *sb,
+			      struct nilfs_recovery_info *ri);
 extern void nilfs_dispose_segment_list(struct list_head *);
 
 #endif /* _NILFS_SEGMENT_H */

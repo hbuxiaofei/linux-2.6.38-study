@@ -1,23 +1,22 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Support for the OLPC DCON and OLPC EC access
  *
  * Copyright © 2006  Advanced Micro Devices, Inc.
  * Copyright © 2007-2008  Andres Salomon <dilinger@debian.org>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 
 #include <linux/kernel.h>
 #include <linux/init.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/delay.h>
-#include <linux/spinlock.h>
 #include <linux/io.h>
 #include <linux/string.h>
 #include <linux/platform_device.h>
+#include <linux/of.h>
+#include <linux/syscore_ops.h>
+#include <linux/mutex.h>
+#include <linux/olpc-ec.h>
 
 #include <asm/geode.h>
 #include <asm/setup.h>
@@ -26,8 +25,6 @@
 
 struct olpc_platform_t olpc_platform_info;
 EXPORT_SYMBOL_GPL(olpc_platform_info);
-
-static DEFINE_SPINLOCK(ec_lock);
 
 /* what the timeout *should* be (in ms) */
 #define EC_BASE_TIMEOUT 20
@@ -109,15 +106,12 @@ static int __wait_on_obf(unsigned int line, unsigned int port, int desired)
  * <http://wiki.laptop.org/go/Ec_specification>.  Unfortunately, while
  * OpenFirmware's source is available, the EC's is not.
  */
-int olpc_ec_cmd(unsigned char cmd, unsigned char *inbuf, size_t inlen,
-		unsigned char *outbuf,  size_t outlen)
+static int olpc_xo1_ec_cmd(u8 cmd, u8 *inbuf, size_t inlen, u8 *outbuf,
+		size_t outlen, void *arg)
 {
-	unsigned long flags;
 	int ret = -EIO;
 	int i;
 	int restarts = 0;
-
-	spin_lock_irqsave(&ec_lock, flags);
 
 	/* Clear OBF */
 	for (i = 0; i < 10 && (obf_status(0x6c) == 1); i++)
@@ -156,13 +150,13 @@ restart:
 	if (inbuf && inlen) {
 		/* write data to EC */
 		for (i = 0; i < inlen; i++) {
+			pr_devel("olpc-ec:  sending cmd arg 0x%x\n", inbuf[i]);
+			outb(inbuf[i], 0x68);
 			if (wait_on_ibf(0x6c, 0)) {
 				printk(KERN_ERR "olpc-ec:  timeout waiting for"
 						" EC accept data!\n");
 				goto err;
 			}
-			pr_devel("olpc-ec:  sending cmd arg 0x%x\n", inbuf[i]);
-			outb(inbuf[i], 0x68);
 		}
 	}
 	if (outbuf && outlen) {
@@ -182,46 +176,50 @@ restart:
 
 	ret = 0;
 err:
-	spin_unlock_irqrestore(&ec_lock, flags);
 	return ret;
 }
-EXPORT_SYMBOL_GPL(olpc_ec_cmd);
 
-static bool __init check_ofw_architecture(void)
+static bool __init check_ofw_architecture(struct device_node *root)
 {
-	size_t propsize;
-	char olpc_arch[5];
-	const void *args[] = { NULL, "architecture", olpc_arch, (void *)5 };
-	void *res[] = { &propsize };
+	const char *olpc_arch;
+	int propsize;
 
-	if (olpc_ofw("getprop", args, res)) {
-		printk(KERN_ERR "ofw: getprop call failed!\n");
-		return false;
-	}
+	olpc_arch = of_get_property(root, "architecture", &propsize);
 	return propsize == 5 && strncmp("OLPC", olpc_arch, 5) == 0;
 }
 
-static u32 __init get_board_revision(void)
+static u32 __init get_board_revision(struct device_node *root)
 {
-	size_t propsize;
-	__be32 rev;
-	const void *args[] = { NULL, "board-revision-int", &rev, (void *)4 };
-	void *res[] = { &propsize };
+	int propsize;
+	const __be32 *rev;
 
-	if (olpc_ofw("getprop", args, res) || propsize != 4) {
-		printk(KERN_ERR "ofw: getprop call failed!\n");
-		return cpu_to_be32(0);
-	}
-	return be32_to_cpu(rev);
+	rev = of_get_property(root, "board-revision-int", &propsize);
+	if (propsize != 4)
+		return 0;
+
+	return be32_to_cpu(*rev);
 }
 
 static bool __init platform_detect(void)
 {
-	if (!check_ofw_architecture())
+	struct device_node *root = of_find_node_by_path("/");
+	bool success;
+
+	if (!root)
 		return false;
-	olpc_platform_info.flags |= OLPC_F_PRESENT;
-	olpc_platform_info.boardrev = get_board_revision();
-	return true;
+
+	success = check_ofw_architecture(root);
+	if (success) {
+		olpc_platform_info.boardrev = get_board_revision(root);
+		olpc_platform_info.flags |= OLPC_F_PRESENT;
+
+		pr_info("OLPC board revision %s%X\n",
+			((olpc_platform_info.boardrev & 0xf) < 8) ? "pre" : "",
+			olpc_platform_info.boardrev >> 4);
+	}
+
+	of_node_put(root);
+	return success;
 }
 
 static int __init add_xo1_platform_devices(void)
@@ -233,11 +231,57 @@ static int __init add_xo1_platform_devices(void)
 		return PTR_ERR(pdev);
 
 	pdev = platform_device_register_simple("olpc-xo1", -1, NULL, 0);
-	if (IS_ERR(pdev))
-		return PTR_ERR(pdev);
+
+	return PTR_ERR_OR_ZERO(pdev);
+}
+
+static int olpc_xo1_ec_suspend(struct platform_device *pdev)
+{
+	/*
+	 * Squelch SCIs while suspended.  This is a fix for
+	 * <http://dev.laptop.org/ticket/1835>.
+	 */
+	return olpc_ec_cmd(EC_SET_SCI_INHIBIT, NULL, 0, NULL, 0);
+}
+
+static int olpc_xo1_ec_resume(struct platform_device *pdev)
+{
+	/* Tell the EC to stop inhibiting SCIs */
+	olpc_ec_cmd(EC_SET_SCI_INHIBIT_RELEASE, NULL, 0, NULL, 0);
+
+	/*
+	 * Tell the wireless module to restart USB communication.
+	 * Must be done twice.
+	 */
+	olpc_ec_cmd(EC_WAKE_UP_WLAN, NULL, 0, NULL, 0);
+	olpc_ec_cmd(EC_WAKE_UP_WLAN, NULL, 0, NULL, 0);
 
 	return 0;
 }
+
+static struct olpc_ec_driver ec_xo1_driver = {
+	.suspend = olpc_xo1_ec_suspend,
+	.resume = olpc_xo1_ec_resume,
+	.ec_cmd = olpc_xo1_ec_cmd,
+#ifdef CONFIG_OLPC_XO1_SCI
+	/*
+	 * XO-1 EC wakeups are available when olpc-xo1-sci driver is
+	 * compiled in
+	 */
+	.wakeup_available = true,
+#endif
+};
+
+static struct olpc_ec_driver ec_xo1_5_driver = {
+	.ec_cmd = olpc_xo1_ec_cmd,
+#ifdef CONFIG_OLPC_XO15_SCI
+	/*
+	 * XO-1.5 EC wakeups are available when olpc-xo15-sci driver is
+	 * compiled in
+	 */
+	.wakeup_available = true,
+#endif
+};
 
 static int __init olpc_init(void)
 {
@@ -246,15 +290,16 @@ static int __init olpc_init(void)
 	if (!olpc_ofw_present() || !platform_detect())
 		return 0;
 
-	spin_lock_init(&ec_lock);
+	/* register the XO-1 and 1.5-specific EC handler */
+	if (olpc_platform_info.boardrev < olpc_board_pre(0xd0))	/* XO-1 */
+		olpc_ec_driver_register(&ec_xo1_driver, NULL);
+	else
+		olpc_ec_driver_register(&ec_xo1_5_driver, NULL);
+	platform_device_register_simple("olpc-ec", -1, NULL, 0);
 
 	/* assume B1 and above models always have a DCON */
 	if (olpc_board_at_least(olpc_board(0xb1)))
 		olpc_platform_info.flags |= OLPC_F_DCON;
-
-	/* get the EC revision */
-	olpc_ec_cmd(EC_FIRMWARE_REV, NULL, 0,
-			(unsigned char *) &olpc_platform_info.ecver, 1);
 
 #ifdef CONFIG_PCI_OLPC
 	/* If the VSA exists let it emulate PCI, if not emulate in kernel.
@@ -263,11 +308,6 @@ static int __init olpc_init(void)
 			!cs5535_has_vsa2())
 		x86_init.pci.arch_init = pci_olpc_init;
 #endif
-
-	printk(KERN_INFO "OLPC board revision %s%X (EC=%x)\n",
-			((olpc_platform_info.boardrev & 0xf) < 8) ? "pre" : "",
-			olpc_platform_info.boardrev >> 4,
-			olpc_platform_info.ecver);
 
 	if (olpc_platform_info.boardrev < olpc_board_pre(0xd0)) { /* XO-1 */
 		r = add_xo1_platform_devices();

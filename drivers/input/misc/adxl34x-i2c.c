@@ -1,16 +1,18 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * ADLX345/346 Three-Axis Digital Accelerometers (I2C Interface)
  *
  * Enter bugs at http://blackfin.uclinux.org/
  *
  * Copyright (C) 2009 Michael Hennerich, Analog Devices Inc.
- * Licensed under the GPL-2 or later.
  */
 
 #include <linux/input.h>	/* BUS_I2C */
 #include <linux/i2c.h>
 #include <linux/module.h>
+#include <linux/of.h>
 #include <linux/types.h>
+#include <linux/pm.h>
 #include "adxl34x.h"
 
 static int adxl34x_smbus_read(struct device *dev, unsigned char reg)
@@ -72,7 +74,7 @@ static const struct adxl34x_bus_ops adxl34x_i2c_bops = {
 	.read_block	= adxl34x_i2c_read_block,
 };
 
-static int __devinit adxl34x_i2c_probe(struct i2c_client *client,
+static int adxl34x_i2c_probe(struct i2c_client *client,
 				       const struct i2c_device_id *id)
 {
 	struct adxl34x *ac;
@@ -97,16 +99,16 @@ static int __devinit adxl34x_i2c_probe(struct i2c_client *client,
 	return 0;
 }
 
-static int __devexit adxl34x_i2c_remove(struct i2c_client *client)
+static void adxl34x_i2c_remove(struct i2c_client *client)
 {
 	struct adxl34x *ac = i2c_get_clientdata(client);
 
-	return adxl34x_remove(ac);
+	adxl34x_remove(ac);
 }
 
-#ifdef CONFIG_PM
-static int adxl34x_i2c_suspend(struct i2c_client *client, pm_message_t message)
+static int __maybe_unused adxl34x_i2c_suspend(struct device *dev)
 {
+	struct i2c_client *client = to_i2c_client(dev);
 	struct adxl34x *ac = i2c_get_clientdata(client);
 
 	adxl34x_suspend(ac);
@@ -114,18 +116,18 @@ static int adxl34x_i2c_suspend(struct i2c_client *client, pm_message_t message)
 	return 0;
 }
 
-static int adxl34x_i2c_resume(struct i2c_client *client)
+static int __maybe_unused adxl34x_i2c_resume(struct device *dev)
 {
+	struct i2c_client *client = to_i2c_client(dev);
 	struct adxl34x *ac = i2c_get_clientdata(client);
 
 	adxl34x_resume(ac);
 
 	return 0;
 }
-#else
-# define adxl34x_i2c_suspend NULL
-# define adxl34x_i2c_resume  NULL
-#endif
+
+static SIMPLE_DEV_PM_OPS(adxl34x_i2c_pm, adxl34x_i2c_suspend,
+			 adxl34x_i2c_resume);
 
 static const struct i2c_device_id adxl34x_id[] = {
 	{ "adxl34x", 0 },
@@ -134,29 +136,35 @@ static const struct i2c_device_id adxl34x_id[] = {
 
 MODULE_DEVICE_TABLE(i2c, adxl34x_id);
 
+static const struct of_device_id adxl34x_of_id[] = {
+	/*
+	 * The ADXL346 is backward-compatible with the ADXL345. Differences are
+	 * handled by runtime detection of the device model, there's thus no
+	 * need for listing the "adi,adxl346" compatible value explicitly.
+	 */
+	{ .compatible = "adi,adxl345", },
+	/*
+	 * Deprecated, DT nodes should use one or more of the device-specific
+	 * compatible values "adi,adxl345" and "adi,adxl346".
+	 */
+	{ .compatible = "adi,adxl34x", },
+	{ }
+};
+
+MODULE_DEVICE_TABLE(of, adxl34x_of_id);
+
 static struct i2c_driver adxl34x_driver = {
 	.driver = {
 		.name = "adxl34x",
-		.owner = THIS_MODULE,
+		.pm = &adxl34x_i2c_pm,
+		.of_match_table = adxl34x_of_id,
 	},
 	.probe    = adxl34x_i2c_probe,
-	.remove   = __devexit_p(adxl34x_i2c_remove),
-	.suspend  = adxl34x_i2c_suspend,
-	.resume   = adxl34x_i2c_resume,
+	.remove   = adxl34x_i2c_remove,
 	.id_table = adxl34x_id,
 };
 
-static int __init adxl34x_i2c_init(void)
-{
-	return i2c_add_driver(&adxl34x_driver);
-}
-module_init(adxl34x_i2c_init);
-
-static void __exit adxl34x_i2c_exit(void)
-{
-	i2c_del_driver(&adxl34x_driver);
-}
-module_exit(adxl34x_i2c_exit);
+module_i2c_driver(adxl34x_driver);
 
 MODULE_AUTHOR("Michael Hennerich <hennerich@blackfin.uclinux.org>");
 MODULE_DESCRIPTION("ADXL345/346 Three-Axis Digital Accelerometer I2C Bus Driver");

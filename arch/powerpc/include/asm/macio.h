@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef __MACIO_ASIC_H__
 #define __MACIO_ASIC_H__
 #ifdef __KERNEL__
@@ -76,7 +77,7 @@ static inline unsigned long macio_resource_len(struct macio_dev *dev, int resour
 	struct resource *res = &dev->resource[resource_no];
 	if (res->start == 0 || res->end == 0 || res->end < res->start)
 		return 0;
-	return res->end - res->start + 1;
+	return resource_size(res);
 }
 
 extern int macio_enable_devres(struct macio_dev *dev);

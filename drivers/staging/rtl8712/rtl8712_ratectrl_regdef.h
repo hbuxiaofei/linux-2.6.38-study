@@ -1,3 +1,16 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/******************************************************************************
+ *
+ * Copyright(c) 2007 - 2010 Realtek Corporation. All rights reserved.
+ *
+ * Modifications for inclusion into the Linux staging tree are
+ * Copyright(c) 2010 Larry Finger. All rights reserved.
+ *
+ * Contact information:
+ * WLAN FAE <wlanfae@realtek.com>
+ * Larry Finger <Larry.Finger@lwfinger.net>
+ *
+ ******************************************************************************/
 #ifndef __RTL8712_RATECTRL_REGDEF_H__
 #define __RTL8712_RATECTRL_REGDEF_H__
 
@@ -25,7 +38,6 @@
 #define MCS_TXAGC6			(RTL8712_RATECTRL_ + 0x66)
 #define MCS_TXAGC7			(RTL8712_RATECTRL_ + 0x67)
 #define CCK_TXAGC			(RTL8712_RATECTRL_ + 0x68)
-
 
 #endif	/*__RTL8712_RATECTRL_REGDEF_H__*/
 

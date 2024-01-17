@@ -12,7 +12,7 @@
 #include <linux/debugfs.h>
 #include <linux/seq_file.h>
 #include <asm/processor.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/cache.h>
 #include <asm/io.h>
 
@@ -22,13 +22,13 @@ enum cache_type {
 	CACHE_TYPE_UNIFIED,
 };
 
-static int cache_seq_show(struct seq_file *file, void *iter)
+static int cache_debugfs_show(struct seq_file *file, void *iter)
 {
 	unsigned int cache_type = (unsigned int)file->private;
 	struct cache_info *cache;
-	unsigned int waysize, way, cache_size;
-	unsigned long ccr, base;
-	static unsigned long addrstart = 0;
+	unsigned int waysize, way;
+	unsigned long ccr;
+	unsigned long addrstart = 0;
 
 	/*
 	 * Go uncached immediately so we don't skew the results any
@@ -36,7 +36,7 @@ static int cache_seq_show(struct seq_file *file, void *iter)
 	 */
 	jump_to_uncached();
 
-	ccr = __raw_readl(CCR);
+	ccr = __raw_readl(SH_CCR);
 	if ((ccr & CCR_CACHE_ENABLE) == 0) {
 		back_to_cached();
 
@@ -45,27 +45,12 @@ static int cache_seq_show(struct seq_file *file, void *iter)
 	}
 
 	if (cache_type == CACHE_TYPE_DCACHE) {
-		base = CACHE_OC_ADDRESS_ARRAY;
+		addrstart = CACHE_OC_ADDRESS_ARRAY;
 		cache = &current_cpu_data.dcache;
 	} else {
-		base = CACHE_IC_ADDRESS_ARRAY;
+		addrstart = CACHE_IC_ADDRESS_ARRAY;
 		cache = &current_cpu_data.icache;
 	}
-
-	/*
-	 * Due to the amount of data written out (depending on the cache size),
-	 * we may be iterated over multiple times. In this case, keep track of
-	 * the entry position in addrstart, and rewind it when we've hit the
-	 * end of the cache.
-	 *
-	 * Likewise, the same code is used for multiple caches, so care must
-	 * be taken for bouncing addrstart back and forth so the appropriate
-	 * cache is hit.
-	 */
-	cache_size = cache->ways * cache->sets * cache->linesz;
-	if (((addrstart & 0xff000000) != base) ||
-	     (addrstart & 0x00ffffff) > cache_size)
-		addrstart = base;
 
 	waysize = cache->sets;
 
@@ -109,37 +94,14 @@ static int cache_seq_show(struct seq_file *file, void *iter)
 	return 0;
 }
 
-static int cache_debugfs_open(struct inode *inode, struct file *file)
-{
-	return single_open(file, cache_seq_show, inode->i_private);
-}
-
-static const struct file_operations cache_debugfs_fops = {
-	.owner		= THIS_MODULE,
-	.open		= cache_debugfs_open,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= single_release,
-};
+DEFINE_SHOW_ATTRIBUTE(cache_debugfs);
 
 static int __init cache_debugfs_init(void)
 {
-	struct dentry *dcache_dentry, *icache_dentry;
-
-	dcache_dentry = debugfs_create_file("dcache", S_IRUSR, arch_debugfs_dir,
-					    (unsigned int *)CACHE_TYPE_DCACHE,
-					    &cache_debugfs_fops);
-	if (!dcache_dentry)
-		return -ENOMEM;
-
-	icache_dentry = debugfs_create_file("icache", S_IRUSR, arch_debugfs_dir,
-					    (unsigned int *)CACHE_TYPE_ICACHE,
-					    &cache_debugfs_fops);
-	if (!icache_dentry) {
-		debugfs_remove(dcache_dentry);
-		return -ENOMEM;
-	}
-
+	debugfs_create_file("dcache", S_IRUSR, arch_debugfs_dir,
+			    (void *)CACHE_TYPE_DCACHE, &cache_debugfs_fops);
+	debugfs_create_file("icache", S_IRUSR, arch_debugfs_dir,
+			    (void *)CACHE_TYPE_ICACHE, &cache_debugfs_fops);
 	return 0;
 }
 module_init(cache_debugfs_init);

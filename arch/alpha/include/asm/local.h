@@ -1,8 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ALPHA_LOCAL_H
 #define _ALPHA_LOCAL_H
 
 #include <linux/percpu.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 
 typedef struct
 {

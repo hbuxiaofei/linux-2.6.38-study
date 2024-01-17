@@ -131,6 +131,8 @@
 #define LINKRATE_30			(0x02 << 8)
 #define LINKRATE_60			(0x04 << 8)
 
+/* for new SPC controllers MEMBASE III is shared between BIOS and DATA */
+#define GSM_SM_BASE			0x4F0000
 struct mpi_msg_hdr{
 	__le32	header;	/* Bits [11:0]  - Message operation code */
 	/* Bits [15:12] - Message Category */
@@ -209,7 +211,7 @@ struct  pio_setup_fis {
 
 /*
  * brief the data structure of SATA Completion Response
- * use to discribe the sata task response (64 bytes)
+ * use to describe the sata task response (64 bytes)
  */
 struct sata_completion_resp {
 	__le32	tag;
@@ -298,7 +300,7 @@ struct local_phy_ctl_resp {
 
 
 #define OP_BITS 0x0000FF00
-#define ID_BITS 0x0000000F
+#define ID_BITS 0x000000FF
 
 /*
  * brief the data structure of PORT Control Command
@@ -431,11 +433,6 @@ struct task_abort_req {
 	__le32	abort_all;
 	u32	reserved[11];
 } __attribute__((packed, aligned(4)));
-
-/* These flags used for SSP SMP & SATA Abort */
-#define ABORT_MASK		0x3
-#define ABORT_SINGLE		0x0
-#define ABORT_ALL		0x1
 
 /**
  * brief the data structure of SSP SATA SMP Abort Response
@@ -599,7 +596,7 @@ struct fw_flash_Update_req {
  *
  */
 struct fw_flash_Update_resp {
-	dma_addr_t	tag;
+	__le32	tag;
 	__le32	status;
 	u32	reserved[13];
 } __attribute__((packed, aligned(4)));
@@ -625,7 +622,7 @@ struct set_nvm_data_req {
 	__le32	tag;
 	__le32	len_ir_vpdd;
 	__le32	vpd_offset;
-	u32	reserved[8];
+	__le32	reserved[8];
 	__le32	resp_addr_lo;
 	__le32	resp_addr_hi;
 	__le32	resp_len;
@@ -803,6 +800,7 @@ struct set_dev_state_resp {
 #define IO_ABORT_IN_PROGRESS				0x40
 #define IO_ABORT_DELAYED				0x41
 #define IO_INVALID_LENGTH				0x42
+#define IO_FATAL_ERROR					0x51
 
 /* WARNING: This error code must always be the last number.
  * If you add error code, modify this code also
@@ -951,7 +949,7 @@ struct set_dev_state_resp {
 #define PCIE_EVENT_INTERRUPT		0x003044
 #define PCIE_ERROR_INTERRUPT_ENABLE	0x003048
 #define PCIE_ERROR_INTERRUPT		0x00304C
-/* signature defintion for host scratch pad0 register */
+/* signature definition for host scratch pad0 register */
 #define SPC_SOFT_RESET_SIGNATURE	0x252acbcd
 /* Signature for Soft Reset */
 
@@ -1025,5 +1023,8 @@ struct set_dev_state_resp {
 #define DEVREG_FAILURE_PORT_NOT_VALID_STATE		0x06
 #define DEVREG_FAILURE_DEVICE_TYPE_NOT_VALID		0x07
 
+#define GSM_BASE					0x4F0000
+#define SHIFT_REG_64K_MASK				0xffff0000
+#define SHIFT_REG_BIT_SHIFT				8
 #endif
 

@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Generic HDLC support routines for Linux
  * Point-to-point protocol support
  *
  * Copyright (C) 1999 - 2008 Krzysztof Halasa <khc@pm.waw.pl>
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of version 2 of the GNU General Public License
- * as published by the Free Software Foundation.
  */
 
 #include <linux/errno.h>
@@ -44,6 +41,7 @@ static const char *const code_names[CP_CODES] = {
 	"0", "ConfReq", "ConfAck", "ConfNak", "ConfRej", "TermReq",
 	"TermAck", "CodeRej", "ProtoRej", "EchoReq", "EchoReply", "Discard"
 };
+
 static char debug_buffer[64 + 3 * DEBUG_CP];
 #endif
 
@@ -60,7 +58,6 @@ struct cp_header {
 	u8 id;
 	__be16 len;
 };
-
 
 struct proto {
 	struct net_device *dev;
@@ -94,6 +91,7 @@ static const char *const state_names[STATES] = {
 	"Closed", "Stopped", "Stopping", "ReqSent", "AckRecv", "AckSent",
 	"Opened"
 };
+
 static const char *const event_names[EVENTS] = {
 	"Start", "Stop", "TO+", "TO-", "RCR+", "RCR-", "RCA", "RCN",
 	"RTR", "RTA", "RUC", "RXJ+", "RXJ-"
@@ -102,14 +100,14 @@ static const char *const event_names[EVENTS] = {
 
 static struct sk_buff_head tx_queue; /* used when holding the spin lock */
 
-static int ppp_ioctl(struct net_device *dev, struct ifreq *ifr);
+static int ppp_ioctl(struct net_device *dev, struct if_settings *ifs);
 
-static inline struct ppp* get_ppp(struct net_device *dev)
+static inline struct ppp *get_ppp(struct net_device *dev)
 {
 	return (struct ppp *)dev_to_hdlc(dev)->state;
 }
 
-static inline struct proto* get_proto(struct net_device *dev, u16 pid)
+static inline struct proto *get_proto(struct net_device *dev, u16 pid)
 {
 	struct ppp *ppp = get_ppp(dev);
 
@@ -125,7 +123,7 @@ static inline struct proto* get_proto(struct net_device *dev, u16 pid)
 	}
 }
 
-static inline const char* proto_name(u16 pid)
+static inline const char *proto_name(u16 pid)
 {
 	switch (pid) {
 	case PID_LCP:
@@ -141,7 +139,7 @@ static inline const char* proto_name(u16 pid)
 
 static __be16 ppp_type_trans(struct sk_buff *skb, struct net_device *dev)
 {
-	struct hdlc_header *data = (struct hdlc_header*)skb->data;
+	struct hdlc_header *data = (struct hdlc_header *)skb->data;
 
 	if (skb->len < sizeof(struct hdlc_header))
 		return htons(ETH_P_HDLC);
@@ -163,7 +161,6 @@ static __be16 ppp_type_trans(struct sk_buff *skb, struct net_device *dev)
 	}
 }
 
-
 static int ppp_hard_header(struct sk_buff *skb, struct net_device *dev,
 			   u16 type, const void *daddr, const void *saddr,
 			   unsigned int len)
@@ -174,7 +171,7 @@ static int ppp_hard_header(struct sk_buff *skb, struct net_device *dev,
 #endif
 
 	skb_push(skb, sizeof(struct hdlc_header));
-	data = (struct hdlc_header*)skb->data;
+	data = (struct hdlc_header *)skb->data;
 
 	data->address = HDLC_ADDR_ALLSTATIONS;
 	data->control = HDLC_CTRL_UI;
@@ -196,10 +193,10 @@ static int ppp_hard_header(struct sk_buff *skb, struct net_device *dev,
 	return sizeof(struct hdlc_header);
 }
 
-
 static void ppp_tx_flush(void)
 {
 	struct sk_buff *skb;
+
 	while ((skb = skb_dequeue(&tx_queue)) != NULL)
 		dev_queue_xmit(skb);
 }
@@ -222,22 +219,20 @@ static void ppp_tx_cp(struct net_device *dev, u16 pid, u8 code,
 
 	skb = dev_alloc_skb(sizeof(struct hdlc_header) +
 			    sizeof(struct cp_header) + magic_len + len);
-	if (!skb) {
-		printk(KERN_WARNING "%s: out of memory in ppp_tx_cp()\n",
-		       dev->name);
+	if (!skb)
 		return;
-	}
+
 	skb_reserve(skb, sizeof(struct hdlc_header));
 
-	cp = (struct cp_header *)skb_put(skb, sizeof(struct cp_header));
+	cp = skb_put(skb, sizeof(struct cp_header));
 	cp->code = code;
 	cp->id = id;
 	cp->len = htons(sizeof(struct cp_header) + magic_len + len);
 
 	if (magic_len)
-		memcpy(skb_put(skb, magic_len), &magic, magic_len);
+		skb_put_data(skb, &magic, magic_len);
 	if (len)
-		memcpy(skb_put(skb, len), data, len);
+		skb_put_data(skb, data, len);
 
 #if DEBUG_CP
 	BUG_ON(code >= CP_CODES);
@@ -255,10 +250,10 @@ static void ppp_tx_cp(struct net_device *dev, u16 pid, u8 code,
 
 	skb->priority = TC_PRIO_CONTROL;
 	skb->dev = dev;
+	skb->protocol = htons(ETH_P_HDLC);
 	skb_reset_network_header(skb);
 	skb_queue_tail(&tx_queue, skb);
 }
-
 
 /* State transition table (compare STD-51)
    Events                                   Actions
@@ -296,7 +291,6 @@ static int cp_table[EVENTS][STATES] = {
 	{    0    ,      1      ,  2  ,    3    ,  3  ,    5    ,    6    }, /* RXJ+ */
 	{    0    ,      1      ,  1  ,    1    ,  1  ,    1    ,IRC|STR|2}, /* RXJ- */
 };
-
 
 /* SCA: RCR+ must supply id, len and data
    SCN: RCR- must supply code, id, len and data
@@ -345,7 +339,7 @@ static void ppp_cp_event(struct net_device *dev, u16 pid, u16 event, u8 code,
 		ppp_tx_cp(dev, pid, CP_CODE_REJ, ++ppp->seq, len, data);
 
 	if (old_state != OPENED && proto->state == OPENED) {
-		printk(KERN_INFO "%s: %s up\n", dev->name, proto_name(pid));
+		netdev_info(dev, "%s up\n", proto_name(pid));
 		if (pid == PID_LCP) {
 			netif_dormant_off(dev);
 			ppp_cp_event(dev, PID_IPCP, START, 0, 0, 0, NULL);
@@ -356,7 +350,7 @@ static void ppp_cp_event(struct net_device *dev, u16 pid, u16 event, u8 code,
 		}
 	}
 	if (old_state == OPENED && proto->state != OPENED) {
-		printk(KERN_INFO "%s: %s down\n", dev->name, proto_name(pid));
+		netdev_info(dev, "%s down\n", proto_name(pid));
 		if (pid == PID_LCP) {
 			netif_dormant_on(dev);
 			ppp_cp_event(dev, PID_IPCP, STOP, 0, 0, 0, NULL);
@@ -372,7 +366,6 @@ static void ppp_cp_event(struct net_device *dev, u16 pid, u16 event, u8 code,
 #endif
 }
 
-
 static void ppp_cp_parse_cr(struct net_device *dev, u16 pid, u8 id,
 			    unsigned int req_len, const u8 *data)
 {
@@ -381,17 +374,15 @@ static void ppp_cp_parse_cr(struct net_device *dev, u16 pid, u8 id,
 	u8 *out;
 	unsigned int len = req_len, nak_len = 0, rej_len = 0;
 
-	if (!(out = kmalloc(len, GFP_ATOMIC))) {
+	out = kmalloc(len, GFP_ATOMIC);
+	if (!out) {
 		dev->stats.rx_dropped++;
 		return;	/* out of memory, ignore CR packet */
 	}
 
 	for (opt = data; len; len -= opt[1], opt += opt[1]) {
-		if (len < 2 || len < opt[1]) {
-			dev->stats.rx_errors++;
-			kfree(out);
-			return; /* bad packet, drop silently */
-		}
+		if (len < 2 || opt[1] < 2 || len < opt[1])
+			goto err_out;
 
 		if (pid == PID_LCP)
 			switch (opt[0]) {
@@ -399,6 +390,8 @@ static void ppp_cp_parse_cr(struct net_device *dev, u16 pid, u8 id,
 				continue; /* MRU always OK and > 1500 bytes? */
 
 			case LCP_OPTION_ACCM: /* async control character map */
+				if (opt[1] < sizeof(valid_accm))
+					goto err_out;
 				if (!memcmp(opt, valid_accm,
 					    sizeof(valid_accm)))
 					continue;
@@ -410,6 +403,8 @@ static void ppp_cp_parse_cr(struct net_device *dev, u16 pid, u8 id,
 				}
 				break;
 			case LCP_OPTION_MAGIC:
+				if (len < 6)
+					goto err_out;
 				if (opt[1] != 6 || (!opt[2] && !opt[3] &&
 						    !opt[4] && !opt[5]))
 					break; /* reject invalid magic number */
@@ -428,11 +423,16 @@ static void ppp_cp_parse_cr(struct net_device *dev, u16 pid, u8 id,
 		ppp_cp_event(dev, pid, RCR_GOOD, CP_CONF_ACK, id, req_len, data);
 
 	kfree(out);
+	return;
+
+err_out:
+	dev->stats.rx_errors++;
+	kfree(out);
 }
 
 static int ppp_rx(struct sk_buff *skb)
 {
-	struct hdlc_header *hdr = (struct hdlc_header*)skb->data;
+	struct hdlc_header *hdr = (struct hdlc_header *)skb->data;
 	struct net_device *dev = skb->dev;
 	struct ppp *ppp = get_ppp(dev);
 	struct proto *proto;
@@ -449,7 +449,7 @@ static int ppp_rx(struct sk_buff *skb)
 	/* Check HDLC header */
 	if (skb->len < sizeof(struct hdlc_header))
 		goto rx_error;
-	cp = (struct cp_header*)skb_pull(skb, sizeof(struct hdlc_header));
+	cp = skb_pull(skb, sizeof(struct hdlc_header));
 	if (hdr->address != HDLC_ADDR_ALLSTATIONS ||
 	    hdr->control != HDLC_CTRL_UI)
 		goto rx_error;
@@ -490,7 +490,7 @@ static int ppp_rx(struct sk_buff *skb)
 	if (pid == PID_LCP)
 		switch (cp->code) {
 		case LCP_PROTO_REJ:
-			pid = ntohs(*(__be16*)skb->data);
+			pid = ntohs(*(__be16 *)skb->data);
 			if (pid == PID_LCP || pid == PID_IPCP ||
 			    pid == PID_IPV6CP)
 				ppp_cp_event(dev, pid, RXJ_BAD, 0, 0,
@@ -516,37 +516,37 @@ static int ppp_rx(struct sk_buff *skb)
 	switch (cp->code) {
 	case CP_CONF_REQ:
 		ppp_cp_parse_cr(dev, pid, cp->id, len, skb->data);
-		goto out;
+		break;
 
 	case CP_CONF_ACK:
 		if (cp->id == proto->cr_id)
 			ppp_cp_event(dev, pid, RCA, 0, 0, 0, NULL);
-		goto out;
+		break;
 
 	case CP_CONF_REJ:
 	case CP_CONF_NAK:
 		if (cp->id == proto->cr_id)
 			ppp_cp_event(dev, pid, RCN, 0, 0, 0, NULL);
-		goto out;
+		break;
 
 	case CP_TERM_REQ:
 		ppp_cp_event(dev, pid, RTR, 0, cp->id, 0, NULL);
-		goto out;
+		break;
 
 	case CP_TERM_ACK:
 		ppp_cp_event(dev, pid, RTA, 0, 0, 0, NULL);
-		goto out;
+		break;
 
 	case CP_CODE_REJ:
 		ppp_cp_event(dev, pid, RXJ_BAD, 0, 0, 0, NULL);
-		goto out;
+		break;
 
 	default:
 		len += sizeof(struct cp_header);
 		if (len > dev->mtu)
 			len = dev->mtu;
 		ppp_cp_event(dev, pid, RUC, 0, 0, len, cp);
-		goto out;
+		break;
 	}
 	goto out;
 
@@ -559,13 +559,20 @@ out:
 	return NET_RX_DROP;
 }
 
-static void ppp_timer(unsigned long arg)
+static void ppp_timer(struct timer_list *t)
 {
-	struct proto *proto = (struct proto *)arg;
+	struct proto *proto = from_timer(proto, t, timer);
 	struct ppp *ppp = get_ppp(proto->dev);
 	unsigned long flags;
 
 	spin_lock_irqsave(&ppp->lock, flags);
+	/* mod_timer could be called after we entered this function but
+	 * before we got the lock.
+	 */
+	if (timer_pending(&proto->timer)) {
+		spin_unlock_irqrestore(&ppp->lock, flags);
+		return;
+	}
 	switch (proto->state) {
 	case STOPPING:
 	case REQ_SENT:
@@ -575,7 +582,10 @@ static void ppp_timer(unsigned long arg)
 			ppp_cp_event(proto->dev, proto->pid, TO_GOOD, 0, 0,
 				     0, NULL);
 			proto->restart_counter--;
-		} else
+		} else if (netif_carrier_ok(proto->dev))
+			ppp_cp_event(proto->dev, proto->pid, TO_GOOD, 0, 0,
+				     0, NULL);
+		else
 			ppp_cp_event(proto->dev, proto->pid, TO_BAD, 0, 0,
 				     0, NULL);
 		break;
@@ -585,7 +595,7 @@ static void ppp_timer(unsigned long arg)
 			break;
 		if (time_after(jiffies, ppp->last_pong +
 			       ppp->keepalive_timeout * HZ)) {
-			printk(KERN_INFO "%s: Link down\n", proto->dev->name);
+			netdev_info(proto->dev, "Link down\n");
 			ppp_cp_event(proto->dev, PID_LCP, STOP, 0, 0, 0, NULL);
 			ppp_cp_event(proto->dev, PID_LCP, START, 0, 0, 0, NULL);
 		} else {	/* send keep-alive packet */
@@ -602,7 +612,6 @@ static void ppp_timer(unsigned long arg)
 	ppp_tx_flush();
 }
 
-
 static void ppp_start(struct net_device *dev)
 {
 	struct ppp *ppp = get_ppp(dev);
@@ -610,10 +619,9 @@ static void ppp_start(struct net_device *dev)
 
 	for (i = 0; i < IDX_COUNT; i++) {
 		struct proto *proto = &ppp->protos[i];
+
 		proto->dev = dev;
-		init_timer(&proto->timer);
-		proto->timer.function = ppp_timer;
-		proto->timer.data = (unsigned long)proto;
+		timer_setup(&proto->timer, ppp_timer, 0);
 		proto->state = CLOSED;
 	}
 	ppp->protos[IDX_LCP].pid = PID_LCP;
@@ -647,17 +655,17 @@ static const struct header_ops ppp_header_ops = {
 	.create = ppp_hard_header,
 };
 
-static int ppp_ioctl(struct net_device *dev, struct ifreq *ifr)
+static int ppp_ioctl(struct net_device *dev, struct if_settings *ifs)
 {
 	hdlc_device *hdlc = dev_to_hdlc(dev);
 	struct ppp *ppp;
 	int result;
 
-	switch (ifr->ifr_settings.type) {
+	switch (ifs->type) {
 	case IF_GET_PROTO:
 		if (dev_to_hdlc(dev)->proto != &proto)
 			return -EINVAL;
-		ifr->ifr_settings.type = IF_PROTO_PPP;
+		ifs->type = IF_PROTO_PPP;
 		return 0; /* return protocol only, no settable parameters */
 
 	case IF_PROTO_PPP:
@@ -669,7 +677,8 @@ static int ppp_ioctl(struct net_device *dev, struct ifreq *ifr)
 
 		/* no settable parameters */
 
-		result = hdlc->attach(dev, ENCODING_NRZ,PARITY_CRC16_PR1_CCITT);
+		result = hdlc->attach(dev, ENCODING_NRZ,
+				      PARITY_CRC16_PR1_CCITT);
 		if (result)
 			return result;
 
@@ -688,6 +697,7 @@ static int ppp_ioctl(struct net_device *dev, struct ifreq *ifr)
 		dev->hard_header_len = sizeof(struct hdlc_header);
 		dev->header_ops = &ppp_header_ops;
 		dev->type = ARPHRD_PPP;
+		call_netdevice_notifiers(NETDEV_POST_TYPE_CHANGE, dev);
 		netif_dormant_on(dev);
 		return 0;
 	}
@@ -695,22 +705,20 @@ static int ppp_ioctl(struct net_device *dev, struct ifreq *ifr)
 	return -EINVAL;
 }
 
-
-static int __init mod_init(void)
+static int __init hdlc_ppp_init(void)
 {
 	skb_queue_head_init(&tx_queue);
 	register_hdlc_protocol(&proto);
 	return 0;
 }
 
-static void __exit mod_exit(void)
+static void __exit hdlc_ppp_exit(void)
 {
 	unregister_hdlc_protocol(&proto);
 }
 
-
-module_init(mod_init);
-module_exit(mod_exit);
+module_init(hdlc_ppp_init);
+module_exit(hdlc_ppp_exit);
 
 MODULE_AUTHOR("Krzysztof Halasa <khc@pm.waw.pl>");
 MODULE_DESCRIPTION("PPP protocol support for generic HDLC");

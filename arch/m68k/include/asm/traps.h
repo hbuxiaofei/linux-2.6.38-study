@@ -18,11 +18,11 @@
 
 typedef void (*e_vector)(void);
 extern e_vector vectors[];
+extern e_vector *_ramvec;
 
 asmlinkage void auto_inthandler(void);
 asmlinkage void user_inthandler(void);
 asmlinkage void bad_inthandler(void);
-extern void init_vectors(void);
 
 #endif
 
@@ -266,6 +266,10 @@ struct frame {
 	    } fmtb;
     } un;
 };
+
+#ifdef CONFIG_M68040
+asmlinkage void berr_040cleanup(struct frame *fp);
+#endif
 
 #endif /* __ASSEMBLY__ */
 

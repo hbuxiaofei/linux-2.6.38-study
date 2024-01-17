@@ -1,12 +1,9 @@
-/**
+// SPDX-License-Identifier: GPL-2.0-only
+/*
  *  arch/arm/mac-sa1100/jornada720_ssp.c
  *
  *  Copyright (C) 2006/2007 Kristoffer Ericson <Kristoffer.Ericson@gmail.com>
  *   Copyright (C) 2006 Filip Zyzniewski <filip.zyzniewski@tefnet.pl>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  *
  *  SSP driver for the HP Jornada 710/720/728
  */
@@ -18,6 +15,7 @@
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/sched.h>
+#include <linux/io.h>
 
 #include <mach/hardware.h>
 #include <mach/jornada720.h>
@@ -28,11 +26,12 @@ static unsigned long jornada_ssp_flags;
 
 /**
  * jornada_ssp_reverse - reverses input byte
+ * @byte: input byte to reverse
  *
- * we need to reverse all data we recieve from the mcu due to its physical location
+ * we need to reverse all data we receive from the mcu due to its physical location
  * returns : 01110111 -> 11101110
  */
-u8 inline jornada_ssp_reverse(u8 byte)
+inline u8 jornada_ssp_reverse(u8 byte)
 {
 	return
 		((0x80 & byte) >> 7) |
@@ -48,6 +47,7 @@ EXPORT_SYMBOL(jornada_ssp_reverse);
 
 /**
  * jornada_ssp_byte - waits for ready ssp bus and sends byte
+ * @byte: input byte to transmit
  *
  * waits for fifo buffer to clear and then transmits, if it doesn't then we will
  * timeout after <timeout> rounds. Needs mcu running before its called.
@@ -79,6 +79,7 @@ EXPORT_SYMBOL(jornada_ssp_byte);
 
 /**
  * jornada_ssp_inout - decide if input is command or trading byte
+ * @byte: input byte to send (may be %TXDUMMY)
  *
  * returns : (jornada_ssp_byte(byte)) on success
  *         : %-ETIMEDOUT on timeout failure
@@ -129,7 +130,7 @@ void jornada_ssp_end(void)
 };
 EXPORT_SYMBOL(jornada_ssp_end);
 
-static int __devinit jornada_ssp_probe(struct platform_device *dev)
+static int jornada_ssp_probe(struct platform_device *dev)
 {
 	int ret;
 
@@ -179,7 +180,7 @@ static int __devinit jornada_ssp_probe(struct platform_device *dev)
 
 static int jornada_ssp_remove(struct platform_device *dev)
 {
-	/* Note that this doesnt actually remove the driver, since theres nothing to remove
+	/* Note that this doesn't actually remove the driver, since theres nothing to remove
 	 * It just makes sure everything is turned off */
 	GPSR = GPIO_GPIO25;
 	ssp_exit();
@@ -198,3 +199,5 @@ static int __init jornada_ssp_init(void)
 {
 	return platform_driver_register(&jornadassp_driver);
 }
+
+module_init(jornada_ssp_init);

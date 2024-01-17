@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Interrupt handling for IPR-based IRQ.
  *
@@ -11,10 +12,6 @@
  *	On-chip supporting modules for SH7709/SH7709A/SH7729.
  *	Hitachi SolutionEngine external I/O:
  *		MS7709SE01, MS7709ASE01, and MS7750SE01
- *
- * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file "COPYING" in the main directory of this archive
- * for more details.
  */
 #include <linux/init.h>
 #include <linux/interrupt.h>
@@ -74,9 +71,9 @@ void register_ipr_controller(struct ipr_desc *desc)
 		}
 
 		disable_irq_nosync(p->irq);
-		set_irq_chip_and_handler_name(p->irq, &desc->chip,
-				      handle_level_irq, "level");
-		set_irq_chip_data(p->irq, p);
+		irq_set_chip_and_handler_name(p->irq, &desc->chip,
+					      handle_level_irq, "level");
+		irq_set_chip_data(p->irq, p);
 		disable_ipr_irq(irq_get_irq_data(p->irq));
 	}
 }

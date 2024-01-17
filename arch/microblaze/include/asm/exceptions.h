@@ -1,24 +1,16 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Preliminary support for HW exception handing for Microblaze
  *
  * Copyright (C) 2008-2009 Michal Simek <monstr@monstr.eu>
  * Copyright (C) 2008-2009 PetaLogix
  * Copyright (C) 2005 John Williams <jwilliams@itee.uq.edu.au>
- *
- * This file is subject to the terms and conditions of the GNU General
- * Public License. See the file COPYING in the main directory of this
- * archive for more details.
  */
 
 #ifndef _ASM_MICROBLAZE_EXCEPTIONS_H
 #define _ASM_MICROBLAZE_EXCEPTIONS_H
 
 #ifdef __KERNEL__
-
-#ifndef CONFIG_MMU
-#define EX_HANDLER_STACK_SIZ	(4*19)
-#endif
-
 #ifndef __ASSEMBLY__
 
 /* Macros to enable and disable HW exceptions in the MSR */
@@ -65,6 +57,9 @@
 
 asmlinkage void full_exception(struct pt_regs *regs, unsigned int type,
 							int fsr, int addr);
+
+asmlinkage void sw_exception(struct pt_regs *regs);
+void bad_page_fault(struct pt_regs *regs, unsigned long address, int sig);
 
 void die(const char *str, struct pt_regs *fp, long err);
 void _exception(int signr, struct pt_regs *regs, int code, unsigned long addr);

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * APEI Error Record Serialization Table debug support
  *
@@ -8,19 +9,6 @@
  *
  * Copyright 2010 Intel Corp.
  *   Author: Huang Ying <ying.huang@intel.com>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License version
- * 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #include <linux/kernel.h>
@@ -33,7 +21,7 @@
 
 #define ERST_DBG_PFX			"ERST DBG: "
 
-#define ERST_DBG_RECORD_LEN_MAX		4096
+#define ERST_DBG_RECORD_LEN_MAX		0x4000
 
 static void *erst_dbg_buf;
 static unsigned int erst_dbg_buf_len;
@@ -43,10 +31,25 @@ static DEFINE_MUTEX(erst_dbg_mutex);
 
 static int erst_dbg_open(struct inode *inode, struct file *file)
 {
+	int rc, *pos;
+
 	if (erst_disable)
 		return -ENODEV;
 
+	pos = (int *)&file->private_data;
+
+	rc = erst_get_record_id_begin(pos);
+	if (rc)
+		return rc;
+
 	return nonseekable_open(inode, file);
+}
+
+static int erst_dbg_release(struct inode *inode, struct file *file)
+{
+	erst_get_record_id_end();
+
+	return 0;
 }
 
 static long erst_dbg_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
@@ -79,34 +82,45 @@ static long erst_dbg_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 static ssize_t erst_dbg_read(struct file *filp, char __user *ubuf,
 			     size_t usize, loff_t *off)
 {
-	int rc;
+	int rc, *pos;
 	ssize_t len = 0;
 	u64 id;
 
-	if (*off != 0)
+	if (*off)
 		return -EINVAL;
 
 	if (mutex_lock_interruptible(&erst_dbg_mutex) != 0)
 		return -EINTR;
 
+	pos = (int *)&filp->private_data;
+
 retry_next:
-	rc = erst_get_next_record_id(&id);
+	rc = erst_get_record_id_next(pos, &id);
 	if (rc)
 		goto out;
 	/* no more record */
-	if (id == APEI_ERST_INVALID_RECORD_ID)
+	if (id == APEI_ERST_INVALID_RECORD_ID) {
+		/*
+		 * If the persistent store is empty initially, the function
+		 * 'erst_read' below will return "-ENOENT" value. This causes
+		 * 'retry_next' label is entered again. The returned value
+		 * should be zero indicating the read operation is EOF.
+		 */
+		len = 0;
+
 		goto out;
+	}
 retry:
-	rc = len = erst_read(id, erst_dbg_buf, erst_dbg_buf_len);
+	rc = len = erst_read_record(id, erst_dbg_buf, erst_dbg_buf_len,
+			erst_dbg_buf_len, NULL);
 	/* The record may be cleared by others, try read next record */
 	if (rc == -ENOENT)
 		goto retry_next;
 	if (rc < 0)
 		goto out;
 	if (len > ERST_DBG_RECORD_LEN_MAX) {
-		pr_warning(ERST_DBG_PFX
-			   "Record (ID: 0x%llx) length is too long: %zd\n",
-			   id, len);
+		pr_warn(ERST_DBG_PFX
+			"Record (ID: 0x%llx) length is too long: %zd\n", id, len);
 		rc = -EIO;
 		goto out;
 	}
@@ -181,6 +195,7 @@ out:
 static const struct file_operations erst_dbg_ops = {
 	.owner		= THIS_MODULE,
 	.open		= erst_dbg_open,
+	.release	= erst_dbg_release,
 	.read		= erst_dbg_read,
 	.write		= erst_dbg_write,
 	.unlocked_ioctl	= erst_dbg_ioctl,
@@ -195,6 +210,10 @@ static struct miscdevice erst_dbg_dev = {
 
 static __init int erst_dbg_init(void)
 {
+	if (erst_disable) {
+		pr_info(ERST_DBG_PFX "ERST support is disabled.\n");
+		return -ENODEV;
+	}
 	return misc_register(&erst_dbg_dev);
 }
 

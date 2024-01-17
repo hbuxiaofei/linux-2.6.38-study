@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  *	Definitions for the UDP-Lite (RFC 3828) code.
  */
@@ -5,6 +6,7 @@
 #define _UDPLITE_H
 
 #include <net/ip6_checksum.h>
+#include <net/udp.h>
 
 /* UDP-Lite socket options */
 #define UDPLITE_SEND_CSCOV   10 /* sender partial coverage (as sent)      */
@@ -19,14 +21,8 @@ extern struct udp_table		udplite_table;
 static __inline__ int udplite_getfrag(void *from, char *to, int  offset,
 				      int len, int odd, struct sk_buff *skb)
 {
-	return memcpy_fromiovecend(to, (struct iovec *) from, offset, len);
-}
-
-/* Designate sk as UDP-Lite socket */
-static inline int udplite_sk_init(struct sock *sk)
-{
-	udp_sk(sk)->pcflag = UDPLITE_BIT;
-	return 0;
+	struct msghdr *msg = from;
+	return copy_from_iter_full(to, len, &msg->msg_iter) ? 0 : -EFAULT;
 }
 
 /*
@@ -40,7 +36,7 @@ static inline int udplite_checksum_init(struct sk_buff *skb, struct udphdr *uh)
          * checksum. UDP-Lite (like IPv6) mandates checksums, hence packets
          * with a zero checksum field are illegal.                            */
 	if (uh->check == 0) {
-		LIMIT_NETDEBUG(KERN_DEBUG "UDPLITE: zeroed checksum field\n");
+		net_dbg_ratelimited("UDPLite: zeroed checksum field\n");
 		return 1;
 	}
 
@@ -52,8 +48,8 @@ static inline int udplite_checksum_init(struct sk_buff *skb, struct udphdr *uh)
 		/*
 		 * Coverage length violates RFC 3828: log and discard silently.
 		 */
-		LIMIT_NETDEBUG(KERN_DEBUG "UDPLITE: bad csum coverage %d/%d\n",
-			       cscov, skb->len);
+		net_dbg_ratelimited("UDPLite: bad csum coverage %d/%d\n",
+				    cscov, skb->len);
 		return 1;
 
 	} else if (cscov < skb->len) {
@@ -61,61 +57,30 @@ static inline int udplite_checksum_init(struct sk_buff *skb, struct udphdr *uh)
 		UDP_SKB_CB(skb)->cscov = cscov;
 		if (skb->ip_summed == CHECKSUM_COMPLETE)
 			skb->ip_summed = CHECKSUM_NONE;
+		skb->csum_valid = 0;
         }
 
 	return 0;
 }
 
-static inline int udplite_sender_cscov(struct udp_sock *up, struct udphdr *uh)
+/* Fast-path computation of checksum. Socket may not be locked. */
+static inline __wsum udplite_csum(struct sk_buff *skb)
 {
-	int cscov = up->len;
+	const struct udp_sock *up = udp_sk(skb->sk);
+	const int off = skb_transport_offset(skb);
+	int len = skb->len - off;
 
-	/*
-	 * Sender has set `partial coverage' option on UDP-Lite socket
-	 */
-	if (up->pcflag & UDPLITE_SEND_CC)    {
-		if (up->pcslen < up->len) {
-		/* up->pcslen == 0 means that full coverage is required,
-		 * partial coverage only if  0 < up->pcslen < up->len */
-			if (0 < up->pcslen) {
-			       cscov = up->pcslen;
-			}
-			uh->len = htons(up->pcslen);
-		}
-	/*
-	 * NOTE: Causes for the error case  `up->pcslen > up->len':
-	 *        (i)  Application error (will not be penalized).
-	 *       (ii)  Payload too big for send buffer: data is split
-	 *             into several packets, each with its own header.
-	 *             In this case (e.g. last segment), coverage may
-	 *             exceed packet length.
-	 *       Since packets with coverage length > packet length are
-	 *       illegal, we fall back to the defaults here.
-	 */
+	if ((up->pcflag & UDPLITE_SEND_CC) && up->pcslen < len) {
+		if (0 < up->pcslen)
+			len = up->pcslen;
+		udp_hdr(skb)->len = htons(up->pcslen);
 	}
-	return cscov;
-}
-
-static inline __wsum udplite_csum_outgoing(struct sock *sk, struct sk_buff *skb)
-{
-	int cscov = udplite_sender_cscov(udp_sk(sk), udp_hdr(skb));
-	__wsum csum = 0;
-
 	skb->ip_summed = CHECKSUM_NONE;     /* no HW support for checksumming */
 
-	skb_queue_walk(&sk->sk_write_queue, skb) {
-		const int off = skb_transport_offset(skb);
-		const int len = skb->len - off;
-
-		csum = skb_checksum(skb, off, (cscov > len)? len : cscov, csum);
-
-		if ((cscov -= len) <= 0)
-			break;
-	}
-	return csum;
+	return skb_checksum(skb, off, len, 0);
 }
 
-extern void	udplite4_register(void);
-extern int 	udplite_get_port(struct sock *sk, unsigned short snum,
-			int (*scmp)(const struct sock *, const struct sock *));
+void udplite4_register(void);
+int udplite_get_port(struct sock *sk, unsigned short snum,
+		     int (*scmp)(const struct sock *, const struct sock *));
 #endif	/* _UDPLITE_H */

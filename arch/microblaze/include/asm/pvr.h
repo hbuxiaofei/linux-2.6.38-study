@@ -1,13 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * Support for the MicroBlaze PVR (Processor Version Register)
  *
  * Copyright (C) 2009 - 2011 Michal Simek <monstr@monstr.eu>
  * Copyright (C) 2007 John Williams <john.williams@petalogix.com>
  * Copyright (C) 2007 - 2011 PetaLogix
- *
- * This file is subject to the terms and conditions of the GNU General
- * Public License. See the file COPYING in the main directory of this
- * archive for more details.
  */
 
 #ifndef _ASM_MICROBLAZE_PVR_H
@@ -111,15 +108,15 @@ struct pvr_s {
 /* Target family PVR mask */
 #define PVR10_TARGET_FAMILY_MASK	0xFF000000
 
-/* MMU descrtiption */
+/* MMU description */
 #define PVR11_USE_MMU			0xC0000000
 #define PVR11_MMU_ITLB_SIZE		0x38000000
 #define PVR11_MMU_DTLB_SIZE		0x07000000
 #define PVR11_MMU_TLB_ACCESS		0x00C00000
 #define PVR11_MMU_ZONES			0x003C0000
+#define PVR11_MMU_PRIVINS		0x00010000
 /* MSR Reset value PVR mask */
 #define PVR11_MSR_RESET_VALUE_MASK	0x000007FF
-
 
 /* PVR access macros */
 #define PVR_IS_FULL(_pvr)	(_pvr.pvr[0] & PVR0_PVR_FULL_MASK)
@@ -216,6 +213,7 @@ struct pvr_s {
 #define PVR_MMU_DTLB_SIZE(_pvr)		(_pvr.pvr[11] & PVR11_MMU_DTLB_SIZE)
 #define PVR_MMU_TLB_ACCESS(_pvr)	(_pvr.pvr[11] & PVR11_MMU_TLB_ACCESS)
 #define PVR_MMU_ZONES(_pvr)		(_pvr.pvr[11] & PVR11_MMU_ZONES)
+#define PVR_MMU_PRIVINS(pvr)		(pvr.pvr[11] & PVR11_MMU_PRIVINS)
 
 /* endian */
 #define PVR_ENDIAN(_pvr)	(_pvr.pvr[0] & PVR0_ENDI)

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Kernel execution entry point code.
  *
@@ -21,24 +22,21 @@
  * 	   	debbie_chu@mvista.com
  *    Copyright 2002-2005 MontaVista Software, Inc.
  *      PowerPC 44x support, Matt Porter <mporter@kernel.crashing.org>
- *
- * This program is free software; you can redistribute  it and/or modify it
- * under  the terms of  the GNU General  Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
  */
 
 #include <linux/init.h>
+#include <linux/pgtable.h>
 #include <asm/processor.h>
 #include <asm/page.h>
 #include <asm/mmu.h>
-#include <asm/pgtable.h>
 #include <asm/cputable.h>
 #include <asm/thread_info.h>
 #include <asm/ppc_asm.h>
 #include <asm/asm-offsets.h>
 #include <asm/ptrace.h>
 #include <asm/synch.h>
+#include <asm/export.h>
+#include <asm/code-patching-asm.h>
 #include "head_booke.h"
 
 
@@ -54,22 +52,44 @@
  *
  */
 	__HEAD
-_ENTRY(_stext);
-_ENTRY(_start);
+_GLOBAL(_stext);
+_GLOBAL(_start);
 	/*
 	 * Reserve a word at a fixed location to store the address
 	 * of abatron_pteptrs
 	 */
 	nop
-/*
- * Save parameters we are passed
- */
-	mr	r31,r3
-	mr	r30,r4
-	mr	r29,r5
-	mr	r28,r6
-	mr	r27,r7
+	mr	r31,r3		/* save device tree ptr */
 	li	r24,0		/* CPU number */
+
+#ifdef CONFIG_RELOCATABLE
+/*
+ * Relocate ourselves to the current runtime address.
+ * This is called only by the Boot CPU.
+ * "relocate" is called with our current runtime virutal
+ * address.
+ * r21 will be loaded with the physical runtime address of _stext
+ */
+	bcl	20,31,$+4			/* Get our runtime address */
+0:	mflr	r21				/* Make it accessible */
+	addis	r21,r21,(_stext - 0b)@ha
+	addi	r21,r21,(_stext - 0b)@l 	/* Get our current runtime base */
+
+	/*
+	 * We have the runtime (virutal) address of our base.
+	 * We calculate our shift of offset from a 256M page.
+	 * We could map the 256M page we belong to at PAGE_OFFSET and
+	 * get going from there.
+	 */
+	lis	r4,KERNELBASE@h
+	ori	r4,r4,KERNELBASE@l
+	rlwinm	r6,r21,0,4,31			/* r6 = PHYS_START % 256M */
+	rlwinm	r5,r4,0,4,31			/* r5 = KERNELBASE % 256M */
+	subf	r3,r5,r6			/* r3 = r6 - r5 */
+	add	r3,r4,r3			/* Required Virutal Address */
+
+	bl	relocate
+#endif
 
 	bl	init_cpu_state
 
@@ -93,14 +113,97 @@ _ENTRY(_start);
 
 	bl	early_init
 
+#ifdef CONFIG_RELOCATABLE
+	/*
+	 * Relocatable kernel support based on processing of dynamic
+	 * relocation entries.
+	 *
+	 * r25 will contain RPN/ERPN for the start address of memory
+	 * r21 will contain the current offset of _stext
+	 */
+	lis	r3,kernstart_addr@ha
+	la	r3,kernstart_addr@l(r3)
+
+	/*
+	 * Compute the kernstart_addr.
+	 * kernstart_addr => (r6,r8)
+	 * kernstart_addr & ~0xfffffff => (r6,r7)
+	 */
+	rlwinm	r6,r25,0,28,31	/* ERPN. Bits 32-35 of Address */
+	rlwinm	r7,r25,0,0,3	/* RPN - assuming 256 MB page size */
+	rlwinm	r8,r21,0,4,31	/* r8 = (_stext & 0xfffffff) */
+	or	r8,r7,r8	/* Compute the lower 32bit of kernstart_addr */
+
+	/* Store kernstart_addr */
+	stw	r6,0(r3)	/* higher 32bit */
+	stw	r8,4(r3)	/* lower 32bit  */
+
+	/*
+	 * Compute the virt_phys_offset :
+	 * virt_phys_offset = stext.run - kernstart_addr
+	 *
+	 * stext.run = (KERNELBASE & ~0xfffffff) + (kernstart_addr & 0xfffffff)
+	 * When we relocate, we have :
+	 *
+	 *	(kernstart_addr & 0xfffffff) = (stext.run & 0xfffffff)
+	 *
+	 * hence:
+	 *  virt_phys_offset = (KERNELBASE & ~0xfffffff) - (kernstart_addr & ~0xfffffff)
+	 *
+	 */
+
+	/* KERNELBASE&~0xfffffff => (r4,r5) */
+	li	r4, 0		/* higer 32bit */
+	lis	r5,KERNELBASE@h
+	rlwinm	r5,r5,0,0,3	/* Align to 256M, lower 32bit */
+
+	/*
+	 * 64bit subtraction.
+	 */
+	subfc	r5,r7,r5
+	subfe	r4,r6,r4
+
+	/* Store virt_phys_offset */
+	lis	r3,virt_phys_offset@ha
+	la	r3,virt_phys_offset@l(r3)
+
+	stw	r4,0(r3)
+	stw	r5,4(r3)
+
+#elif defined(CONFIG_DYNAMIC_MEMSTART)
+	/*
+	 * Mapping based, page aligned dynamic kernel loading.
+	 *
+	 * r25 will contain RPN/ERPN for the start address of memory
+	 *
+	 * Add the difference between KERNELBASE and PAGE_OFFSET to the
+	 * start of physical memory to get kernstart_addr.
+	 */
+	lis	r3,kernstart_addr@ha
+	la	r3,kernstart_addr@l(r3)
+
+	lis	r4,KERNELBASE@h
+	ori	r4,r4,KERNELBASE@l
+	lis	r5,PAGE_OFFSET@h
+	ori	r5,r5,PAGE_OFFSET@l
+	subf	r4,r5,r4
+
+	rlwinm	r6,r25,0,28,31	/* ERPN */
+	rlwinm	r7,r25,0,0,3	/* RPN - assuming 256 MB page size */
+	add	r7,r7,r4
+
+	stw	r6,0(r3)
+	stw	r7,4(r3)
+#endif
+
 /*
  * Decide what sort of machine this is and initialize the MMU.
  */
-	mr	r3,r31
-	mr	r4,r30
-	mr	r5,r29
-	mr	r6,r28
-	mr	r7,r27
+#ifdef CONFIG_KASAN
+	bl	kasan_early_init
+#endif
+	li	r3,0
+	mr	r4,r31
 	bl	machine_init
 	bl	MMU_init
 
@@ -146,10 +249,11 @@ _ENTRY(_start);
 
 interrupt_base:
 	/* Critical Input Interrupt */
-	CRITICAL_EXCEPTION(0x0100, CriticalInput, unknown_exception)
+	CRITICAL_EXCEPTION(0x0100, CRITICAL, CriticalInput, unknown_exception)
 
 	/* Machine Check Interrupt */
-	CRITICAL_EXCEPTION(0x0200, MachineCheck, machine_check_exception)
+	CRITICAL_EXCEPTION(0x0200, MACHINE_CHECK, MachineCheck, \
+			   machine_check_exception)
 	MCHECK_EXCEPTION(0x0210, MachineCheckA, machine_check_exception)
 
 	/* Data Storage Interrupt */
@@ -159,7 +263,7 @@ interrupt_base:
 	INSTRUCTION_STORAGE_EXCEPTION
 
 	/* External Input Interrupt */
-	EXCEPTION(0x0500, ExternalInput, do_IRQ, EXC_XFER_LITE)
+	EXCEPTION(0x0500, BOOKE_INTERRUPT_EXTERNAL, ExternalInput, do_IRQ)
 
 	/* Alignment Interrupt */
 	ALIGNMENT_EXCEPTION
@@ -171,29 +275,30 @@ interrupt_base:
 #ifdef CONFIG_PPC_FPU
 	FP_UNAVAILABLE_EXCEPTION
 #else
-	EXCEPTION(0x2010, FloatingPointUnavailable, unknown_exception, EXC_XFER_EE)
+	EXCEPTION(0x2010, BOOKE_INTERRUPT_FP_UNAVAIL, \
+		  FloatingPointUnavailable, unknown_exception)
 #endif
 	/* System Call Interrupt */
 	START_EXCEPTION(SystemCall)
-	NORMAL_EXCEPTION_PROLOG
-	EXC_XFER_EE_LITE(0x0c00, DoSyscall)
+	SYSCALL_ENTRY   0xc00 BOOKE_INTERRUPT_SYSCALL
 
-	/* Auxillary Processor Unavailable Interrupt */
-	EXCEPTION(0x2020, AuxillaryProcessorUnavailable, unknown_exception, EXC_XFER_EE)
+	/* Auxiliary Processor Unavailable Interrupt */
+	EXCEPTION(0x2020, BOOKE_INTERRUPT_AP_UNAVAIL, \
+		  AuxillaryProcessorUnavailable, unknown_exception)
 
 	/* Decrementer Interrupt */
 	DECREMENTER_EXCEPTION
 
 	/* Fixed Internal Timer Interrupt */
 	/* TODO: Add FIT support */
-	EXCEPTION(0x1010, FixedIntervalTimer, unknown_exception, EXC_XFER_EE)
+	EXCEPTION(0x1010, BOOKE_INTERRUPT_FIT, FixedIntervalTimer, unknown_exception)
 
 	/* Watchdog Timer Interrupt */
 	/* TODO: Add watchdog support */
 #ifdef CONFIG_BOOKE_WDT
-	CRITICAL_EXCEPTION(0x1020, WatchdogTimer, WatchdogException)
+	CRITICAL_EXCEPTION(0x1020, WATCHDOG, WatchdogTimer, WatchdogException)
 #else
-	CRITICAL_EXCEPTION(0x1020, WatchdogTimer, unknown_exception)
+	CRITICAL_EXCEPTION(0x1020, WATCHDOG, WatchdogTimer, unknown_exception)
 #endif
 
 	/* Data TLB Error Interrupt */
@@ -229,6 +334,10 @@ interrupt_base:
 	mfspr	r12,SPRN_MMUCR
 	mfspr   r13,SPRN_PID		/* Get PID */
 	rlwimi	r12,r13,0,24,31		/* Set TID */
+#ifdef CONFIG_PPC_KUAP
+	cmpwi	r13,0
+	beq	2f			/* KUAP Fault */
+#endif
 
 4:
 	mtspr	SPRN_MMUCR,r12
@@ -269,15 +378,14 @@ interrupt_base:
 	/* Load the next available TLB index */
 	lwz	r13,tlb_44x_index@l(r10)
 
-	bne	2f			/* Bail if permission mismach */
+	bne	2f			/* Bail if permission mismatch */
 
 	/* Increment, rollover, and store TLB index */
 	addi	r13,r13,1
 
+	patch_site 0f, patch__tlb_44x_hwater_D
 	/* Compare with watermark (instruction gets patched) */
-	.globl tlb_44x_patch_hwater_D
-tlb_44x_patch_hwater_D:
-	cmpwi	0,r13,1			/* reserve entries */
+0:	cmpwi	0,r13,1			/* reserve entries */
 	ble	5f
 	li	r13,0
 5:
@@ -340,6 +448,10 @@ tlb_44x_patch_hwater_D:
 	mfspr	r12,SPRN_MMUCR
 	mfspr   r13,SPRN_PID		/* Get PID */
 	rlwimi	r12,r13,0,24,31		/* Set TID */
+#ifdef CONFIG_PPC_KUAP
+	cmpwi	r13,0
+	beq	2f			/* KUAP Fault */
+#endif
 
 4:
 	mtspr	SPRN_MMUCR,r12
@@ -365,15 +477,14 @@ tlb_44x_patch_hwater_D:
 	/* Load the next available TLB index */
 	lwz	r13,tlb_44x_index@l(r10)
 
-	bne	2f			/* Bail if permission mismach */
+	bne	2f			/* Bail if permission mismatch */
 
 	/* Increment, rollover, and store TLB index */
 	addi	r13,r13,1
 
+	patch_site 0f, patch__tlb_44x_hwater_I
 	/* Compare with watermark (instruction gets patched) */
-	.globl tlb_44x_patch_hwater_I
-tlb_44x_patch_hwater_I:
-	cmpwi	0,r13,1			/* reserve entries */
+0:	cmpwi	0,r13,1			/* reserve entries */
 	ble	5f
 	li	r13,0
 5:
@@ -429,6 +540,7 @@ finish_tlb_load_44x:
 	andi.	r10,r12,_PAGE_USER		/* User page ? */
 	beq	1f				/* nope, leave U bits empty */
 	rlwimi	r11,r11,3,26,28			/* yes, copy S bits to U */
+	rlwinm	r11,r11,0,~PPC44x_TLB_SX	/* Clear SX if User page */
 1:	tlbwe	r11,r13,PPC44x_TLB_ATTRIB	/* Write ATTRIB */
 
 	/* Done...restore registers and get out of here.
@@ -468,6 +580,10 @@ finish_tlb_load_44x:
 3:	mfspr	r11,SPRN_SPRG3
 	lwz	r11,PGDIR(r11)
 	mfspr   r12,SPRN_PID		/* Get PID */
+#ifdef CONFIG_PPC_KUAP
+	cmpwi	r12,0
+	beq	2f			/* KUAP Fault */
+#endif
 4:	mtspr	SPRN_MMUCR,r12		/* Set MMUCR */
 
 	/* Mask of required permission bits. Note that while we
@@ -565,6 +681,10 @@ finish_tlb_load_44x:
 3:	mfspr	r11,SPRN_SPRG_THREAD
 	lwz	r11,PGDIR(r11)
 	mfspr   r12,SPRN_PID		/* Get PID */
+#ifdef CONFIG_PPC_KUAP
+	cmpwi	r12,0
+	beq	2f			/* KUAP Fault */
+#endif
 4:	mtspr	SPRN_MMUCR,r12		/* Set MMUCR */
 
 	/* Make up the required permissions */
@@ -640,6 +760,7 @@ finish_tlb_load_47x:
 	andi.	r10,r12,_PAGE_USER		/* User page ? */
 	beq	1f				/* nope, leave U bits empty */
 	rlwimi	r11,r11,3,26,28			/* yes, copy S bits to U */
+	rlwinm	r11,r11,0,~PPC47x_TLB2_SX	/* Clear SX if User page */
 1:	tlbwe	r11,r13,2
 
 	/* Done...restore registers and get out of here.
@@ -662,6 +783,8 @@ finish_tlb_load_47x:
 	 */
 	DEBUG_CRIT_EXCEPTION
 
+interrupt_end:
+
 /*
  * Global functions
  */
@@ -676,38 +799,6 @@ _GLOBAL(__fixup_440A_mcheck)
 	blr
 
 /*
- * extern void giveup_altivec(struct task_struct *prev)
- *
- * The 44x core does not have an AltiVec unit.
- */
-_GLOBAL(giveup_altivec)
-	blr
-
-/*
- * extern void giveup_fpu(struct task_struct *prev)
- *
- * The 44x core does not have an FPU.
- */
-#ifndef CONFIG_PPC_FPU
-_GLOBAL(giveup_fpu)
-	blr
-#endif
-
-_GLOBAL(set_context)
-
-#ifdef CONFIG_BDI_SWITCH
-	/* Context switch the PTE pointer for the Abatron BDI2000.
-	 * The PGDIR is the second parameter.
-	 */
-	lis	r5, abatron_pteptrs@h
-	ori	r5, r5, abatron_pteptrs@l
-	stw	r4, 0x4(r5)
-#endif
-	mtspr	SPRN_PID,r3
-	isync			/* Force context change */
-	blr
-
-/*
  * Init CPU state. This is called at boot time or for secondary CPUs
  * to setup initial TLB entries, setup IVORs, etc...
  *
@@ -715,9 +806,11 @@ _GLOBAL(set_context)
 _GLOBAL(init_cpu_state)
 	mflr	r22
 #ifdef CONFIG_PPC_47x
-	/* We use the PVR to differenciate 44x cores from 476 */
+	/* We use the PVR to differentiate 44x cores from 476 */
 	mfspr	r3,SPRN_PVR
 	srwi	r3,r3,16
+	cmplwi	cr0,r3,PVR_476FPE@h
+	beq	head_start_47x
 	cmplwi	cr0,r3,PVR_476@h
 	beq	head_start_47x
 	cmplwi	cr0,r3,PVR_476_ISS@h
@@ -770,7 +863,7 @@ _GLOBAL(init_cpu_state)
 wmmucr:	mtspr	SPRN_MMUCR,r3			/* Put MMUCR */
 	sync
 
-	bl	invstr				/* Find our address */
+	bcl	20,31,$+4			/* Find our address */
 invstr:	mflr	r5				/* Make it accessible */
 	tlbsx	r23,0,r5			/* Find entry we are in */
 	li	r4,0				/* Start at TLB entry 0 */
@@ -786,12 +879,29 @@ skpinv:	addi	r4,r4,1				/* Increment */
 /*
  * Configure and load pinned entry into TLB slot 63.
  */
+#ifdef CONFIG_NONSTATIC_KERNEL
+	/*
+	 * In case of a NONSTATIC_KERNEL we reuse the TLB XLAT
+	 * entries of the initial mapping set by the boot loader.
+	 * The XLAT entry is stored in r25
+	 */
+
+	/* Read the XLAT entry for our current mapping */
+	tlbre	r25,r23,PPC44x_TLB_XLAT
+
+	lis	r3,KERNELBASE@h
+	ori	r3,r3,KERNELBASE@l
+
+	/* Use our current RPN entry */
+	mr	r4,r25
+#else
 
 	lis	r3,PAGE_OFFSET@h
 	ori	r3,r3,PAGE_OFFSET@l
 
 	/* Kernel is at the base of RAM */
 	li r4, 0			/* Load the kernel physical address */
+#endif
 
 	/* Load the kernel PID = 0 */
 	li	r0,0
@@ -909,10 +1019,10 @@ _GLOBAL(start_secondary_47x)
 
 	/* Now we can get our task struct and real stack pointer */
 
-	/* Get current_thread_info and current */
-	lis	r1,secondary_ti@ha
-	lwz	r1,secondary_ti@l(r1)
-	lwz	r2,TI_TASK(r1)
+	/* Get current's stack and current */
+	lis	r2,secondary_current@ha
+	lwz	r2,secondary_current@l(r2)
+	lwz	r1,TASK_STACK(r2)
 
 	/* Current stack pointer */
 	addi	r1,r1,THREAD_SIZE-STACK_FRAME_OVERHEAD
@@ -945,7 +1055,7 @@ head_start_47x:
 	sync
 
 	/* Find the entry we are running from */
-	bl	1f
+	bcl	20,31,$+4
 1:	mflr	r23
 	tlbsx	r23,0,r23
 	tlbre	r24,r23,0
@@ -1001,9 +1111,6 @@ clear_utlb_entry:
 	lis	r3,PAGE_OFFSET@h
 	ori	r3,r3,PAGE_OFFSET@l
 
-	/* Kernel is at the base of RAM */
-	li r4, 0			/* Load the kernel physical address */
-
 	/* Load the kernel PID = 0 */
 	li	r0,0
 	mtspr	SPRN_PID,r0
@@ -1013,9 +1120,8 @@ clear_utlb_entry:
 	clrrwi	r3,r3,12		/* Mask off the effective page number */
 	ori	r3,r3,PPC47x_TLB0_VALID | PPC47x_TLB0_256M
 
-	/* Word 1 */
-	clrrwi	r4,r4,12		/* Mask off the real page number */
-					/* ERPN is 0 for first 4GB page */
+	/* Word 1 - use r25.  RPN is the same as the original entry */
+
 	/* Word 2 */
 	li	r5,0
 	ori	r5,r5,PPC47x_TLB2_S_RWX
@@ -1026,7 +1132,7 @@ clear_utlb_entry:
 	/* We write to way 0 and bolted 0 */
 	lis	r0,0x8800
 	tlbwe	r3,r0,0
-	tlbwe	r4,r0,1
+	tlbwe	r25,r0,1
 	tlbwe	r5,r0,2
 
 /*
@@ -1104,10 +1210,12 @@ clear_utlb_entry:
 
 	/* We configure icbi to invalidate 128 bytes at a time since the
 	 * current 32-bit kernel code isn't too happy with icache != dcache
-	 * block size
+	 * block size. We also disable the BTAC as this can cause errors
+	 * in some circumstances (see IBM Erratum 47).
 	 */
 	mfspr	r3,SPRN_CCR0
 	oris	r3,r3,0x0020
+	ori	r3,r3,0x0040
 	mtspr	SPRN_CCR0,r3
 	isync
 
@@ -1124,38 +1232,19 @@ head_start_common:
 	lis	r4,interrupt_base@h	/* IVPR only uses the high 16-bits */
 	mtspr	SPRN_IVPR,r4
 
-	addis	r22,r22,KERNELBASE@h
+	/*
+	 * If the kernel was loaded at a non-zero 256 MB page, we need to
+	 * mask off the most significant 4 bits to get the relative address
+	 * from the start of physical memory
+	 */
+	rlwinm	r22,r22,0,4,31
+	addis	r22,r22,PAGE_OFFSET@h
 	mtlr	r22
 	isync
 	blr
 
-/*
- * We put a few things here that have to be page-aligned. This stuff
- * goes at the beginning of the data segment, which is page-aligned.
- */
-	.data
-	.align	PAGE_SHIFT
-	.globl	sdata
-sdata:
-	.globl	empty_zero_page
-empty_zero_page:
-	.space	PAGE_SIZE
-
-/*
- * To support >32-bit physical addresses, we use an 8KB pgdir.
- */
-	.globl	swapper_pg_dir
-swapper_pg_dir:
-	.space	PGD_TABLE_SIZE
-
-/*
- * Room for two PTE pointers, usually the kernel and current user pointers
- * to their respective root page table.
- */
-abatron_pteptrs:
-	.space	8
-
 #ifdef CONFIG_SMP
+	.data
 	.align	12
 temp_boot_stack:
 	.space	1024

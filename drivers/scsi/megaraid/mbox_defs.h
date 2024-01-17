@@ -1,16 +1,11 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  *
  *			Linux MegaRAID Unified device driver
  *
  * Copyright (c) 2003-2004  LSI Logic Corporation.
  *
- *	   This program is free software; you can redistribute it and/or
- *	   modify it under the terms of the GNU General Public License
- *	   as published by the Free Software Foundation; either version
- *	   2 of the License, or (at your option) any later version.
- *
  * FILE		: mbox_defs.h
- *
  */
 #ifndef _MRAID_MBOX_DEFS_H_
 #define _MRAID_MBOX_DEFS_H_
@@ -660,7 +655,7 @@ typedef struct {
  * @lparam	: logical drives parameters
  * @span	: span
  *
- * 8-LD logical drive with upto 8 spans
+ * 8-LD logical drive with up to 8 spans
  */
 typedef struct {
 	logdrv_param_t	lparam;
@@ -673,7 +668,7 @@ typedef struct {
  * @lparam	: logical drives parameters
  * @span	: span
  *
- * 8-LD logical drive with upto 4 spans
+ * 8-LD logical drive with up to 4 spans
  */
 typedef struct {
 	logdrv_param_t	lparam;
@@ -720,7 +715,7 @@ typedef struct {
  * @ldrv	: logical drives information
  * @pdrv	: physical drives information
  *
- * Disk array for 8LD logical drives with upto 8 spans
+ * Disk array for 8LD logical drives with up to 8 spans
  */
 typedef struct {
 	uint8_t			numldrv;
@@ -737,7 +732,7 @@ typedef struct {
  * @ldrv	: logical drives information
  * @pdrv	: physical drives information
  *
- * Disk array for 8LD logical drives with upto 4 spans
+ * Disk array for 8LD logical drives with up to 4 spans
  */
 typedef struct {
 	uint8_t			numldrv;
@@ -786,5 +781,3 @@ typedef struct {
 } __attribute__ ((packed)) mbox_sgl32;
 
 #endif		// _MRAID_MBOX_DEFS_H_
-
-/* vim: set ts=8 sw=8 tw=78: */

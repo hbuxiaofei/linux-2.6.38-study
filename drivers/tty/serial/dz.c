@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * dz.c: Serial port driver for DECstations equipped
  *       with the DZ chipset.
@@ -28,10 +29,6 @@
 
 #undef DEBUG_DZ
 
-#if defined(CONFIG_SERIAL_DZ_CONSOLE) && defined(CONFIG_MAGIC_SYSRQ)
-#define SUPPORT_SYSRQ
-#endif
-
 #include <linux/bitops.h>
 #include <linux/compiler.h>
 #include <linux/console.h>
@@ -47,11 +44,11 @@
 #include <linux/serial_core.h>
 #include <linux/sysrq.h>
 #include <linux/tty.h>
+#include <linux/tty_flip.h>
 
-#include <asm/atomic.h>
+#include <linux/atomic.h>
+#include <linux/io.h>
 #include <asm/bootinfo.h>
-#include <asm/io.h>
-#include <asm/system.h>
 
 #include <asm/dec/interrupts.h>
 #include <asm/dec/kn01.h>
@@ -118,7 +115,7 @@ static void dz_out(struct dz_port *dport, unsigned offset, u16 value)
  * rs_stop () and rs_start ()
  *
  * These routines are called before setting or resetting
- * tty->stopped. They enable or disable transmitter interrupts,
+ * tty->flow.stopped. They enable or disable transmitter interrupts,
  * as necessary.
  * ------------------------------------------------------------
  */
@@ -149,11 +146,6 @@ static void dz_stop_rx(struct uart_port *uport)
 
 	dport->cflag &= ~DZ_RXENAB;
 	dz_out(dport, DZ_LPR, dport->cflag);
-}
-
-static void dz_enable_ms(struct uart_port *uport)
-{
-	/* nothing to do */
 }
 
 /*
@@ -187,7 +179,6 @@ static inline void dz_receive_chars(struct dz_mux *mux)
 {
 	struct uart_port *uport;
 	struct dz_port *dport = &mux->dport[0];
-	struct tty_struct *tty = NULL;
 	struct uart_icount *icount;
 	int lines_rx[DZ_NB_PORT] = { [0 ... DZ_NB_PORT - 1] = 0 };
 	unsigned char ch, flag;
@@ -197,7 +188,6 @@ static inline void dz_receive_chars(struct dz_mux *mux)
 	while ((status = dz_in(dport, DZ_RBUF)) & DZ_DVAL) {
 		dport = &mux->dport[LINE(status)];
 		uport = &dport->port;
-		tty = uport->state->port.tty;	/* point to the proper dev */
 
 		ch = UCHAR(status);		/* grab the char */
 		flag = TTY_NORMAL;
@@ -249,7 +239,7 @@ static inline void dz_receive_chars(struct dz_mux *mux)
 	}
 	for (i = 0; i < DZ_NB_PORT; i++)
 		if (lines_rx[i])
-			tty_flip_buffer_push(mux->dport[i].port.state->port.tty);
+			tty_flip_buffer_push(&mux->dport[i].port.state->port);
 }
 
 /*
@@ -569,7 +559,7 @@ static void dz_reset(struct dz_port *dport)
 }
 
 static void dz_set_termios(struct uart_port *uport, struct ktermios *termios,
-			   struct ktermios *old_termios)
+			   const struct ktermios *old_termios)
 {
 	struct dz_port *dport = to_dport(uport);
 	unsigned long flags;
@@ -602,9 +592,12 @@ static void dz_set_termios(struct uart_port *uport, struct ktermios *termios,
 
 	baud = uart_get_baud_rate(uport, termios, old_termios, 50, 9600);
 	bflag = dz_encode_baud_rate(baud);
-	if (bflag < 0)	{			/* Try to keep unchanged.  */
-		baud = uart_get_baud_rate(uport, old_termios, NULL, 50, 9600);
-		bflag = dz_encode_baud_rate(baud);
+	if (bflag < 0)	{
+		if (old_termios) {
+			/* Keep unchanged. */
+			baud = tty_termios_baud_rate(old_termios);
+			bflag = dz_encode_baud_rate(baud);
+		}
 		if (bflag < 0)	{		/* Resort to 9600.  */
 			baud = 9600;
 			bflag = DZ_B9600;
@@ -627,7 +620,7 @@ static void dz_set_termios(struct uart_port *uport, struct ktermios *termios,
 	dport->port.read_status_mask = DZ_OERR;
 	if (termios->c_iflag & INPCK)
 		dport->port.read_status_mask |= DZ_FERR | DZ_PERR;
-	if (termios->c_iflag & (BRKINT | PARMRK))
+	if (termios->c_iflag & (IGNBRK | BRKINT | PARMRK))
 		dport->port.read_status_mask |= DZ_BREAK;
 
 	/* characters to ignore */
@@ -683,7 +676,7 @@ static void dz_release_port(struct uart_port *uport)
 static int dz_map_port(struct uart_port *uport)
 {
 	if (!uport->membase)
-		uport->membase = ioremap_nocache(uport->mapbase,
+		uport->membase = ioremap(uport->mapbase,
 						 dec_kn_slot_size);
 	if (!uport->membase) {
 		printk(KERN_ERR "dz: Cannot map MMIO\n");
@@ -746,14 +739,13 @@ static int dz_verify_port(struct uart_port *uport, struct serial_struct *ser)
 	return ret;
 }
 
-static struct uart_ops dz_ops = {
+static const struct uart_ops dz_ops = {
 	.tx_empty	= dz_tx_empty,
 	.get_mctrl	= dz_get_mctrl,
 	.set_mctrl	= dz_set_mctrl,
 	.stop_tx	= dz_stop_tx,
 	.start_tx	= dz_start_tx,
 	.stop_rx	= dz_stop_rx,
-	.enable_ms	= dz_enable_ms,
 	.break_ctl	= dz_break_ctl,
 	.startup	= dz_startup,
 	.shutdown	= dz_shutdown,
@@ -794,6 +786,7 @@ static void __init dz_init_ports(void)
 		uport->ops	= &dz_ops;
 		uport->line	= line;
 		uport->mapbase	= base;
+		uport->has_sysrq = IS_ENABLED(CONFIG_SERIAL_DZ_CONSOLE);
 	}
 }
 
@@ -812,7 +805,7 @@ static void __init dz_init_ports(void)
  * restored.  Welcome to the world of PDP-11!
  * -------------------------------------------------------------------
  */
-static void dz_console_putchar(struct uart_port *uport, int ch)
+static void dz_console_putchar(struct uart_port *uport, unsigned char ch)
 {
 	struct dz_port *dport = to_dport(uport);
 	unsigned long flags;

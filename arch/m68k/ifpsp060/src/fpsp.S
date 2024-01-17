@@ -10191,7 +10191,7 @@ xdnrm_con:
 xdnrm_sd:
 	mov.l		%a1,-(%sp)
 	tst.b		LOCAL_EX(%a0)		# is denorm pos or neg?
-	smi.b		%d1			# set d0 accodingly
+	smi.b		%d1			# set d0 accordingly
 	bsr.l		unf_sub
 	mov.l		(%sp)+,%a1
 xdnrm_exit:
@@ -10990,7 +10990,7 @@ src_qnan_m:
 # routines where an instruction is selected by an index into
 # a large jump table corresponding to a given instruction which
 # has been decoded. Flow continues here where we now decode
-# further accoding to the source operand type.
+# further according to the source operand type.
 #
 
 	global		fsinh
@@ -11813,7 +11813,7 @@ fmul_unfl_ena:
 	bne.b		fmul_unfl_ena_sd	# no, sgl or dbl
 
 # if the rnd mode is anything but RZ, then we have to re-do the above
-# multiplication becuase we used RZ for all.
+# multiplication because we used RZ for all.
 	fmov.l		L_SCR3(%a6),%fpcr	# set FPCR
 
 fmul_unfl_ena_cont:
@@ -18095,7 +18095,7 @@ fscc_mem_op:
 
 	rts
 
-# addresing mode is post-increment. write the result byte. if the write
+# addressing mode is post-increment. write the result byte. if the write
 # fails then don't update the address register. if write passes then
 # call inc_areg() to update the address register.
 fscc_mem_inc:
@@ -20876,7 +20876,7 @@ dst_get_dupper:
 	swap		%d0			# d0 now in upper word
 	lsl.l		&0x4,%d0		# d0 in proper place for dbl prec exp
 	tst.b		FTEMP_EX(%a0)		# test sign
-	bpl.b		dst_get_dman		# if postive, go process mantissa
+	bpl.b		dst_get_dman		# if positive, go process mantissa
 	bset		&0x1f,%d0		# if negative, set sign
 dst_get_dman:
 	mov.l		FTEMP_HI(%a0),%d1	# get ms mantissa
@@ -22943,7 +22943,7 @@ tbl_ovfl_result:
 #	FP_SRC(a6) = packed operand now as a binary FP number		#
 #									#
 # ALGORITHM ***********************************************************	#
-#	Get the correct <ea> whihc is the value on the exception stack	#
+#	Get the correct <ea> which is the value on the exception stack	#
 # frame w/ maybe a correction factor if the <ea> is -(an) or (an)+.	#
 # Then, fetch the operand from memory. If the fetch fails, exit		#
 # through facc_in_x().							#
@@ -23196,14 +23196,14 @@ m_sign:
 #
 #  1. Branch on the sign of the adjusted exponent.
 #  2p.(positive exp)
-#   2. Check M16 and the digits in lwords 2 and 3 in decending order.
+#   2. Check M16 and the digits in lwords 2 and 3 in descending order.
 #   3. Add one for each zero encountered until a non-zero digit.
 #   4. Subtract the count from the exp.
 #   5. Check if the exp has crossed zero in #3 above; make the exp abs
 #	   and set SE.
 #	6. Multiply the mantissa by 10**count.
 #  2n.(negative exp)
-#   2. Check the digits in lwords 3 and 2 in decending order.
+#   2. Check the digits in lwords 3 and 2 in descending order.
 #   3. Add one for each zero encountered until a non-zero digit.
 #   4. Add the count to the exp.
 #   5. Check if the exp has crossed zero in #3 above; clear SE.
@@ -24096,7 +24096,7 @@ do_fint12:
 #      A6.  This test occurs only on the first pass.  If the
 #      result is exactly 10^LEN, decrement ILOG and divide
 #      the mantissa by 10.  The calculation of 10^LEN cannot
-#      be inexact, since all powers of ten upto 10^27 are exact
+#      be inexact, since all powers of ten up to 10^27 are exact
 #      in extended precision, so the use of a previous power-of-ten
 #      table will introduce no error.
 #

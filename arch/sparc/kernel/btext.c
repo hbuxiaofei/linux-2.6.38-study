@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Procedures for drawing on the screen early on in the boot process.
  *
@@ -6,7 +7,6 @@
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/init.h>
-#include <linux/module.h>
 #include <linux/console.h>
 
 #include <asm/btext.h>
@@ -24,7 +24,7 @@ static void draw_byte_32(unsigned char *bits, unsigned int *base, int rb);
 static void draw_byte_16(unsigned char *bits, unsigned int *base, int rb);
 static void draw_byte_8(unsigned char *bits, unsigned int *base, int rb);
 
-#define __force_data __attribute__((__section__(".data")))
+#define __force_data __section(".data")
 
 static int g_loc_X __force_data;
 static int g_loc_Y __force_data;
@@ -138,7 +138,7 @@ static void scrollscreen(void)
 }
 #endif /* ndef NO_SCROLL */
 
-void btext_drawchar(char c)
+static void btext_drawchar(char c)
 {
 	int cline = 0;
 #ifdef NO_SCROLL

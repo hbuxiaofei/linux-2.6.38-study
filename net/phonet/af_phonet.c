@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * File: af_phonet.c
  *
@@ -5,22 +6,8 @@
  *
  * Copyright (C) 2008 Nokia Corporation.
  *
- * Contact: Remi Denis-Courmont <remi.denis-courmont@nokia.com>
- * Original author: Sakari Ailus <sakari.ailus@nokia.com>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA
- * 02110-1301 USA
+ * Authors: Sakari Ailus <sakari.ailus@nokia.com>
+ *          Rémi Denis-Courmont
  */
 
 #include <linux/kernel.h>
@@ -35,11 +22,11 @@
 #include <net/phonet/pn_dev.h>
 
 /* Transport protocol registration */
-static struct phonet_protocol *proto_tab[PHONET_NPROTO] __read_mostly;
+static const struct phonet_protocol *proto_tab[PHONET_NPROTO] __read_mostly;
 
-static struct phonet_protocol *phonet_proto_get(unsigned int protocol)
+static const struct phonet_protocol *phonet_proto_get(unsigned int protocol)
 {
-	struct phonet_protocol *pp;
+	const struct phonet_protocol *pp;
 
 	if (protocol >= PHONET_NPROTO)
 		return NULL;
@@ -53,7 +40,7 @@ static struct phonet_protocol *phonet_proto_get(unsigned int protocol)
 	return pp;
 }
 
-static inline void phonet_proto_put(struct phonet_protocol *pp)
+static inline void phonet_proto_put(const struct phonet_protocol *pp)
 {
 	module_put(pp->prot->owner);
 }
@@ -65,7 +52,7 @@ static int pn_socket_create(struct net *net, struct socket *sock, int protocol,
 {
 	struct sock *sk;
 	struct pn_sock *pn;
-	struct phonet_protocol *pnp;
+	const struct phonet_protocol *pnp;
 	int err;
 
 	if (!capable(CAP_SYS_ADMIN))
@@ -97,7 +84,7 @@ static int pn_socket_create(struct net *net, struct socket *sock, int protocol,
 		goto out;
 	}
 
-	sk = sk_alloc(net, PF_PHONET, GFP_KERNEL, pnp->prot);
+	sk = sk_alloc(net, PF_PHONET, GFP_KERNEL, pnp->prot, kern);
 	if (sk == NULL) {
 		err = -ENOMEM;
 		goto out;
@@ -110,6 +97,7 @@ static int pn_socket_create(struct net *net, struct socket *sock, int protocol,
 	sk->sk_protocol = protocol;
 	pn = pn_sk(sk);
 	pn->sobject = 0;
+	pn->dobject = 0;
 	pn->resource = 0;
 	sk->sk_prot->init(sk);
 	err = 0;
@@ -128,7 +116,7 @@ static const struct net_proto_family phonet_proto_family = {
 /* Phonet device header operations */
 static int pn_header_create(struct sk_buff *skb, struct net_device *dev,
 				unsigned short type, const void *daddr,
-				const void *saddr, unsigned len)
+				const void *saddr, unsigned int len)
 {
 	u8 *media = skb_push(skb, 1);
 
@@ -148,7 +136,7 @@ static int pn_header_parse(const struct sk_buff *skb, unsigned char *haddr)
 	return 1;
 }
 
-struct header_ops phonet_header_ops = {
+const struct header_ops phonet_header_ops = {
 	.create = pn_header_create,
 	.parse = pn_header_parse,
 };
@@ -158,7 +146,7 @@ EXPORT_SYMBOL(phonet_header_ops);
  * Prepends an ISI header and sends a datagram.
  */
 static int pn_send(struct sk_buff *skb, struct net_device *dev,
-			u16 dst, u16 src, u8 res, u8 irq)
+			u16 dst, u16 src, u8 res)
 {
 	struct phonethdr *ph;
 	int err;
@@ -194,11 +182,7 @@ static int pn_send(struct sk_buff *skb, struct net_device *dev,
 	if (skb->pkt_type == PACKET_LOOPBACK) {
 		skb_reset_mac_header(skb);
 		skb_orphan(skb);
-		if (irq)
-			netif_rx(skb);
-		else
-			netif_rx_ni(skb);
-		err = 0;
+		err = netif_rx(skb) ? -ENOBUFS : 0;
 	} else {
 		err = dev_hard_header(skb, dev, ntohs(skb->protocol),
 					NULL, NULL, skb->len);
@@ -207,6 +191,8 @@ static int pn_send(struct sk_buff *skb, struct net_device *dev,
 			goto drop;
 		}
 		err = dev_queue_xmit(skb);
+		if (unlikely(err > 0))
+			err = net_xmit_errno(err);
 	}
 
 	return err;
@@ -228,7 +214,7 @@ static int pn_raw_send(const void *data, int len, struct net_device *dev,
 	skb_reserve(skb, MAX_PHONET_HEADER);
 	__skb_put(skb, len);
 	skb_copy_to_linear_data(skb, data, len);
-	return pn_send(skb, dev, dst, src, res, 1);
+	return pn_send(skb, dev, dst, src, res);
 }
 
 /*
@@ -242,8 +228,18 @@ int pn_skb_send(struct sock *sk, struct sk_buff *skb,
 	struct net_device *dev;
 	struct pn_sock *pn = pn_sk(sk);
 	int err;
-	u16 src;
-	u8 daddr = pn_sockaddr_get_addr(target), saddr = PN_NO_ADDR;
+	u16 src, dst;
+	u8 daddr, saddr, res;
+
+	src = pn->sobject;
+	if (target != NULL) {
+		dst = pn_sockaddr_get_object(target);
+		res = pn_sockaddr_get_resource(target);
+	} else {
+		dst = pn->dobject;
+		res = pn->resource;
+	}
+	daddr = pn_addr(dst);
 
 	err = -EHOSTUNREACH;
 	if (sk->sk_bound_dev_if)
@@ -251,10 +247,9 @@ int pn_skb_send(struct sock *sk, struct sk_buff *skb,
 	else if (phonet_address_lookup(net, daddr) == 0) {
 		dev = phonet_device_get(net);
 		skb->pkt_type = PACKET_LOOPBACK;
-	} else if (pn_sockaddr_get_object(target) == 0) {
+	} else if (dst == 0) {
 		/* Resource routing (small race until phonet_rcv()) */
-		struct sock *sk = pn_find_sock_by_res(net,
-							target->spn_resource);
+		struct sock *sk = pn_find_sock_by_res(net, res);
 		if (sk)	{
 			sock_put(sk);
 			dev = phonet_device_get(net);
@@ -271,19 +266,16 @@ int pn_skb_send(struct sock *sk, struct sk_buff *skb,
 	if (saddr == PN_NO_ADDR)
 		goto drop;
 
-	src = pn->sobject;
 	if (!pn_addr(src))
 		src = pn_object(saddr, pn_obj(src));
 
-	err = pn_send(skb, dev, pn_sockaddr_get_object(target),
-			src, pn_sockaddr_get_resource(target), 0);
+	err = pn_send(skb, dev, dst, src, res);
 	dev_put(dev);
 	return err;
 
 drop:
 	kfree_skb(skb);
-	if (dev)
-		dev_put(dev);
+	dev_put(dev);
 	return err;
 }
 EXPORT_SYMBOL(pn_skb_send);
@@ -371,6 +363,10 @@ static int phonet_rcv(struct sk_buff *skb, struct net_device *dev,
 	struct sockaddr_pn sa;
 	u16 len;
 
+	skb = skb_share_check(skb, GFP_ATOMIC);
+	if (!skb)
+		return NET_RX_DROP;
+
 	/* check we have at least a full Phonet header */
 	if (!pskb_pull(skb, sizeof(struct phonethdr)))
 		goto out;
@@ -420,16 +416,17 @@ static int phonet_rcv(struct sk_buff *skb, struct net_device *dev,
 
 		out_dev = phonet_route_output(net, pn_sockaddr_get_addr(&sa));
 		if (!out_dev) {
-			LIMIT_NETDEBUG(KERN_WARNING"No Phonet route to %02X\n",
-					pn_sockaddr_get_addr(&sa));
+			net_dbg_ratelimited("No Phonet route to %02X\n",
+					    pn_sockaddr_get_addr(&sa));
 			goto out;
 		}
 
 		__skb_push(skb, sizeof(struct phonethdr));
 		skb->dev = out_dev;
 		if (out_dev == dev) {
-			LIMIT_NETDEBUG(KERN_ERR"Phonet loop to %02X on %s\n",
-					pn_sockaddr_get_addr(&sa), dev->name);
+			net_dbg_ratelimited("Phonet loop to %02X on %s\n",
+					    pn_sockaddr_get_addr(&sa),
+					    dev->name);
 			goto out_dev;
 		}
 		/* Some drivers (e.g. TUN) do not allocate HW header space */
@@ -459,7 +456,7 @@ static struct packet_type phonet_packet_type __read_mostly = {
 static DEFINE_MUTEX(proto_tab_lock);
 
 int __init_or_module phonet_proto_register(unsigned int protocol,
-						struct phonet_protocol *pp)
+				const struct phonet_protocol *pp)
 {
 	int err = 0;
 
@@ -481,11 +478,12 @@ int __init_or_module phonet_proto_register(unsigned int protocol,
 }
 EXPORT_SYMBOL(phonet_proto_register);
 
-void phonet_proto_unregister(unsigned int protocol, struct phonet_protocol *pp)
+void phonet_proto_unregister(unsigned int protocol,
+			const struct phonet_protocol *pp)
 {
 	mutex_lock(&proto_tab_lock);
 	BUG_ON(proto_tab[protocol] != pp);
-	rcu_assign_pointer(proto_tab[protocol], NULL);
+	RCU_INIT_POINTER(proto_tab[protocol], NULL);
 	mutex_unlock(&proto_tab_lock);
 	synchronize_rcu();
 	proto_unregister(pp->prot);

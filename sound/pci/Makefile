@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0
 #
 # Makefile for ALSA
 # Copyright (c) 2001 by Jaroslav Kysela <perex@perex.cz>
@@ -64,6 +65,7 @@ obj-$(CONFIG_SND) += \
 	ca0106/ \
 	cs46xx/ \
 	cs5535audio/ \
+	lola/ \
 	lx6464es/ \
 	echoaudio/ \
 	emu10k1/ \

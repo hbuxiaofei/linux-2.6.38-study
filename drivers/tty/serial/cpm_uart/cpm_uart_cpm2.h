@@ -1,6 +1,5 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
- * linux/drivers/serial/cpm_uart/cpm_uart_cpm2.h
- *
  * Driver for CPM (SCC/SMC) serial ports
  *
  * definitions for cpm2

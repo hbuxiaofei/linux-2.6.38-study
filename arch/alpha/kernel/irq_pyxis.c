@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *	linux/arch/alpha/kernel/irq_pyxis.c
  *
@@ -102,9 +103,10 @@ init_pyxis_irqs(unsigned long ignore_mask)
 	for (i = 16; i < 48; ++i) {
 		if ((ignore_mask >> i) & 1)
 			continue;
-		set_irq_chip_and_handler(i, &pyxis_irq_type, handle_level_irq);
+		irq_set_chip_and_handler(i, &pyxis_irq_type, handle_level_irq);
 		irq_set_status_flags(i, IRQ_LEVEL);
 	}
 
-	setup_irq(16+7, &isa_cascade_irqaction);
+	if (request_irq(16 + 7, no_action, 0, "isa-cascade", NULL))
+		pr_err("Failed to register isa-cascade interrupt\n");
 }

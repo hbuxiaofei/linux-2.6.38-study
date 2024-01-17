@@ -23,6 +23,12 @@
 #include <linux/types.h>
 #include <asm/byteorder.h>
 
+const u8 md5_zero_message_hash[MD5_DIGEST_SIZE] = {
+	0xd4, 0x1d, 0x8c, 0xd9, 0x8f, 0x00, 0xb2, 0x04,
+	0xe9, 0x80, 0x09, 0x98, 0xec, 0xf8, 0x42, 0x7e,
+};
+EXPORT_SYMBOL_GPL(md5_zero_message_hash);
+
 #define F1(x, y, z)	(z ^ (x & (y ^ z)))
 #define F2(x, y, z)	F1(z, x, y)
 #define F3(x, y, z)	(x ^ y ^ z)
@@ -31,7 +37,7 @@
 #define MD5STEP(f, w, x, y, z, in, s) \
 	(w += f(x, y, z) + in, w = (w<<s | w>>(32-s)) + x)
 
-static void md5_transform(u32 *hash, u32 const *in)
+static void md5_transform(__u32 *hash, __u32 const *in)
 {
 	u32 a, b, c, d;
 
@@ -114,23 +120,6 @@ static void md5_transform(u32 *hash, u32 const *in)
 	hash[3] += d;
 }
 
-/* XXX: this stuff can be optimized */
-static inline void le32_to_cpu_array(u32 *buf, unsigned int words)
-{
-	while (words--) {
-		__le32_to_cpus(buf);
-		buf++;
-	}
-}
-
-static inline void cpu_to_le32_array(u32 *buf, unsigned int words)
-{
-	while (words--) {
-		__cpu_to_le32s(buf);
-		buf++;
-	}
-}
-
 static inline void md5_transform_helper(struct md5_state *ctx)
 {
 	le32_to_cpu_array(ctx->block, sizeof(ctx->block) / sizeof(u32));
@@ -141,10 +130,10 @@ static int md5_init(struct shash_desc *desc)
 {
 	struct md5_state *mctx = shash_desc_ctx(desc);
 
-	mctx->hash[0] = 0x67452301;
-	mctx->hash[1] = 0xefcdab89;
-	mctx->hash[2] = 0x98badcfe;
-	mctx->hash[3] = 0x10325476;
+	mctx->hash[0] = MD5_H0;
+	mctx->hash[1] = MD5_H1;
+	mctx->hash[2] = MD5_H2;
+	mctx->hash[3] = MD5_H3;
 	mctx->byte_count = 0;
 
 	return 0;
@@ -236,10 +225,10 @@ static struct shash_alg alg = {
 	.descsize	=	sizeof(struct md5_state),
 	.statesize	=	sizeof(struct md5_state),
 	.base		=	{
-		.cra_name	=	"md5",
-		.cra_flags	=	CRYPTO_ALG_TYPE_SHASH,
-		.cra_blocksize	=	MD5_HMAC_BLOCK_SIZE,
-		.cra_module	=	THIS_MODULE,
+		.cra_name	 =	"md5",
+		.cra_driver_name =	"md5-generic",
+		.cra_blocksize	 =	MD5_HMAC_BLOCK_SIZE,
+		.cra_module	 =	THIS_MODULE,
 	}
 };
 
@@ -253,8 +242,9 @@ static void __exit md5_mod_fini(void)
 	crypto_unregister_shash(&alg);
 }
 
-module_init(md5_mod_init);
+subsys_initcall(md5_mod_init);
 module_exit(md5_mod_fini);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("MD5 Message Digest Algorithm");
+MODULE_ALIAS_CRYPTO("md5");

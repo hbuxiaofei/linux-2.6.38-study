@@ -1,10 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * OMFS (as used by RIO Karma) file operations.
  * Copyright (C) 2005 Bob Copeland <me@bobcopeland.com>
- * Released under GPL v2.
  */
 
-#include <linux/version.h>
 #include <linux/module.h>
 #include <linux/fs.h>
 #include <linux/buffer_head.h>
@@ -147,8 +146,7 @@ static int omfs_grow_extent(struct inode *inode, struct omfs_extent *oe,
 			be64_to_cpu(entry->e_blocks);
 
 		if (omfs_allocate_block(inode->i_sb, new_block)) {
-			entry->e_blocks =
-				cpu_to_be64(be64_to_cpu(entry->e_blocks) + 1);
+			be64_add_cpu(&entry->e_blocks, 1);
 			terminator->e_blocks = ~(cpu_to_be64(
 				be64_to_cpu(~terminator->e_blocks) + 1));
 			goto out;
@@ -178,7 +176,7 @@ static int omfs_grow_extent(struct inode *inode, struct omfs_extent *oe,
 		be64_to_cpu(~terminator->e_blocks) + (u64) new_count));
 
 	/* write in new entry */
-	oe->e_extent_count = cpu_to_be32(1 + be32_to_cpu(oe->e_extent_count));
+	be32_add_cpu(&oe->e_extent_count, 1);
 
 out:
 	*ret_block = new_block;
@@ -222,7 +220,7 @@ static int omfs_get_block(struct inode *inode, sector_t block,
 	struct buffer_head *bh;
 	sector_t next, offset;
 	int ret;
-	u64 uninitialized_var(new_block);
+	u64 new_block;
 	u32 max_extents;
 	int extent_count;
 	struct omfs_extent *oe;
@@ -286,15 +284,14 @@ out:
 	return ret;
 }
 
-static int omfs_readpage(struct file *file, struct page *page)
+static int omfs_read_folio(struct file *file, struct folio *folio)
 {
-	return block_read_full_page(page, omfs_get_block);
+	return block_read_full_folio(folio, omfs_get_block);
 }
 
-static int omfs_readpages(struct file *file, struct address_space *mapping,
-		struct list_head *pages, unsigned nr_pages)
+static void omfs_readahead(struct readahead_control *rac)
 {
-	return mpage_readpages(mapping, pages, nr_pages, omfs_get_block);
+	mpage_readahead(rac, omfs_get_block);
 }
 
 static int omfs_writepage(struct page *page, struct writeback_control *wbc)
@@ -308,19 +305,25 @@ omfs_writepages(struct address_space *mapping, struct writeback_control *wbc)
 	return mpage_writepages(mapping, wbc, omfs_get_block);
 }
 
+static void omfs_write_failed(struct address_space *mapping, loff_t to)
+{
+	struct inode *inode = mapping->host;
+
+	if (to > inode->i_size) {
+		truncate_pagecache(inode, inode->i_size);
+		omfs_truncate(inode);
+	}
+}
+
 static int omfs_write_begin(struct file *file, struct address_space *mapping,
-			loff_t pos, unsigned len, unsigned flags,
+			loff_t pos, unsigned len,
 			struct page **pagep, void **fsdata)
 {
 	int ret;
 
-	ret = block_write_begin(mapping, pos, len, flags, pagep,
-				omfs_get_block);
-	if (unlikely(ret)) {
-		loff_t isize = mapping->host->i_size;
-		if (pos + len > isize)
-			vmtruncate(mapping->host, isize);
-	}
+	ret = block_write_begin(mapping, pos, len, pagep, omfs_get_block);
+	if (unlikely(ret))
+		omfs_write_failed(mapping, pos + len);
 
 	return ret;
 }
@@ -332,47 +335,48 @@ static sector_t omfs_bmap(struct address_space *mapping, sector_t block)
 
 const struct file_operations omfs_file_operations = {
 	.llseek = generic_file_llseek,
-	.read = do_sync_read,
-	.write = do_sync_write,
-	.aio_read = generic_file_aio_read,
-	.aio_write = generic_file_aio_write,
+	.read_iter = generic_file_read_iter,
+	.write_iter = generic_file_write_iter,
 	.mmap = generic_file_mmap,
 	.fsync = generic_file_fsync,
 	.splice_read = generic_file_splice_read,
 };
 
-static int omfs_setattr(struct dentry *dentry, struct iattr *attr)
+static int omfs_setattr(struct user_namespace *mnt_userns,
+			struct dentry *dentry, struct iattr *attr)
 {
-	struct inode *inode = dentry->d_inode;
+	struct inode *inode = d_inode(dentry);
 	int error;
 
-	error = inode_change_ok(inode, attr);
+	error = setattr_prepare(&init_user_ns, dentry, attr);
 	if (error)
 		return error;
 
 	if ((attr->ia_valid & ATTR_SIZE) &&
 	    attr->ia_size != i_size_read(inode)) {
-		error = vmtruncate(inode, attr->ia_size);
+		error = inode_newsize_ok(inode, attr->ia_size);
 		if (error)
 			return error;
+		truncate_setsize(inode, attr->ia_size);
+		omfs_truncate(inode);
 	}
 
-	setattr_copy(inode, attr);
+	setattr_copy(&init_user_ns, inode, attr);
 	mark_inode_dirty(inode);
 	return 0;
 }
 
 const struct inode_operations omfs_file_inops = {
 	.setattr = omfs_setattr,
-	.truncate = omfs_truncate
 };
 
 const struct address_space_operations omfs_aops = {
-	.readpage = omfs_readpage,
-	.readpages = omfs_readpages,
+	.dirty_folio = block_dirty_folio,
+	.invalidate_folio = block_invalidate_folio,
+	.read_folio = omfs_read_folio,
+	.readahead = omfs_readahead,
 	.writepage = omfs_writepage,
 	.writepages = omfs_writepages,
-	.sync_page = block_sync_page,
 	.write_begin = omfs_write_begin,
 	.write_end = generic_write_end,
 	.bmap = omfs_bmap,

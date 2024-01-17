@@ -15,11 +15,12 @@
  */
 
 #include <linux/init.h>
+#include <linux/of_address.h>
+#include <linux/of_fdt.h>
 #include <linux/of_platform.h>
 
 #include <asm/io.h>
 #include <asm/machdep.h>
-#include <asm/system.h>
 #include <asm/time.h>
 #include <asm/8xx_immap.h>
 #include <asm/cpm1.h>
@@ -28,6 +29,7 @@
 
 #include "mpc86xads.h"
 #include "mpc8xx.h"
+#include "pic.h"
 
 struct cpm_pin {
 	int port, pin, flags;
@@ -117,11 +119,10 @@ static void __init mpc86xads_setup_arch(void)
 
 static int __init mpc86xads_probe(void)
 {
-	unsigned long root = of_get_flat_dt_root();
-	return of_flat_dt_is_compatible(root, "fsl,mpc866ads");
+	return of_machine_is_compatible("fsl,mpc866ads");
 }
 
-static struct of_device_id __initdata of_bus_ids[] = {
+static const struct of_device_id of_bus_ids[] __initconst = {
 	{ .name = "soc", },
 	{ .name = "cpm", },
 	{ .name = "localbus", },
@@ -140,7 +141,7 @@ define_machine(mpc86x_ads) {
 	.name			= "MPC86x ADS",
 	.probe			= mpc86xads_probe,
 	.setup_arch		= mpc86xads_setup_arch,
-	.init_IRQ		= mpc8xx_pics_init,
+	.init_IRQ		= mpc8xx_pic_init,
 	.get_irq		= mpc8xx_get_irq,
 	.restart		= mpc8xx_restart,
 	.calibrate_decr		= mpc8xx_calibrate_decr,

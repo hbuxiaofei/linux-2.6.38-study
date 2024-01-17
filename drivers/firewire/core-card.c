@@ -1,19 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (C) 2005-2007  Kristian Hoegsberg <krh@bitplanet.net>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software Foundation,
- * Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
  */
 
 #include <linux/bug.h>
@@ -32,10 +19,26 @@
 #include <linux/spinlock.h>
 #include <linux/workqueue.h>
 
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 #include <asm/byteorder.h>
 
 #include "core.h"
+
+#define define_fw_printk_level(func, kern_level)		\
+void func(const struct fw_card *card, const char *fmt, ...)	\
+{								\
+	struct va_format vaf;					\
+	va_list args;						\
+								\
+	va_start(args, fmt);					\
+	vaf.fmt = fmt;						\
+	vaf.va = &args;						\
+	printk(kern_level KBUILD_MODNAME " %s: %pV",		\
+	       dev_name(card->device), &vaf);			\
+	va_end(args);						\
+}
+define_fw_printk_level(fw_err, KERN_ERR);
+define_fw_printk_level(fw_notice, KERN_NOTICE);
 
 int fw_compute_block_crc(__be32 *block)
 {
@@ -74,6 +77,13 @@ static size_t config_rom_length = 1 + 4 + 1 + 1;
 #define BIB_CMC			((1) << 30)
 #define BIB_IRMC		((1) << 31)
 #define NODE_CAPABILITIES	0x0c0083c0 /* per IEEE 1394 clause 8.3.2.6.5.2 */
+
+/*
+ * IEEE-1394 specifies a default SPLIT_TIMEOUT value of 800 cycles (100 ms),
+ * but we have to make it longer because there are many devices whose firmware
+ * is just too slow for that.
+ */
+#define DEFAULT_SPLIT_TIMEOUT	(2 * 8000)
 
 #define CANON_OUI		0x000085
 
@@ -221,8 +231,8 @@ void fw_schedule_bus_reset(struct fw_card *card, bool delayed, bool short_reset)
 
 	/* Use an arbitrary short delay to combine multiple reset requests. */
 	fw_card_get(card);
-	if (!schedule_delayed_work(&card->br_work,
-				   delayed ? DIV_ROUND_UP(HZ, 100) : 0))
+	if (!queue_delayed_work(fw_workqueue, &card->br_work,
+				delayed ? DIV_ROUND_UP(HZ, 100) : 0))
 		fw_card_put(card);
 }
 EXPORT_SYMBOL(fw_schedule_bus_reset);
@@ -233,8 +243,8 @@ static void br_work(struct work_struct *work)
 
 	/* Delay for 2s after last reset per IEEE 1394 clause 8.2.1. */
 	if (card->reset_jiffies != 0 &&
-	    time_is_after_jiffies(card->reset_jiffies + 2 * HZ)) {
-		if (!schedule_delayed_work(&card->br_work, 2 * HZ))
+	    time_before64(get_jiffies_64(), card->reset_jiffies + 2 * HZ)) {
+		if (!queue_delayed_work(fw_workqueue, &card->br_work, 2 * HZ))
 			fw_card_put(card);
 		return;
 	}
@@ -251,10 +261,9 @@ static void allocate_broadcast_channel(struct fw_card *card, int generation)
 
 	if (!card->broadcast_channel_allocated) {
 		fw_iso_resource_manage(card, generation, 1ULL << 31,
-				       &channel, &bandwidth, true,
-				       card->bm_transaction_data);
+				       &channel, &bandwidth, true);
 		if (channel != 31) {
-			fw_notify("failed to allocate broadcast channel\n");
+			fw_notice(card, "failed to allocate broadcast channel\n");
 			return;
 		}
 		card->broadcast_channel_allocated = true;
@@ -287,6 +296,7 @@ static void bm_work(struct work_struct *work)
 	bool root_device_is_cmc;
 	bool irm_is_1394_1995_only;
 	bool keep_this_irm;
+	__be32 transaction_data[2];
 
 	spin_lock_irq(&card->lock);
 
@@ -316,7 +326,8 @@ static void bm_work(struct work_struct *work)
 	irm_id   = card->irm_node->node_id;
 	local_id = card->local_node->node_id;
 
-	grace = time_after(jiffies, card->reset_jiffies + DIV_ROUND_UP(HZ, 8));
+	grace = time_after64(get_jiffies_64(),
+			     card->reset_jiffies + DIV_ROUND_UP(HZ, 8));
 
 	if ((is_next_generation(generation, card->bm_generation) &&
 	     !card->bm_abdicate) ||
@@ -335,33 +346,33 @@ static void bm_work(struct work_struct *work)
 
 		if (!card->irm_node->link_on) {
 			new_root_id = local_id;
-			fw_notify("%s, making local node (%02x) root.\n",
+			fw_notice(card, "%s, making local node (%02x) root\n",
 				  "IRM has link off", new_root_id);
 			goto pick_me;
 		}
 
 		if (irm_is_1394_1995_only && !keep_this_irm) {
 			new_root_id = local_id;
-			fw_notify("%s, making local node (%02x) root.\n",
+			fw_notice(card, "%s, making local node (%02x) root\n",
 				  "IRM is not 1394a compliant", new_root_id);
 			goto pick_me;
 		}
 
-		card->bm_transaction_data[0] = cpu_to_be32(0x3f);
-		card->bm_transaction_data[1] = cpu_to_be32(local_id);
+		transaction_data[0] = cpu_to_be32(0x3f);
+		transaction_data[1] = cpu_to_be32(local_id);
 
 		spin_unlock_irq(&card->lock);
 
 		rcode = fw_run_transaction(card, TCODE_LOCK_COMPARE_SWAP,
 				irm_id, generation, SCODE_100,
 				CSR_REGISTER_BASE + CSR_BUS_MANAGER_ID,
-				card->bm_transaction_data, 8);
+				transaction_data, 8);
 
 		if (rcode == RCODE_GENERATION)
 			/* Another bus reset, BM work has been rescheduled. */
 			goto out;
 
-		bm_id = be32_to_cpu(card->bm_transaction_data[0]);
+		bm_id = be32_to_cpu(transaction_data[0]);
 
 		spin_lock_irq(&card->lock);
 		if (rcode == RCODE_COMPLETE && generation == card->generation)
@@ -397,8 +408,8 @@ static void bm_work(struct work_struct *work)
 			 * root, and thus, IRM.
 			 */
 			new_root_id = local_id;
-			fw_notify("%s, making local node (%02x) root.\n",
-				  "BM lock failed", new_root_id);
+			fw_notice(card, "BM lock failed (%s), making local node (%02x) root\n",
+				  fw_rcode_string(rcode), new_root_id);
 			goto pick_me;
 		}
 	} else if (card->bm_generation != generation) {
@@ -470,8 +481,8 @@ static void bm_work(struct work_struct *work)
 	spin_unlock_irq(&card->lock);
 
 	if (do_reset) {
-		fw_notify("phy config: card %d, new root=%x, gap_count=%d\n",
-			  card->index, new_root_id, gap_count);
+		fw_notice(card, "phy config: new root=%x, gap_count=%d\n",
+			  new_root_id, gap_count);
 		fw_send_phy_config(card, new_root_id, generation, gap_count);
 		reset_bus(card, true);
 		/* Will allocate broadcast channel after the reset. */
@@ -482,11 +493,11 @@ static void bm_work(struct work_struct *work)
 		/*
 		 * Make sure that the cycle master sends cycle start packets.
 		 */
-		card->bm_transaction_data[0] = cpu_to_be32(CSR_STATE_BIT_CMSTR);
+		transaction_data[0] = cpu_to_be32(CSR_STATE_BIT_CMSTR);
 		rcode = fw_run_transaction(card, TCODE_WRITE_QUADLET_REQUEST,
 				root_id, generation, SCODE_100,
 				CSR_REGISTER_BASE + CSR_STATE_SET,
-				card->bm_transaction_data, 4);
+				transaction_data, 4);
 		if (rcode == RCODE_GENERATION)
 			goto out;
 	}
@@ -511,10 +522,11 @@ void fw_card_initialize(struct fw_card *card,
 	card->device = device;
 	card->current_tlabel = 0;
 	card->tlabel_mask = 0;
-	card->split_timeout_hi = 0;
-	card->split_timeout_lo = 800 << 19;
-	card->split_timeout_cycles = 800;
-	card->split_timeout_jiffies = DIV_ROUND_UP(HZ, 10);
+	card->split_timeout_hi = DEFAULT_SPLIT_TIMEOUT / 8000;
+	card->split_timeout_lo = (DEFAULT_SPLIT_TIMEOUT % 8000) << 19;
+	card->split_timeout_cycles = DEFAULT_SPLIT_TIMEOUT;
+	card->split_timeout_jiffies =
+			DIV_ROUND_UP(DEFAULT_SPLIT_TIMEOUT * HZ, 8000);
 	card->color = 0;
 	card->broadcast_channel = BROADCAST_CHANNEL_INITIAL;
 
@@ -604,6 +616,15 @@ static struct fw_iso_context *dummy_allocate_iso_context(struct fw_card *card,
 	return ERR_PTR(-ENODEV);
 }
 
+static u32 dummy_read_csr(struct fw_card *card, int csr_offset)
+{
+	return 0;
+}
+
+static void dummy_write_csr(struct fw_card *card, int csr_offset, u32 value)
+{
+}
+
 static int dummy_start_iso(struct fw_iso_context *ctx,
 			   s32 cycle, u32 sync, u32 tags)
 {
@@ -621,6 +642,15 @@ static int dummy_queue_iso(struct fw_iso_context *ctx, struct fw_iso_packet *p,
 	return -ENODEV;
 }
 
+static void dummy_flush_queue_iso(struct fw_iso_context *ctx)
+{
+}
+
+static int dummy_flush_iso_completions(struct fw_iso_context *ctx)
+{
+	return -ENODEV;
+}
+
 static const struct fw_card_driver dummy_driver_template = {
 	.read_phy_reg		= dummy_read_phy_reg,
 	.update_phy_reg		= dummy_update_phy_reg,
@@ -628,10 +658,14 @@ static const struct fw_card_driver dummy_driver_template = {
 	.send_response		= dummy_send_response,
 	.cancel_packet		= dummy_cancel_packet,
 	.enable_phys_dma	= dummy_enable_phys_dma,
+	.read_csr		= dummy_read_csr,
+	.write_csr		= dummy_write_csr,
 	.allocate_iso_context	= dummy_allocate_iso_context,
 	.start_iso		= dummy_start_iso,
 	.set_iso_channels	= dummy_set_iso_channels,
 	.queue_iso		= dummy_queue_iso,
+	.flush_queue_iso	= dummy_flush_queue_iso,
+	.flush_iso_completions	= dummy_flush_iso_completions,
 };
 
 void fw_card_release(struct kref *kref)
@@ -640,10 +674,12 @@ void fw_card_release(struct kref *kref)
 
 	complete(&card->done);
 }
+EXPORT_SYMBOL_GPL(fw_card_release);
 
 void fw_core_remove_card(struct fw_card *card)
 {
 	struct fw_card_driver dummy_driver = dummy_driver_template;
+	unsigned long flags;
 
 	card->driver->update_phy_reg(card, 4,
 				     PHY_LINK_ACTIVE | PHY_CONTENDER, 0);
@@ -658,7 +694,9 @@ void fw_core_remove_card(struct fw_card *card)
 	dummy_driver.stop_iso		= card->driver->stop_iso;
 	card->driver = &dummy_driver;
 
+	spin_lock_irqsave(&card->lock, flags);
 	fw_destroy_nodes(card);
+	spin_unlock_irqrestore(&card->lock, flags);
 
 	/* Wait for all users, especially device workqueue jobs, to finish. */
 	fw_card_put(card);
@@ -667,3 +705,31 @@ void fw_core_remove_card(struct fw_card *card)
 	WARN_ON(!list_empty(&card->transaction_list));
 }
 EXPORT_SYMBOL(fw_core_remove_card);
+
+/**
+ * fw_card_read_cycle_time: read from Isochronous Cycle Timer Register of 1394 OHCI in MMIO region
+ *			    for controller card.
+ * @card: The instance of card for 1394 OHCI controller.
+ * @cycle_time: The mutual reference to value of cycle time for the read operation.
+ *
+ * Read value from Isochronous Cycle Timer Register of 1394 OHCI in MMIO region for the given
+ * controller card. This function accesses the region without any lock primitives or IRQ mask.
+ * When returning successfully, the content of @value argument has value aligned to host endianness,
+ * formetted by CYCLE_TIME CSR Register of IEEE 1394 std.
+ *
+ * Context: Any context.
+ * Return:
+ * * 0 - Read successfully.
+ * * -ENODEV - The controller is unavailable due to being removed or unbound.
+ */
+int fw_card_read_cycle_time(struct fw_card *card, u32 *cycle_time)
+{
+	if (card->driver->read_csr == dummy_read_csr)
+		return -ENODEV;
+
+	// It's possible to switch to dummy driver between the above and the below. This is the best
+	// effort to return -ENODEV.
+	*cycle_time = card->driver->read_csr(card, CSR_CYCLE_TIME);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(fw_card_read_cycle_time);

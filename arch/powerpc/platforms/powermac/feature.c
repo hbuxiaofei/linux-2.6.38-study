@@ -1,11 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  Copyright (C) 1996-2001 Paul Mackerras (paulus@cs.anu.edu.au)
  *                          Ben. Herrenschmidt (benh@kernel.crashing.org)
- *
- *  This program is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU General Public License
- *  as published by the Free Software Foundation; either version
- *  2 of the License, or (at your option) any later version.
  *
  *  TODO:
  *
@@ -14,7 +10,6 @@
  *     power)
  *   - Refcount some clocks (see darwin)
  *   - Split split split...
- *
  */
 #include <linux/types.h>
 #include <linux/init.h>
@@ -27,6 +22,7 @@
 #include <linux/adb.h>
 #include <linux/pmu.h>
 #include <linux/ioport.h>
+#include <linux/export.h>
 #include <linux/pci.h>
 #include <asm/sections.h>
 #include <asm/errno.h>
@@ -35,7 +31,6 @@
 #include <asm/keylargo.h>
 #include <asm/uninorth.h>
 #include <asm/io.h>
-#include <asm/prom.h>
 #include <asm/machdep.h>
 #include <asm/pmac_feature.h>
 #include <asm/dbdma.h>
@@ -50,7 +45,7 @@
 #define DBG(fmt...)
 #endif
 
-#ifdef CONFIG_6xx
+#ifdef CONFIG_PPC_BOOK3S_32
 extern int powersave_lowspeed;
 #endif
 
@@ -157,7 +152,7 @@ static inline int simple_feature_tweak(struct device_node *node, int type,
 	return 0;
 }
 
-#ifndef CONFIG_POWER4
+#ifndef CONFIG_PPC64
 
 static long ohare_htw_scc_enable(struct device_node *node, long param,
 				 long value)
@@ -172,9 +167,9 @@ static long ohare_htw_scc_enable(struct device_node *node, long param,
 	macio = macio_find(node, 0);
 	if (!macio)
 		return -ENODEV;
-	if (!strcmp(node->name, "ch-a"))
+	if (of_node_name_eq(node, "ch-a"))
 		chan_mask = MACIO_FLAG_SCCA_ON;
-	else if (!strcmp(node->name, "ch-b"))
+	else if (of_node_name_eq(node, "ch-b"))
 		chan_mask = MACIO_FLAG_SCCB_ON;
 	else
 		return -ENODEV;
@@ -197,7 +192,7 @@ static long ohare_htw_scc_enable(struct device_node *node, long param,
 			if (htw) {
 				/* Side effect: this will also power up the
 				 * modem, but it's too messy to figure out on which
-				 * ports this controls the tranceiver and on which
+				 * ports this controls the transceiver and on which
 				 * it controls the modem
 				 */
 				if (trans)
@@ -462,7 +457,7 @@ static long heathrow_sound_enable(struct device_node *node, long param,
 	unsigned long		flags;
 
 	/* B&W G3 and Yikes don't support that properly (the
-	 * sound appear to never come back after beeing shut down).
+	 * sound appear to never come back after being shut down).
 	 */
 	if (pmac_mb.model_id == PMAC_TYPE_YOSEMITE ||
 	    pmac_mb.model_id == PMAC_TYPE_YIKES)
@@ -609,9 +604,9 @@ static long core99_scc_enable(struct device_node *node, long param, long value)
 	macio = macio_find(node, 0);
 	if (!macio)
 		return -ENODEV;
-	if (!strcmp(node->name, "ch-a"))
+	if (of_node_name_eq(node, "ch-a"))
 		chan_mask = MACIO_FLAG_SCCA_ON;
-	else if (!strcmp(node->name, "ch-b"))
+	else if (of_node_name_eq(node, "ch-b"))
 		chan_mask = MACIO_FLAG_SCCB_ON;
 	else
 		return -ENODEV;
@@ -828,7 +823,7 @@ core99_ata100_enable(struct device_node *node, long value)
 
 	if (value) {
 		if (pci_device_from_OF_node(node, &pbus, &pid) == 0)
-			pdev = pci_get_bus_and_slot(pbus, pid);
+			pdev = pci_get_domain_bus_and_slot(0, pbus, pid);
 		if (pdev == NULL)
 			return 0;
 		rc = pci_enable_device(pdev);
@@ -1048,7 +1043,6 @@ core99_reset_cpu(struct device_node *node, long param, long value)
 	unsigned long flags;
 	struct macio_chip *macio;
 	struct device_node *np;
-	struct device_node *cpus;
 	const int dflt_reset_lines[] = {	KL_GPIO_RESET_CPU0,
 						KL_GPIO_RESET_CPU1,
 						KL_GPIO_RESET_CPU2,
@@ -1058,10 +1052,7 @@ core99_reset_cpu(struct device_node *node, long param, long value)
 	if (macio->type != macio_keylargo)
 		return -ENODEV;
 
-	cpus = of_find_node_by_path("/cpus");
-	if (cpus == NULL)
-		return -ENODEV;
-	for (np = cpus->child; np != NULL; np = np->sibling) {
+	for_each_of_cpu_node(np) {
 		const u32 *num = of_get_property(np, "reg", NULL);
 		const u32 *rst = of_get_property(np, "soft-reset", NULL);
 		if (num == NULL || rst == NULL)
@@ -1071,7 +1062,6 @@ core99_reset_cpu(struct device_node *node, long param, long value)
 			break;
 		}
 	}
-	of_node_put(cpus);
 	if (np == NULL || reset_io == 0)
 		reset_io = dflt_reset_lines[param];
 
@@ -1317,7 +1307,7 @@ intrepid_aack_delay_enable(struct device_node *node, long param, long value)
 }
 
 
-#endif /* CONFIG_POWER4 */
+#endif /* CONFIG_PPC64 */
 
 static long
 core99_read_gpio(struct device_node *node, long param, long value)
@@ -1337,7 +1327,7 @@ core99_write_gpio(struct device_node *node, long param, long value)
 	return 0;
 }
 
-#ifdef CONFIG_POWER4
+#ifdef CONFIG_PPC64
 static long g5_gmac_enable(struct device_node *node, long param, long value)
 {
 	struct macio_chip *macio = &macio_chips[0];
@@ -1396,8 +1386,7 @@ static long g5_mpic_enable(struct device_node *node, long param, long value)
 
 	if (parent == NULL)
 		return 0;
-	is_u3 = strcmp(parent->name, "u3") == 0 ||
-		strcmp(parent->name, "u4") == 0;
+	is_u3 = of_node_name_eq(parent, "u3") || of_node_name_eq(parent, "u4");
 	of_node_put(parent);
 	if (!is_u3)
 		return 0;
@@ -1475,6 +1464,7 @@ static long g5_i2s_enable(struct device_node *node, long param, long value)
 	case 2:
 		if (macio->type == macio_shasta)
 			break;
+		fallthrough;
 	default:
 		return -ENODEV;
 	}
@@ -1503,16 +1493,12 @@ static long g5_reset_cpu(struct device_node *node, long param, long value)
 	unsigned long flags;
 	struct macio_chip *macio;
 	struct device_node *np;
-	struct device_node *cpus;
 
 	macio = &macio_chips[0];
 	if (macio->type != macio_keylargo2 && macio->type != macio_shasta)
 		return -ENODEV;
 
-	cpus = of_find_node_by_path("/cpus");
-	if (cpus == NULL)
-		return -ENODEV;
-	for (np = cpus->child; np != NULL; np = np->sibling) {
+	for_each_of_cpu_node(np) {
 		const u32 *num = of_get_property(np, "reg", NULL);
 		const u32 *rst = of_get_property(np, "soft-reset", NULL);
 		if (num == NULL || rst == NULL)
@@ -1522,7 +1508,6 @@ static long g5_reset_cpu(struct device_node *node, long param, long value)
 			break;
 		}
 	}
-	of_node_put(cpus);
 	if (np == NULL || reset_io == 0)
 		return -ENODEV;
 
@@ -1544,14 +1529,14 @@ static long g5_reset_cpu(struct device_node *node, long param, long value)
  * This takes the second CPU off the bus on dual CPU machines
  * running UP
  */
-void g5_phy_disable_cpu1(void)
+void __init g5_phy_disable_cpu1(void)
 {
 	if (uninorth_maj == 3)
 		UN_OUT(U3_API_PHY_CONFIG_1, 0);
 }
-#endif /* CONFIG_POWER4 */
+#endif /* CONFIG_PPC64 */
 
-#ifndef CONFIG_POWER4
+#ifndef CONFIG_PPC64
 
 
 #ifdef CONFIG_PM
@@ -1863,7 +1848,7 @@ core99_sleep_state(struct device_node *node, long param, long value)
 	return 0;
 }
 
-#endif /* CONFIG_POWER4 */
+#endif /* CONFIG_PPC64 */
 
 static long
 generic_dev_can_wake(struct device_node *node, long param, long value)
@@ -1905,7 +1890,7 @@ static struct feature_table_entry any_features[] = {
 	{ 0, NULL }
 };
 
-#ifndef CONFIG_POWER4
+#ifndef CONFIG_PPC64
 
 /* OHare based motherboards. Currently, we only use these on the
  * 2400,3400 and 3500 series powerbooks. Some older desktops seem
@@ -2055,7 +2040,7 @@ static struct feature_table_entry intrepid_features[] = {
 	{ 0, NULL }
 };
 
-#else /* CONFIG_POWER4 */
+#else /* CONFIG_PPC64 */
 
 /* G5 features
  */
@@ -2073,10 +2058,10 @@ static struct feature_table_entry g5_features[] = {
 	{ 0, NULL }
 };
 
-#endif /* CONFIG_POWER4 */
+#endif /* CONFIG_PPC64 */
 
 static struct pmac_mb_def pmac_mb_defs[] = {
-#ifndef CONFIG_POWER4
+#ifndef CONFIG_PPC64
 	/*
 	 * Desktops
 	 */
@@ -2341,7 +2326,7 @@ static struct pmac_mb_def pmac_mb_defs[] = {
 		PMAC_TYPE_UNKNOWN_INTREPID,	intrepid_features,
 		PMAC_MB_MAY_SLEEP | PMAC_MB_HAS_FW_POWER | PMAC_MB_MOBILE,
 	},
-#else /* CONFIG_POWER4 */
+#else /* CONFIG_PPC64 */
 	{	"PowerMac7,2",			"PowerMac G5",
 		PMAC_TYPE_POWERMAC_G5,		g5_features,
 		0,
@@ -2372,7 +2357,7 @@ static struct pmac_mb_def pmac_mb_defs[] = {
 		0,
 	},
 #endif /* CONFIG_PPC64 */
-#endif /* CONFIG_POWER4 */
+#endif /* CONFIG_PPC64 */
 };
 
 /*
@@ -2440,7 +2425,7 @@ static int __init probe_motherboard(void)
 
 	/* Fallback to selection depending on mac-io chip type */
 	switch(macio->type) {
-#ifndef CONFIG_POWER4
+#ifndef CONFIG_PPC64
 	    case macio_grand_central:
 		pmac_mb.model_id = PMAC_TYPE_PSURGE;
 		pmac_mb.model_name = "Unknown PowerSurge";
@@ -2474,7 +2459,7 @@ static int __init probe_motherboard(void)
 		pmac_mb.model_name = "Unknown Intrepid-based";
 		pmac_mb.features = intrepid_features;
 		break;
-#else /* CONFIG_POWER4 */
+#else /* CONFIG_PPC64 */
 	case macio_keylargo2:
 		pmac_mb.model_id = PMAC_TYPE_UNKNOWN_K2;
 		pmac_mb.model_name = "Unknown K2-based";
@@ -2485,13 +2470,13 @@ static int __init probe_motherboard(void)
 		pmac_mb.model_name = "Unknown Shasta-based";
 		pmac_mb.features = g5_features;
 		break;
-#endif /* CONFIG_POWER4 */
+#endif /* CONFIG_PPC64 */
 	default:
 		ret = -ENODEV;
 		goto done;
 	}
 found:
-#ifndef CONFIG_POWER4
+#ifndef CONFIG_PPC64
 	/* Fixup Hooper vs. Comet */
 	if (pmac_mb.model_id == PMAC_TYPE_HOOPER) {
 		u32 __iomem * mach_id_ptr = ioremap(0xf3000034, 4);
@@ -2514,40 +2499,35 @@ found:
 	 * supposed to be set when not supported, but I'm not very confident
 	 * that all Apple OF revs did it properly, I do it the paranoid way.
 	 */
-	while (uninorth_base && uninorth_rev > 3) {
-		struct device_node *cpus = of_find_node_by_path("/cpus");
+	if (uninorth_base && uninorth_rev > 3) {
 		struct device_node *np;
 
-		if (!cpus || !cpus->child) {
-			printk(KERN_WARNING "Can't find CPU(s) in device tree !\n");
-			of_node_put(cpus);
-			break;
+		for_each_of_cpu_node(np) {
+			int cpu_count = 1;
+
+			/* Nap mode not supported on SMP */
+			if (of_get_property(np, "flush-on-lock", NULL) ||
+			    (cpu_count > 1)) {
+				powersave_nap = 0;
+				of_node_put(np);
+				break;
+			}
+
+			cpu_count++;
+			powersave_nap = 1;
 		}
-		np = cpus->child;
-		/* Nap mode not supported on SMP */
-		if (np->sibling) {
-			of_node_put(cpus);
-			break;
-		}
-		/* Nap mode not supported if flush-on-lock property is present */
-		if (of_get_property(np, "flush-on-lock", NULL)) {
-			of_node_put(cpus);
-			break;
-		}
-		of_node_put(cpus);
-		powersave_nap = 1;
-		printk(KERN_DEBUG "Processor NAP mode on idle enabled.\n");
-		break;
 	}
+	if (powersave_nap)
+		printk(KERN_DEBUG "Processor NAP mode on idle enabled.\n");
 
 	/* On CPUs that support it (750FX), lowspeed by default during
 	 * NAP mode
 	 */
 	powersave_lowspeed = 1;
 
-#else /* CONFIG_POWER4 */
+#else /* CONFIG_PPC64 */
 	powersave_nap = 1;
-#endif  /* CONFIG_POWER4 */
+#endif  /* CONFIG_PPC64 */
 
 	/* Check for "mobile" machine */
 	if (model && (strncmp(model, "PowerBook", 9) == 0
@@ -2640,7 +2620,7 @@ static void __init probe_one_macio(const char *name, const char *compat, int typ
 	phys_addr_t		addr;
 	u64			size;
 
-	for (node = NULL; (node = of_find_node_by_name(node, name)) != NULL;) {
+	for_each_node_by_name(node, name) {
 		if (!compat)
 			break;
 		if (of_device_is_compatible(node, compat))
@@ -2652,31 +2632,31 @@ static void __init probe_one_macio(const char *name, const char *compat, int typ
 		if (!macio_chips[i].of_node)
 			break;
 		if (macio_chips[i].of_node == node)
-			return;
+			goto out_put;
 	}
 
 	if (i >= MAX_MACIO_CHIPS) {
 		printk(KERN_ERR "pmac_feature: Please increase MAX_MACIO_CHIPS !\n");
-		printk(KERN_ERR "pmac_feature: %s skipped\n", node->full_name);
-		return;
+		printk(KERN_ERR "pmac_feature: %pOF skipped\n", node);
+		goto out_put;
 	}
 	addrp = of_get_pci_address(node, 0, &size, NULL);
 	if (addrp == NULL) {
-		printk(KERN_ERR "pmac_feature: %s: can't find base !\n",
-		       node->full_name);
-		return;
+		printk(KERN_ERR "pmac_feature: %pOF: can't find base !\n",
+		       node);
+		goto out_put;
 	}
 	addr = of_translate_address(node, addrp);
 	if (addr == 0) {
-		printk(KERN_ERR "pmac_feature: %s, can't translate base !\n",
-		       node->full_name);
-		return;
+		printk(KERN_ERR "pmac_feature: %pOF, can't translate base !\n",
+		       node);
+		goto out_put;
 	}
 	base = ioremap(addr, (unsigned long)size);
 	if (!base) {
-		printk(KERN_ERR "pmac_feature: %s, can't map mac-io chip !\n",
-		       node->full_name);
-		return;
+		printk(KERN_ERR "pmac_feature: %pOF, can't map mac-io chip !\n",
+		       node);
+		goto out_put;
 	}
 	if (type == macio_keylargo || type == macio_keylargo2) {
 		const u32 *did = of_get_property(node, "device-id", NULL);
@@ -2697,6 +2677,11 @@ static void __init probe_one_macio(const char *name, const char *compat, int typ
 		macio_chips[i].rev = *revp;
 	printk(KERN_INFO "Found a %s mac-io controller, rev: %d, mapped at 0x%p\n",
 		macio_names[type], macio_chips[i].rev, macio_chips[i].base);
+
+	return;
+
+out_put:
+	of_node_put(node);
 }
 
 static int __init
@@ -2769,7 +2754,7 @@ set_initial_features(void)
 	 * but I'm not too sure it was audited for side-effects on other
 	 * ohare based machines...
 	 * Since I still have difficulties figuring the right way to
-	 * differenciate them all and since that hack was there for a long
+	 * differentiate them all and since that hack was there for a long
 	 * time, I'll keep it around
 	 */
 	if (macio_chips[0].type == macio_ohare) {
@@ -2785,7 +2770,7 @@ set_initial_features(void)
 		MACIO_BIS(OHARE_FCR, OH_IOBUS_ENABLE);
 	}
 
-#ifdef CONFIG_POWER4
+#ifdef CONFIG_PPC64
 	if (macio_chips[0].type == macio_keylargo2 ||
 	    macio_chips[0].type == macio_shasta) {
 #ifndef CONFIG_SMP
@@ -2804,28 +2789,23 @@ set_initial_features(void)
 		/* Enable GMAC for now for PCI probing. It will be disabled
 		 * later on after PCI probe
 		 */
-		np = of_find_node_by_name(NULL, "ethernet");
-		while(np) {
+		for_each_node_by_name(np, "ethernet")
 			if (of_device_is_compatible(np, "K2-GMAC"))
 				g5_gmac_enable(np, 0, 1);
-			np = of_find_node_by_name(np, "ethernet");
-		}
 
 		/* Enable FW before PCI probe. Will be disabled later on
 		 * Note: We should have a batter way to check that we are
 		 * dealing with uninorth internal cell and not a PCI cell
 		 * on the external PCI. The code below works though.
 		 */
-		np = of_find_node_by_name(NULL, "firewire");
-		while(np) {
+		for_each_node_by_name(np, "firewire") {
 			if (of_device_is_compatible(np, "pci106b,5811")) {
 				macio_chips[0].flags |= MACIO_FLAG_FW_SUPPORTED;
 				g5_fw_enable(np, 0, 1);
 			}
-			np = of_find_node_by_name(np, "firewire");
 		}
 	}
-#else /* CONFIG_POWER4 */
+#else /* CONFIG_PPC64 */
 
 	if (macio_chips[0].type == macio_keylargo ||
 	    macio_chips[0].type == macio_pangea ||
@@ -2833,13 +2813,11 @@ set_initial_features(void)
 		/* Enable GMAC for now for PCI probing. It will be disabled
 		 * later on after PCI probe
 		 */
-		np = of_find_node_by_name(NULL, "ethernet");
-		while(np) {
+		for_each_node_by_name(np, "ethernet") {
 			if (np->parent
 			    && of_device_is_compatible(np->parent, "uni-north")
 			    && of_device_is_compatible(np, "gmac"))
 				core99_gmac_enable(np, 0, 1);
-			np = of_find_node_by_name(np, "ethernet");
 		}
 
 		/* Enable FW before PCI probe. Will be disabled later on
@@ -2847,8 +2825,7 @@ set_initial_features(void)
 		 * dealing with uninorth internal cell and not a PCI cell
 		 * on the external PCI. The code below works though.
 		 */
-		np = of_find_node_by_name(NULL, "firewire");
-		while(np) {
+		for_each_node_by_name(np, "firewire") {
 			if (np->parent
 			    && of_device_is_compatible(np->parent, "uni-north")
 			    && (of_device_is_compatible(np, "pci106b,18") ||
@@ -2857,18 +2834,15 @@ set_initial_features(void)
 				macio_chips[0].flags |= MACIO_FLAG_FW_SUPPORTED;
 				core99_firewire_enable(np, 0, 1);
 			}
-			np = of_find_node_by_name(np, "firewire");
 		}
 
 		/* Enable ATA-100 before PCI probe. */
-		np = of_find_node_by_name(NULL, "ata-6");
-		while(np) {
+		for_each_node_by_name(np, "ata-6") {
 			if (np->parent
 			    && of_device_is_compatible(np->parent, "uni-north")
 			    && of_device_is_compatible(np, "kauai-ata")) {
 				core99_ata100_enable(np, 1);
 			}
-			np = of_find_node_by_name(np, "ata-6");
 		}
 
 		/* Switch airport off */
@@ -2894,15 +2868,13 @@ set_initial_features(void)
 		MACIO_BIC(HEATHROW_FCR, HRW_SOUND_POWER_N);
 	}
 
-#endif /* CONFIG_POWER4 */
+#endif /* CONFIG_PPC64 */
 
 	/* On all machines, switch modem & serial ports off */
 	for_each_node_by_name(np, "ch-a")
 		initial_serial_shutdown(np);
-	of_node_put(np);
 	for_each_node_by_name(np, "ch-b")
 		initial_serial_shutdown(np);
-	of_node_put(np);
 }
 
 void __init

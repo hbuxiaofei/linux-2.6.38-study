@@ -1,7 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0 OR MIT
 /**************************************************************************
  *
- * Copyright © 2009 VMware, Inc., Palo Alto, CA., USA
- * All Rights Reserved.
+ * Copyright 2009-2022 VMware, Inc., Palo Alto, CA., USA
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the
@@ -25,9 +25,11 @@
  *
  **************************************************************************/
 
-#include "vmwgfx_kms.h"
+#include <drm/drm_atomic.h>
+#include <drm/drm_atomic_helper.h>
+#include <drm/drm_fourcc.h>
 
-#define VMWGFX_LDU_NUM_DU 8
+#include "vmwgfx_kms.h"
 
 #define vmw_crtc_to_ldu(x) \
 	container_of(x, struct vmw_legacy_display_unit, base.crtc)
@@ -45,16 +47,11 @@ struct vmw_legacy_display {
 	struct vmw_framebuffer *fb;
 };
 
-/**
+/*
  * Display unit using the legacy register interface.
  */
 struct vmw_legacy_display_unit {
 	struct vmw_display_unit base;
-
-	unsigned pref_width;
-	unsigned pref_height;
-	bool pref_active;
-	struct drm_display_mode *pref_mode;
 
 	struct list_head active;
 };
@@ -62,7 +59,7 @@ struct vmw_legacy_display_unit {
 static void vmw_ldu_destroy(struct vmw_legacy_display_unit *ldu)
 {
 	list_del_init(&ldu->active);
-	vmw_display_unit_cleanup(&ldu->base);
+	vmw_du_cleanup(&ldu->base);
 	kfree(ldu);
 }
 
@@ -70,20 +67,6 @@ static void vmw_ldu_destroy(struct vmw_legacy_display_unit *ldu)
 /*
  * Legacy Display Unit CRTC functions
  */
-
-static void vmw_ldu_crtc_save(struct drm_crtc *crtc)
-{
-}
-
-static void vmw_ldu_crtc_restore(struct drm_crtc *crtc)
-{
-}
-
-static void vmw_ldu_crtc_gamma_set(struct drm_crtc *crtc,
-				   u16 *r, u16 *g, u16 *b,
-				   uint32_t start, uint32_t size)
-{
-}
 
 static void vmw_ldu_crtc_destroy(struct drm_crtc *crtc)
 {
@@ -96,7 +79,7 @@ static int vmw_ldu_commit_list(struct vmw_private *dev_priv)
 	struct vmw_legacy_display_unit *entry;
 	struct drm_framebuffer *fb = NULL;
 	struct drm_crtc *crtc = NULL;
-	int i = 0;
+	int i;
 
 	/* If there is no display topology the host just assumes
 	 * that the guest will set the same layout as the host.
@@ -107,25 +90,23 @@ static int vmw_ldu_commit_list(struct vmw_private *dev_priv)
 			crtc = &entry->base.crtc;
 			w = max(w, crtc->x + crtc->mode.hdisplay);
 			h = max(h, crtc->y + crtc->mode.vdisplay);
-			i++;
 		}
 
 		if (crtc == NULL)
 			return 0;
-		fb = entry->base.crtc.fb;
+		fb = crtc->primary->state->fb;
 
-		vmw_kms_write_svga(dev_priv, w, h, fb->pitch,
-				   fb->bits_per_pixel, fb->depth);
-
-		return 0;
+		return vmw_kms_write_svga(dev_priv, w, h, fb->pitches[0],
+					  fb->format->cpp[0] * 8,
+					  fb->format->depth);
 	}
 
 	if (!list_empty(&lds->active)) {
 		entry = list_entry(lds->active.next, typeof(*entry), active);
-		fb = entry->base.crtc.fb;
+		fb = entry->base.crtc.primary->state->fb;
 
-		vmw_kms_write_svga(dev_priv, fb->width, fb->height, fb->pitch,
-				   fb->bits_per_pixel, fb->depth);
+		vmw_kms_write_svga(dev_priv, fb->width, fb->height, fb->pitches[0],
+				   fb->format->cpp[0] * 8, fb->format->depth);
 	}
 
 	/* Make sure we always show something. */
@@ -142,7 +123,6 @@ static int vmw_ldu_commit_list(struct vmw_private *dev_priv)
 		vmw_write(dev_priv, SVGA_REG_DISPLAY_POSITION_Y, crtc->y);
 		vmw_write(dev_priv, SVGA_REG_DISPLAY_WIDTH, crtc->mode.hdisplay);
 		vmw_write(dev_priv, SVGA_REG_DISPLAY_HEIGHT, crtc->mode.vdisplay);
-		vmw_write(dev_priv, SVGA_REG_DISPLAY_ID, SVGA_ID_INVALID);
 
 		i++;
 	}
@@ -185,6 +165,7 @@ static int vmw_ldu_add_active(struct vmw_private *vmw_priv,
 	if (vfb != ld->fb) {
 		if (ld->fb && ld->fb->unpin)
 			ld->fb->unpin(ld->fb);
+		vmw_svga_enable(vmw_priv);
 		if (vfb->pin)
 			vfb->pin(vfb);
 		ld->fb = vfb;
@@ -208,104 +189,54 @@ static int vmw_ldu_add_active(struct vmw_private *vmw_priv,
 	return 0;
 }
 
-static int vmw_ldu_crtc_set_config(struct drm_mode_set *set)
+/**
+ * vmw_ldu_crtc_mode_set_nofb - Enable svga
+ *
+ * @crtc: CRTC associated with the new screen
+ *
+ * For LDU, just enable the svga
+ */
+static void vmw_ldu_crtc_mode_set_nofb(struct drm_crtc *crtc)
 {
-	struct vmw_private *dev_priv;
-	struct vmw_legacy_display_unit *ldu;
-	struct drm_connector *connector;
-	struct drm_display_mode *mode;
-	struct drm_encoder *encoder;
-	struct vmw_framebuffer *vfb;
-	struct drm_framebuffer *fb;
-	struct drm_crtc *crtc;
-
-	if (!set)
-		return -EINVAL;
-
-	if (!set->crtc)
-		return -EINVAL;
-
-	/* get the ldu */
-	crtc = set->crtc;
-	ldu = vmw_crtc_to_ldu(crtc);
-	vfb = set->fb ? vmw_framebuffer_to_vfb(set->fb) : NULL;
-	dev_priv = vmw_priv(crtc->dev);
-
-	if (set->num_connectors > 1) {
-		DRM_ERROR("to many connectors\n");
-		return -EINVAL;
-	}
-
-	if (set->num_connectors == 1 &&
-	    set->connectors[0] != &ldu->base.connector) {
-		DRM_ERROR("connector doesn't match %p %p\n",
-			set->connectors[0], &ldu->base.connector);
-		return -EINVAL;
-	}
-
-	/* ldu only supports one fb active at the time */
-	if (dev_priv->ldu_priv->fb && vfb &&
-	    !(dev_priv->ldu_priv->num_active == 1 &&
-	      !list_empty(&ldu->active)) &&
-	    dev_priv->ldu_priv->fb != vfb) {
-		DRM_ERROR("Multiple framebuffers not supported\n");
-		return -EINVAL;
-	}
-
-	/* since they always map one to one these are safe */
-	connector = &ldu->base.connector;
-	encoder = &ldu->base.encoder;
-
-	/* should we turn the crtc off? */
-	if (set->num_connectors == 0 || !set->mode || !set->fb) {
-
-		connector->encoder = NULL;
-		encoder->crtc = NULL;
-		crtc->fb = NULL;
-
-		vmw_ldu_del_active(dev_priv, ldu);
-
-		vmw_ldu_commit_list(dev_priv);
-
-		return 0;
-	}
-
-
-	/* we now know we want to set a mode */
-	mode = set->mode;
-	fb = set->fb;
-
-	if (set->x + mode->hdisplay > fb->width ||
-	    set->y + mode->vdisplay > fb->height) {
-		DRM_ERROR("set outside of framebuffer\n");
-		return -EINVAL;
-	}
-
-	vmw_fb_off(dev_priv);
-
-	crtc->fb = fb;
-	encoder->crtc = crtc;
-	connector->encoder = encoder;
-	crtc->x = set->x;
-	crtc->y = set->y;
-	crtc->mode = *mode;
-
-	vmw_ldu_add_active(dev_priv, ldu, vfb);
-
-	vmw_ldu_commit_list(dev_priv);
-
-	return 0;
 }
 
-static struct drm_crtc_funcs vmw_legacy_crtc_funcs = {
-	.save = vmw_ldu_crtc_save,
-	.restore = vmw_ldu_crtc_restore,
-	.cursor_set = vmw_du_crtc_cursor_set,
-	.cursor_move = vmw_du_crtc_cursor_move,
-	.gamma_set = vmw_ldu_crtc_gamma_set,
+/**
+ * vmw_ldu_crtc_atomic_enable - Noop
+ *
+ * @crtc: CRTC associated with the new screen
+ * @state: Unused
+ *
+ * This is called after a mode set has been completed.  Here's
+ * usually a good place to call vmw_ldu_add_active/vmw_ldu_del_active
+ * but since for LDU the display plane is closely tied to the
+ * CRTC, it makes more sense to do those at plane update time.
+ */
+static void vmw_ldu_crtc_atomic_enable(struct drm_crtc *crtc,
+				       struct drm_atomic_state *state)
+{
+}
+
+/**
+ * vmw_ldu_crtc_atomic_disable - Turns off CRTC
+ *
+ * @crtc: CRTC to be turned off
+ * @state: Unused
+ */
+static void vmw_ldu_crtc_atomic_disable(struct drm_crtc *crtc,
+					struct drm_atomic_state *state)
+{
+}
+
+static const struct drm_crtc_funcs vmw_legacy_crtc_funcs = {
+	.gamma_set = vmw_du_crtc_gamma_set,
 	.destroy = vmw_ldu_crtc_destroy,
-	.set_config = vmw_ldu_crtc_set_config,
+	.reset = vmw_du_crtc_reset,
+	.atomic_duplicate_state = vmw_du_crtc_duplicate_state,
+	.atomic_destroy_state = vmw_du_crtc_destroy_state,
+	.set_config = drm_atomic_helper_set_config,
+	.page_flip = drm_atomic_helper_page_flip,
 };
+
 
 /*
  * Legacy Display Unit encoder functions
@@ -316,7 +247,7 @@ static void vmw_ldu_encoder_destroy(struct drm_encoder *encoder)
 	vmw_ldu_destroy(vmw_encoder_to_ldu(encoder));
 }
 
-static struct drm_encoder_funcs vmw_legacy_encoder_funcs = {
+static const struct drm_encoder_funcs vmw_legacy_encoder_funcs = {
 	.destroy = vmw_ldu_encoder_destroy,
 };
 
@@ -324,192 +255,142 @@ static struct drm_encoder_funcs vmw_legacy_encoder_funcs = {
  * Legacy Display Unit connector functions
  */
 
-static void vmw_ldu_connector_dpms(struct drm_connector *connector, int mode)
-{
-}
-
-static void vmw_ldu_connector_save(struct drm_connector *connector)
-{
-}
-
-static void vmw_ldu_connector_restore(struct drm_connector *connector)
-{
-}
-
-static enum drm_connector_status
-	vmw_ldu_connector_detect(struct drm_connector *connector,
-				 bool force)
-{
-	if (vmw_connector_to_ldu(connector)->pref_active)
-		return connector_status_connected;
-	return connector_status_disconnected;
-}
-
-static struct drm_display_mode vmw_ldu_connector_builtin[] = {
-	/* 640x480@60Hz */
-	{ DRM_MODE("640x480", DRM_MODE_TYPE_DRIVER, 25175, 640, 656,
-		   752, 800, 0, 480, 489, 492, 525, 0,
-		   DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_NVSYNC) },
-	/* 800x600@60Hz */
-	{ DRM_MODE("800x600", DRM_MODE_TYPE_DRIVER, 40000, 800, 840,
-		   968, 1056, 0, 600, 601, 605, 628, 0,
-		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC) },
-	/* 1024x768@60Hz */
-	{ DRM_MODE("1024x768", DRM_MODE_TYPE_DRIVER, 65000, 1024, 1048,
-		   1184, 1344, 0, 768, 771, 777, 806, 0,
-		   DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_NVSYNC) },
-	/* 1152x864@75Hz */
-	{ DRM_MODE("1152x864", DRM_MODE_TYPE_DRIVER, 108000, 1152, 1216,
-		   1344, 1600, 0, 864, 865, 868, 900, 0,
-		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC) },
-	/* 1280x768@60Hz */
-	{ DRM_MODE("1280x768", DRM_MODE_TYPE_DRIVER, 79500, 1280, 1344,
-		   1472, 1664, 0, 768, 771, 778, 798, 0,
-		   DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_PVSYNC) },
-	/* 1280x800@60Hz */
-	{ DRM_MODE("1280x800", DRM_MODE_TYPE_DRIVER, 83500, 1280, 1352,
-		   1480, 1680, 0, 800, 803, 809, 831, 0,
-		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_NVSYNC) },
-	/* 1280x960@60Hz */
-	{ DRM_MODE("1280x960", DRM_MODE_TYPE_DRIVER, 108000, 1280, 1376,
-		   1488, 1800, 0, 960, 961, 964, 1000, 0,
-		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC) },
-	/* 1280x1024@60Hz */
-	{ DRM_MODE("1280x1024", DRM_MODE_TYPE_DRIVER, 108000, 1280, 1328,
-		   1440, 1688, 0, 1024, 1025, 1028, 1066, 0,
-		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC) },
-	/* 1360x768@60Hz */
-	{ DRM_MODE("1360x768", DRM_MODE_TYPE_DRIVER, 85500, 1360, 1424,
-		   1536, 1792, 0, 768, 771, 777, 795, 0,
-		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC) },
-	/* 1440x1050@60Hz */
-	{ DRM_MODE("1400x1050", DRM_MODE_TYPE_DRIVER, 121750, 1400, 1488,
-		   1632, 1864, 0, 1050, 1053, 1057, 1089, 0,
-		   DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_PVSYNC) },
-	/* 1440x900@60Hz */
-	{ DRM_MODE("1440x900", DRM_MODE_TYPE_DRIVER, 106500, 1440, 1520,
-		   1672, 1904, 0, 900, 903, 909, 934, 0,
-		   DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_PVSYNC) },
-	/* 1600x1200@60Hz */
-	{ DRM_MODE("1600x1200", DRM_MODE_TYPE_DRIVER, 162000, 1600, 1664,
-		   1856, 2160, 0, 1200, 1201, 1204, 1250, 0,
-		   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC) },
-	/* 1680x1050@60Hz */
-	{ DRM_MODE("1680x1050", DRM_MODE_TYPE_DRIVER, 146250, 1680, 1784,
-		   1960, 2240, 0, 1050, 1053, 1059, 1089, 0,
-		   DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_PVSYNC) },
-	/* 1792x1344@60Hz */
-	{ DRM_MODE("1792x1344", DRM_MODE_TYPE_DRIVER, 204750, 1792, 1920,
-		   2120, 2448, 0, 1344, 1345, 1348, 1394, 0,
-		   DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_PVSYNC) },
-	/* 1853x1392@60Hz */
-	{ DRM_MODE("1856x1392", DRM_MODE_TYPE_DRIVER, 218250, 1856, 1952,
-		   2176, 2528, 0, 1392, 1393, 1396, 1439, 0,
-		   DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_PVSYNC) },
-	/* 1920x1200@60Hz */
-	{ DRM_MODE("1920x1200", DRM_MODE_TYPE_DRIVER, 193250, 1920, 2056,
-		   2256, 2592, 0, 1200, 1203, 1209, 1245, 0,
-		   DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_PVSYNC) },
-	/* 1920x1440@60Hz */
-	{ DRM_MODE("1920x1440", DRM_MODE_TYPE_DRIVER, 234000, 1920, 2048,
-		   2256, 2600, 0, 1440, 1441, 1444, 1500, 0,
-		   DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_PVSYNC) },
-	/* 2560x1600@60Hz */
-	{ DRM_MODE("2560x1600", DRM_MODE_TYPE_DRIVER, 348500, 2560, 2752,
-		   3032, 3504, 0, 1600, 1603, 1609, 1658, 0,
-		   DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_PVSYNC) },
-	/* Terminate */
-	{ DRM_MODE("", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) },
-};
-
-static int vmw_ldu_connector_fill_modes(struct drm_connector *connector,
-					uint32_t max_width, uint32_t max_height)
-{
-	struct vmw_legacy_display_unit *ldu = vmw_connector_to_ldu(connector);
-	struct drm_device *dev = connector->dev;
-	struct vmw_private *dev_priv = vmw_priv(dev);
-	struct drm_display_mode *mode = NULL;
-	struct drm_display_mode *bmode;
-	struct drm_display_mode prefmode = { DRM_MODE("preferred",
-		DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED,
-		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-		DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_PVSYNC)
-	};
-	int i;
-
-	/* Add preferred mode */
-	{
-		mode = drm_mode_duplicate(dev, &prefmode);
-		if (!mode)
-			return 0;
-		mode->hdisplay = ldu->pref_width;
-		mode->vdisplay = ldu->pref_height;
-		mode->vrefresh = drm_mode_vrefresh(mode);
-		if (vmw_kms_validate_mode_vram(dev_priv, mode->hdisplay * 2,
-					       mode->vdisplay)) {
-			drm_mode_probed_add(connector, mode);
-
-			if (ldu->pref_mode) {
-				list_del_init(&ldu->pref_mode->head);
-				drm_mode_destroy(dev, ldu->pref_mode);
-			}
-
-			ldu->pref_mode = mode;
-		}
-	}
-
-	for (i = 0; vmw_ldu_connector_builtin[i].type != 0; i++) {
-		bmode = &vmw_ldu_connector_builtin[i];
-		if (bmode->hdisplay > max_width ||
-		    bmode->vdisplay > max_height)
-			continue;
-
-		if (!vmw_kms_validate_mode_vram(dev_priv, bmode->hdisplay * 2,
-						bmode->vdisplay))
-			continue;
-
-		mode = drm_mode_duplicate(dev, bmode);
-		if (!mode)
-			return 0;
-		mode->vrefresh = drm_mode_vrefresh(mode);
-
-		drm_mode_probed_add(connector, mode);
-	}
-
-	drm_mode_connector_list_update(connector);
-
-	return 1;
-}
-
-static int vmw_ldu_connector_set_property(struct drm_connector *connector,
-					  struct drm_property *property,
-					  uint64_t val)
-{
-	return 0;
-}
-
 static void vmw_ldu_connector_destroy(struct drm_connector *connector)
 {
 	vmw_ldu_destroy(vmw_connector_to_ldu(connector));
 }
 
-static struct drm_connector_funcs vmw_legacy_connector_funcs = {
-	.dpms = vmw_ldu_connector_dpms,
-	.save = vmw_ldu_connector_save,
-	.restore = vmw_ldu_connector_restore,
-	.detect = vmw_ldu_connector_detect,
-	.fill_modes = vmw_ldu_connector_fill_modes,
-	.set_property = vmw_ldu_connector_set_property,
+static const struct drm_connector_funcs vmw_legacy_connector_funcs = {
+	.dpms = vmw_du_connector_dpms,
+	.detect = vmw_du_connector_detect,
+	.fill_modes = vmw_du_connector_fill_modes,
 	.destroy = vmw_ldu_connector_destroy,
+	.reset = vmw_du_connector_reset,
+	.atomic_duplicate_state = vmw_du_connector_duplicate_state,
+	.atomic_destroy_state = vmw_du_connector_destroy_state,
 };
+
+static const struct
+drm_connector_helper_funcs vmw_ldu_connector_helper_funcs = {
+};
+
+static int vmw_kms_ldu_do_bo_dirty(struct vmw_private *dev_priv,
+				   struct vmw_framebuffer *framebuffer,
+				   unsigned int flags, unsigned int color,
+				   struct drm_mode_rect *clips,
+				   unsigned int num_clips);
+
+/*
+ * Legacy Display Plane Functions
+ */
+
+static void
+vmw_ldu_primary_plane_atomic_update(struct drm_plane *plane,
+				    struct drm_atomic_state *state)
+{
+	struct drm_plane_state *old_state = drm_atomic_get_old_plane_state(state,
+									   plane);
+	struct drm_plane_state *new_state = drm_atomic_get_new_plane_state(state,
+									   plane);
+	struct vmw_private *dev_priv;
+	struct vmw_legacy_display_unit *ldu;
+	struct vmw_framebuffer *vfb;
+	struct drm_framebuffer *fb;
+	struct drm_crtc *crtc = new_state->crtc ?: old_state->crtc;
+
+	ldu = vmw_crtc_to_ldu(crtc);
+	dev_priv = vmw_priv(plane->dev);
+	fb       = new_state->fb;
+
+	vfb = (fb) ? vmw_framebuffer_to_vfb(fb) : NULL;
+
+	if (vfb)
+		vmw_ldu_add_active(dev_priv, ldu, vfb);
+	else
+		vmw_ldu_del_active(dev_priv, ldu);
+
+	vmw_ldu_commit_list(dev_priv);
+
+	if (vfb && vmw_cmd_supported(dev_priv)) {
+		struct drm_mode_rect fb_rect = {
+			.x1 = 0,
+			.y1 = 0,
+			.x2 = vfb->base.width,
+			.y2 = vfb->base.height
+		};
+		struct drm_mode_rect *damage_rects = drm_plane_get_damage_clips(new_state);
+		u32 rect_count = drm_plane_get_damage_clips_count(new_state);
+		int ret;
+
+		if (!damage_rects) {
+			damage_rects = &fb_rect;
+			rect_count = 1;
+		}
+
+		ret = vmw_kms_ldu_do_bo_dirty(dev_priv, vfb, 0, 0, damage_rects, rect_count);
+
+		drm_WARN_ONCE(plane->dev, ret,
+			"vmw_kms_ldu_do_bo_dirty failed with: ret=%d\n", ret);
+
+		vmw_cmd_flush(dev_priv, false);
+	}
+}
+
+static const struct drm_plane_funcs vmw_ldu_plane_funcs = {
+	.update_plane = drm_atomic_helper_update_plane,
+	.disable_plane = drm_atomic_helper_disable_plane,
+	.destroy = vmw_du_primary_plane_destroy,
+	.reset = vmw_du_plane_reset,
+	.atomic_duplicate_state = vmw_du_plane_duplicate_state,
+	.atomic_destroy_state = vmw_du_plane_destroy_state,
+};
+
+static const struct drm_plane_funcs vmw_ldu_cursor_funcs = {
+	.update_plane = drm_atomic_helper_update_plane,
+	.disable_plane = drm_atomic_helper_disable_plane,
+	.destroy = vmw_du_cursor_plane_destroy,
+	.reset = vmw_du_plane_reset,
+	.atomic_duplicate_state = vmw_du_plane_duplicate_state,
+	.atomic_destroy_state = vmw_du_plane_destroy_state,
+};
+
+/*
+ * Atomic Helpers
+ */
+static const struct
+drm_plane_helper_funcs vmw_ldu_cursor_plane_helper_funcs = {
+	.atomic_check = vmw_du_cursor_plane_atomic_check,
+	.atomic_update = vmw_du_cursor_plane_atomic_update,
+	.prepare_fb = vmw_du_cursor_plane_prepare_fb,
+	.cleanup_fb = vmw_du_cursor_plane_cleanup_fb,
+};
+
+static const struct
+drm_plane_helper_funcs vmw_ldu_primary_plane_helper_funcs = {
+	.atomic_check = vmw_du_primary_plane_atomic_check,
+	.atomic_update = vmw_ldu_primary_plane_atomic_update,
+};
+
+static const struct drm_crtc_helper_funcs vmw_ldu_crtc_helper_funcs = {
+	.mode_set_nofb = vmw_ldu_crtc_mode_set_nofb,
+	.atomic_check = vmw_du_crtc_atomic_check,
+	.atomic_begin = vmw_du_crtc_atomic_begin,
+	.atomic_flush = vmw_du_crtc_atomic_flush,
+	.atomic_enable = vmw_ldu_crtc_atomic_enable,
+	.atomic_disable = vmw_ldu_crtc_atomic_disable,
+};
+
 
 static int vmw_ldu_init(struct vmw_private *dev_priv, unsigned unit)
 {
 	struct vmw_legacy_display_unit *ldu;
-	struct drm_device *dev = dev_priv->dev;
+	struct drm_device *dev = &dev_priv->drm;
 	struct drm_connector *connector;
 	struct drm_encoder *encoder;
+	struct drm_plane *primary;
+	struct vmw_cursor_plane *cursor;
 	struct drm_crtc *crtc;
+	int ret;
 
 	ldu = kzalloc(sizeof(*ldu), GFP_KERNEL);
 	if (!ldu)
@@ -519,46 +400,130 @@ static int vmw_ldu_init(struct vmw_private *dev_priv, unsigned unit)
 	crtc = &ldu->base.crtc;
 	encoder = &ldu->base.encoder;
 	connector = &ldu->base.connector;
+	primary = &ldu->base.primary;
+	cursor = &ldu->base.cursor;
 
 	INIT_LIST_HEAD(&ldu->active);
 
-	ldu->pref_active = (unit == 0);
-	ldu->pref_width = 800;
-	ldu->pref_height = 600;
-	ldu->pref_mode = NULL;
+	ldu->base.pref_active = (unit == 0);
+	ldu->base.pref_width = dev_priv->initial_width;
+	ldu->base.pref_height = dev_priv->initial_height;
+	ldu->base.pref_mode = NULL;
 
-	drm_connector_init(dev, connector, &vmw_legacy_connector_funcs,
-			   DRM_MODE_CONNECTOR_LVDS);
-	connector->status = vmw_ldu_connector_detect(connector, true);
+	/*
+	 * Remove this after enabling atomic because property values can
+	 * only exist in a state object
+	 */
+	ldu->base.is_implicit = true;
 
-	drm_encoder_init(dev, encoder, &vmw_legacy_encoder_funcs,
-			 DRM_MODE_ENCODER_LVDS);
-	drm_mode_connector_attach_encoder(connector, encoder);
+	/* Initialize primary plane */
+	ret = drm_universal_plane_init(dev, primary,
+				       0, &vmw_ldu_plane_funcs,
+				       vmw_primary_plane_formats,
+				       ARRAY_SIZE(vmw_primary_plane_formats),
+				       NULL, DRM_PLANE_TYPE_PRIMARY, NULL);
+	if (ret) {
+		DRM_ERROR("Failed to initialize primary plane");
+		goto err_free;
+	}
+
+	drm_plane_helper_add(primary, &vmw_ldu_primary_plane_helper_funcs);
+
+	/*
+	 * We're going to be using traces and software cursors
+	 */
+	if (vmw_cmd_supported(dev_priv)) {
+		/* Initialize cursor plane */
+		ret = drm_universal_plane_init(dev, &cursor->base,
+					       0, &vmw_ldu_cursor_funcs,
+					       vmw_cursor_plane_formats,
+					       ARRAY_SIZE(vmw_cursor_plane_formats),
+					       NULL, DRM_PLANE_TYPE_CURSOR, NULL);
+		if (ret) {
+			DRM_ERROR("Failed to initialize cursor plane");
+			drm_plane_cleanup(&ldu->base.primary);
+			goto err_free;
+		}
+
+		drm_plane_helper_add(&cursor->base, &vmw_ldu_cursor_plane_helper_funcs);
+	}
+
+	ret = drm_connector_init(dev, connector, &vmw_legacy_connector_funcs,
+				 DRM_MODE_CONNECTOR_VIRTUAL);
+	if (ret) {
+		DRM_ERROR("Failed to initialize connector\n");
+		goto err_free;
+	}
+
+	drm_connector_helper_add(connector, &vmw_ldu_connector_helper_funcs);
+	connector->status = vmw_du_connector_detect(connector, true);
+
+	ret = drm_encoder_init(dev, encoder, &vmw_legacy_encoder_funcs,
+			       DRM_MODE_ENCODER_VIRTUAL, NULL);
+	if (ret) {
+		DRM_ERROR("Failed to initialize encoder\n");
+		goto err_free_connector;
+	}
+
+	(void) drm_connector_attach_encoder(connector, encoder);
 	encoder->possible_crtcs = (1 << unit);
 	encoder->possible_clones = 0;
 
-	drm_crtc_init(dev, crtc, &vmw_legacy_crtc_funcs);
+	ret = drm_connector_register(connector);
+	if (ret) {
+		DRM_ERROR("Failed to register connector\n");
+		goto err_free_encoder;
+	}
 
-	drm_connector_attach_property(connector,
-				      dev->mode_config.dirty_info_property,
-				      1);
+	ret = drm_crtc_init_with_planes(dev, crtc, primary,
+		      vmw_cmd_supported(dev_priv) ? &cursor->base : NULL,
+		      &vmw_legacy_crtc_funcs, NULL);
+	if (ret) {
+		DRM_ERROR("Failed to initialize CRTC\n");
+		goto err_free_unregister;
+	}
+
+	drm_crtc_helper_add(crtc, &vmw_ldu_crtc_helper_funcs);
+
+	drm_mode_crtc_set_gamma_size(crtc, 256);
+
+	drm_object_attach_property(&connector->base,
+				   dev_priv->hotplug_mode_update_property, 1);
+	drm_object_attach_property(&connector->base,
+				   dev->mode_config.suggested_x_property, 0);
+	drm_object_attach_property(&connector->base,
+				   dev->mode_config.suggested_y_property, 0);
+	if (dev_priv->implicit_placement_property)
+		drm_object_attach_property
+			(&connector->base,
+			 dev_priv->implicit_placement_property,
+			 1);
 
 	return 0;
+
+err_free_unregister:
+	drm_connector_unregister(connector);
+err_free_encoder:
+	drm_encoder_cleanup(encoder);
+err_free_connector:
+	drm_connector_cleanup(connector);
+err_free:
+	kfree(ldu);
+	return ret;
 }
 
-int vmw_kms_init_legacy_display_system(struct vmw_private *dev_priv)
+int vmw_kms_ldu_init_display(struct vmw_private *dev_priv)
 {
-	struct drm_device *dev = dev_priv->dev;
-	int i;
-	int ret;
+	struct drm_device *dev = &dev_priv->drm;
+	int i, ret;
+	int num_display_units = (dev_priv->capabilities & SVGA_CAP_MULTIMON) ?
+					VMWGFX_NUM_DISPLAY_UNITS : 1;
 
-	if (dev_priv->ldu_priv) {
-		DRM_INFO("ldu system already on\n");
+	if (unlikely(dev_priv->ldu_priv)) {
 		return -EINVAL;
 	}
 
 	dev_priv->ldu_priv = kmalloc(sizeof(*dev_priv->ldu_priv), GFP_KERNEL);
-
 	if (!dev_priv->ldu_priv)
 		return -ENOMEM;
 
@@ -567,26 +532,28 @@ int vmw_kms_init_legacy_display_system(struct vmw_private *dev_priv)
 	dev_priv->ldu_priv->last_num_active = 0;
 	dev_priv->ldu_priv->fb = NULL;
 
-	drm_mode_create_dirty_info_property(dev_priv->dev);
+	vmw_kms_create_implicit_placement_property(dev_priv);
 
-	if (dev_priv->capabilities & SVGA_CAP_MULTIMON) {
-		for (i = 0; i < VMWGFX_LDU_NUM_DU; ++i)
-			vmw_ldu_init(dev_priv, i);
-		ret = drm_vblank_init(dev, VMWGFX_LDU_NUM_DU);
-	} else {
-		/* for old hardware without multimon only enable one display */
-		vmw_ldu_init(dev_priv, 0);
-		ret = drm_vblank_init(dev, 1);
+	for (i = 0; i < num_display_units; ++i) {
+		ret = vmw_ldu_init(dev_priv, i);
+		if (ret != 0)
+			goto err_free;
 	}
 
+	dev_priv->active_display_unit = vmw_du_legacy;
+
+	drm_mode_config_reset(dev);
+
+	return 0;
+
+err_free:
+	kfree(dev_priv->ldu_priv);
+	dev_priv->ldu_priv = NULL;
 	return ret;
 }
 
-int vmw_kms_close_legacy_display_system(struct vmw_private *dev_priv)
+int vmw_kms_ldu_close_display(struct vmw_private *dev_priv)
 {
-	struct drm_device *dev = dev_priv->dev;
-
-	drm_vblank_cleanup(dev);
 	if (!dev_priv->ldu_priv)
 		return -ENOSYS;
 
@@ -597,41 +564,35 @@ int vmw_kms_close_legacy_display_system(struct vmw_private *dev_priv)
 	return 0;
 }
 
-int vmw_kms_ldu_update_layout(struct vmw_private *dev_priv, unsigned num,
-			      struct drm_vmw_rect *rects)
+
+static int vmw_kms_ldu_do_bo_dirty(struct vmw_private *dev_priv,
+				   struct vmw_framebuffer *framebuffer,
+				   unsigned int flags, unsigned int color,
+				   struct drm_mode_rect *clips,
+				   unsigned int num_clips)
 {
-	struct drm_device *dev = dev_priv->dev;
-	struct vmw_legacy_display_unit *ldu;
-	struct drm_connector *con;
+	size_t fifo_size;
 	int i;
 
-	mutex_lock(&dev->mode_config.mutex);
+	struct {
+		uint32_t header;
+		SVGAFifoCmdUpdate body;
+	} *cmd;
 
-#if 0
-	DRM_INFO("%s: new layout ", __func__);
-	for (i = 0; i < (int)num; i++)
-		DRM_INFO("(%i, %i %ux%u) ", rects[i].x, rects[i].y,
-			 rects[i].w, rects[i].h);
-	DRM_INFO("\n");
-#else
-	(void)i;
-#endif
+	fifo_size = sizeof(*cmd) * num_clips;
+	cmd = VMW_CMD_RESERVE(dev_priv, fifo_size);
+	if (unlikely(cmd == NULL))
+		return -ENOMEM;
 
-	list_for_each_entry(con, &dev->mode_config.connector_list, head) {
-		ldu = vmw_connector_to_ldu(con);
-		if (num > ldu->base.unit) {
-			ldu->pref_width = rects[ldu->base.unit].w;
-			ldu->pref_height = rects[ldu->base.unit].h;
-			ldu->pref_active = true;
-		} else {
-			ldu->pref_width = 800;
-			ldu->pref_height = 600;
-			ldu->pref_active = false;
-		}
-		con->status = vmw_ldu_connector_detect(con, true);
+	memset(cmd, 0, fifo_size);
+	for (i = 0; i < num_clips; i++, clips++) {
+		cmd[i].header = SVGA_CMD_UPDATE;
+		cmd[i].body.x = clips->x1;
+		cmd[i].body.y = clips->y1;
+		cmd[i].body.width = clips->x2 - clips->x1;
+		cmd[i].body.height = clips->y2 - clips->y1;
 	}
 
-	mutex_unlock(&dev->mode_config.mutex);
-
+	vmw_cmd_commit(dev_priv, fifo_size);
 	return 0;
 }

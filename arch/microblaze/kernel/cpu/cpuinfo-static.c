@@ -22,7 +22,7 @@ static const char cpu_ver_string[] = CONFIG_XILINX_MICROBLAZE0_HW_VER;
 
 void __init set_cpuinfo_static(struct cpuinfo *ci, struct device_node *cpu)
 {
-	int i = 0;
+	u32 i = 0;
 
 	ci->use_instr =
 		(fcpu(cpu, "xlnx,use-barrel") ? PVR0_USE_BARREL_MASK : 0) |
@@ -113,12 +113,11 @@ void __init set_cpuinfo_static(struct cpuinfo *ci, struct device_node *cpu)
 	ci->num_rd_brk = fcpu(cpu, "xlnx,number-of-rd-addr-brk");
 	ci->num_wr_brk = fcpu(cpu, "xlnx,number-of-wr-addr-brk");
 
-	ci->cpu_clock_freq = fcpu(cpu, "timebase-frequency");
-
 	ci->pvr_user1 = fcpu(cpu, "xlnx,pvr-user1");
 	ci->pvr_user2 = fcpu(cpu, "xlnx,pvr-user2");
 
 	ci->mmu = fcpu(cpu, "xlnx,use-mmu");
+	ci->mmu_privins = fcpu(cpu, "xlnx,mmu-privileged-instr");
 	ci->endian = fcpu(cpu, "xlnx,endianness");
 
 	ci->ver_code = 0;

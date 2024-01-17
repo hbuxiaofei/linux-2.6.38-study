@@ -1,15 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* rc5-imon-pad.c - Keytable for SoundGraph iMON PAD and Antec Veris
  * RM-200 Remote Control
  *
  * Copyright (c) 2010 by Jarod Wilson <jarod@redhat.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 
 #include <media/rc-map.h>
+#include <linux/module.h>
 
 /*
  * standard imon remote key table, which isn't really entirely
@@ -87,7 +84,7 @@ static struct rc_map_table imon_pad[] = {
 
 	{ 0x2b8515b7, KEY_VIDEO },
 	{ 0x299195b7, KEY_AUDIO },
-	{ 0x2ba115b7, KEY_CAMERA },
+	{ 0x2ba115b7, KEY_IMAGES },
 	{ 0x28a515b7, KEY_TV },
 	{ 0x29a395b7, KEY_DVD },
 	{ 0x29a295b7, KEY_DVD },
@@ -97,7 +94,7 @@ static struct rc_map_table imon_pad[] = {
 	{ 0x2ba395b7, KEY_MENU },
 
 	{ 0x288515b7, KEY_BOOKMARKS },
-	{ 0x2ab715b7, KEY_MEDIA }, /* Thumbnail */
+	{ 0x2ab715b7, KEY_CAMERA }, /* Thumbnail */
 	{ 0x298595b7, KEY_SUBTITLE },
 	{ 0x2b8595b7, KEY_LANGUAGE },
 
@@ -125,17 +122,16 @@ static struct rc_map_table imon_pad[] = {
 	{ 0x2b8195b7, KEY_CONTEXT_MENU }, /* Left Menu*/
 	{ 0x02000065, KEY_COMPOSE }, /* RightMenu */
 	{ 0x28b715b7, KEY_COMPOSE }, /* RightMenu */
-	{ 0x2ab195b7, KEY_PROG1 }, /* Go or MultiMon */
+	{ 0x2ab195b7, KEY_MEDIA }, /* Go or MultiMon */
 	{ 0x29b715b7, KEY_DASHBOARD }, /* AppLauncher */
 };
 
 static struct rc_map_list imon_pad_map = {
 	.map = {
-		.scan    = imon_pad,
-		.size    = ARRAY_SIZE(imon_pad),
-		/* actual protocol details unknown, hardware decoder */
-		.rc_type = RC_TYPE_OTHER,
-		.name    = RC_MAP_IMON_PAD,
+		.scan     = imon_pad,
+		.size     = ARRAY_SIZE(imon_pad),
+		.rc_proto = RC_PROTO_IMON,
+		.name     = RC_MAP_IMON_PAD,
 	}
 };
 

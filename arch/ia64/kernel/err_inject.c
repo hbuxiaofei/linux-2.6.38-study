@@ -24,7 +24,7 @@
  * Copyright (C) 2006, Intel Corp.  All rights reserved.
  *
  */
-#include <linux/sysdev.h>
+#include <linux/device.h>
 #include <linux/init.h>
 #include <linux/mm.h>
 #include <linux/cpu.h>
@@ -35,10 +35,10 @@
 #define ERR_DATA_BUFFER_SIZE 3 		// Three 8-byte;
 
 #define define_one_ro(name) 						\
-static SYSDEV_ATTR(name, 0444, show_##name, NULL)
+static DEVICE_ATTR(name, 0444, show_##name, NULL)
 
 #define define_one_rw(name) 						\
-static SYSDEV_ATTR(name, 0644, show_##name, store_##name)
+static DEVICE_ATTR(name, 0644, show_##name, store_##name)
 
 static u64 call_start[NR_CPUS];
 static u64 phys_addr[NR_CPUS];
@@ -55,16 +55,16 @@ static u64 resources[NR_CPUS];
 
 #define show(name) 							\
 static ssize_t 								\
-show_##name(struct sys_device *dev, struct sysdev_attribute *attr,	\
+show_##name(struct device *dev, struct device_attribute *attr,	\
 		char *buf)						\
 {									\
 	u32 cpu=dev->id;						\
-	return sprintf(buf, "%lx\n", name[cpu]);			\
+	return sprintf(buf, "%llx\n", name[cpu]);			\
 }
 
 #define store(name)							\
 static ssize_t 								\
-store_##name(struct sys_device *dev, struct sysdev_attribute *attr,	\
+store_##name(struct device *dev, struct device_attribute *attr,	\
 					const char *buf, size_t size)	\
 {									\
 	unsigned int cpu=dev->id;					\
@@ -78,7 +78,7 @@ show(call_start)
  * processor. The cpu number in driver is only used for storing data.
  */
 static ssize_t
-store_call_start(struct sys_device *dev, struct sysdev_attribute *attr,
+store_call_start(struct device *dev, struct device_attribute *attr,
 		const char *buf, size_t size)
 {
 	unsigned int cpu=dev->id;
@@ -86,9 +86,9 @@ store_call_start(struct sys_device *dev, struct sysdev_attribute *attr,
 
 #ifdef ERR_INJ_DEBUG
 	printk(KERN_DEBUG "pal_mc_err_inject for cpu%d:\n", cpu);
-	printk(KERN_DEBUG "err_type_info=%lx,\n", err_type_info[cpu]);
-	printk(KERN_DEBUG "err_struct_info=%lx,\n", err_struct_info[cpu]);
-	printk(KERN_DEBUG "err_data_buffer=%lx, %lx, %lx.\n",
+	printk(KERN_DEBUG "err_type_info=%llx,\n", err_type_info[cpu]);
+	printk(KERN_DEBUG "err_struct_info=%llx,\n", err_struct_info[cpu]);
+	printk(KERN_DEBUG "err_data_buffer=%llx, %llx, %llx.\n",
 			  err_data_buffer[cpu].data1,
 			  err_data_buffer[cpu].data2,
 			  err_data_buffer[cpu].data3);
@@ -117,8 +117,8 @@ store_call_start(struct sys_device *dev, struct sysdev_attribute *attr,
 
 #ifdef ERR_INJ_DEBUG
 	printk(KERN_DEBUG "Returns: status=%d,\n", (int)status[cpu]);
-	printk(KERN_DEBUG "capapbilities=%lx,\n", capabilities[cpu]);
-	printk(KERN_DEBUG "resources=%lx\n", resources[cpu]);
+	printk(KERN_DEBUG "capabilities=%llx,\n", capabilities[cpu]);
+	printk(KERN_DEBUG "resources=%llx\n", resources[cpu]);
 #endif
 	return size;
 }
@@ -127,26 +127,25 @@ show(err_type_info)
 store(err_type_info)
 
 static ssize_t
-show_virtual_to_phys(struct sys_device *dev, struct sysdev_attribute *attr,
+show_virtual_to_phys(struct device *dev, struct device_attribute *attr,
 			char *buf)
 {
 	unsigned int cpu=dev->id;
-	return sprintf(buf, "%lx\n", phys_addr[cpu]);
+	return sprintf(buf, "%llx\n", phys_addr[cpu]);
 }
 
 static ssize_t
-store_virtual_to_phys(struct sys_device *dev, struct sysdev_attribute *attr,
+store_virtual_to_phys(struct device *dev, struct device_attribute *attr,
 			const char *buf, size_t size)
 {
 	unsigned int cpu=dev->id;
 	u64 virt_addr=simple_strtoull(buf, NULL, 16);
 	int ret;
 
-        ret = get_user_pages(current, current->mm, virt_addr,
-                        1, VM_READ, 0, NULL, NULL);
+	ret = get_user_pages_fast(virt_addr, 1, FOLL_WRITE, NULL);
 	if (ret<=0) {
 #ifdef ERR_INJ_DEBUG
-		printk("Virtual address %lx is not existing.\n",virt_addr);
+		printk("Virtual address %llx is not existing.\n", virt_addr);
 #endif
 		return -EINVAL;
 	}
@@ -159,33 +158,33 @@ show(err_struct_info)
 store(err_struct_info)
 
 static ssize_t
-show_err_data_buffer(struct sys_device *dev,
-			struct sysdev_attribute *attr, char *buf)
+show_err_data_buffer(struct device *dev,
+			struct device_attribute *attr, char *buf)
 {
 	unsigned int cpu=dev->id;
 
-	return sprintf(buf, "%lx, %lx, %lx\n",
+	return sprintf(buf, "%llx, %llx, %llx\n",
 			err_data_buffer[cpu].data1,
 			err_data_buffer[cpu].data2,
 			err_data_buffer[cpu].data3);
 }
 
 static ssize_t
-store_err_data_buffer(struct sys_device *dev,
-			struct sysdev_attribute *attr,
+store_err_data_buffer(struct device *dev,
+			struct device_attribute *attr,
 			const char *buf, size_t size)
 {
 	unsigned int cpu=dev->id;
 	int ret;
 
 #ifdef ERR_INJ_DEBUG
-	printk("write err_data_buffer=[%lx,%lx,%lx] on cpu%d\n",
+	printk("write err_data_buffer=[%llx,%llx,%llx] on cpu%d\n",
 		 err_data_buffer[cpu].data1,
 		 err_data_buffer[cpu].data2,
 		 err_data_buffer[cpu].data3,
 		 cpu);
 #endif
-	ret=sscanf(buf, "%lx, %lx, %lx",
+	ret = sscanf(buf, "%llx, %llx, %llx",
 			&err_data_buffer[cpu].data1,
 			&err_data_buffer[cpu].data2,
 			&err_data_buffer[cpu].data3);
@@ -209,14 +208,14 @@ define_one_ro(capabilities);
 define_one_ro(resources);
 
 static struct attribute *default_attrs[] = {
-	&attr_call_start.attr,
-	&attr_virtual_to_phys.attr,
-	&attr_err_type_info.attr,
-	&attr_err_struct_info.attr,
-	&attr_err_data_buffer.attr,
-	&attr_status.attr,
-	&attr_capabilities.attr,
-	&attr_resources.attr,
+	&dev_attr_call_start.attr,
+	&dev_attr_virtual_to_phys.attr,
+	&dev_attr_err_type_info.attr,
+	&dev_attr_err_struct_info.attr,
+	&dev_attr_err_data_buffer.attr,
+	&dev_attr_status.attr,
+	&dev_attr_capabilities.attr,
+	&dev_attr_resources.attr,
 	NULL
 };
 
@@ -225,74 +224,45 @@ static struct attribute_group err_inject_attr_group = {
 	.name = "err_inject"
 };
 /* Add/Remove err_inject interface for CPU device */
-static int __cpuinit err_inject_add_dev(struct sys_device * sys_dev)
+static int err_inject_add_dev(unsigned int cpu)
 {
+	struct device *sys_dev = get_cpu_device(cpu);
+
 	return sysfs_create_group(&sys_dev->kobj, &err_inject_attr_group);
 }
 
-static int __cpuinit err_inject_remove_dev(struct sys_device * sys_dev)
+static int err_inject_remove_dev(unsigned int cpu)
 {
+	struct device *sys_dev = get_cpu_device(cpu);
+
 	sysfs_remove_group(&sys_dev->kobj, &err_inject_attr_group);
 	return 0;
 }
-static int __cpuinit err_inject_cpu_callback(struct notifier_block *nfb,
-		unsigned long action, void *hcpu)
+
+static enum cpuhp_state hp_online;
+
+static int __init err_inject_init(void)
 {
-	unsigned int cpu = (unsigned long)hcpu;
-	struct sys_device *sys_dev;
-
-	sys_dev = get_cpu_sysdev(cpu);
-	switch (action) {
-	case CPU_ONLINE:
-	case CPU_ONLINE_FROZEN:
-		err_inject_add_dev(sys_dev);
-		break;
-	case CPU_DEAD:
-	case CPU_DEAD_FROZEN:
-		err_inject_remove_dev(sys_dev);
-		break;
-	}
-
-	return NOTIFY_OK;
-}
-
-static struct notifier_block __cpuinitdata err_inject_cpu_notifier =
-{
-	.notifier_call = err_inject_cpu_callback,
-};
-
-static int __init
-err_inject_init(void)
-{
-	int i;
-
+	int ret;
 #ifdef ERR_INJ_DEBUG
 	printk(KERN_INFO "Enter error injection driver.\n");
 #endif
-	for_each_online_cpu(i) {
-		err_inject_cpu_callback(&err_inject_cpu_notifier, CPU_ONLINE,
-				(void *)(long)i);
+
+	ret = cpuhp_setup_state(CPUHP_AP_ONLINE_DYN, "ia64/err_inj:online",
+				err_inject_add_dev, err_inject_remove_dev);
+	if (ret >= 0) {
+		hp_online = ret;
+		ret = 0;
 	}
-
-	register_hotcpu_notifier(&err_inject_cpu_notifier);
-
-	return 0;
+	return ret;
 }
 
-static void __exit
-err_inject_exit(void)
+static void __exit err_inject_exit(void)
 {
-	int i;
-	struct sys_device *sys_dev;
-
 #ifdef ERR_INJ_DEBUG
 	printk(KERN_INFO "Exit error injection driver.\n");
 #endif
-	for_each_online_cpu(i) {
-		sys_dev = get_cpu_sysdev(i);
-		sysfs_remove_group(&sys_dev->kobj, &err_inject_attr_group);
-	}
-	unregister_hotcpu_notifier(&err_inject_cpu_notifier);
+	cpuhp_remove_state(hp_online);
 }
 
 module_init(err_inject_init);

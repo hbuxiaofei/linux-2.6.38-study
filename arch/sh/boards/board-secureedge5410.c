@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 2002  David McCullough <davidm@snapgear.com>
  * Copyright (C) 2003  Paul Mundt <lethal@linux-sh.org>
@@ -14,7 +15,6 @@
 #include <linux/interrupt.h>
 #include <linux/timer.h>
 #include <linux/delay.h>
-#include <linux/module.h>
 #include <linux/sched.h>
 #include <asm/machvec.h>
 #include <mach/secureedge5410.h>
@@ -41,8 +41,7 @@ static int __init eraseconfig_init(void)
 	printk("SnapGear: EraseConfig init\n");
 
 	/* Setup "EraseConfig" switch on external IRQ 0 */
-	if (request_irq(irq, eraseconfig_interrupt, IRQF_DISABLED,
-				"Erase Config", NULL))
+	if (request_irq(irq, eraseconfig_interrupt, 0, "Erase Config", NULL))
 		printk("SnapGear: failed to register IRQ%d for Reset witch\n",
 				irq);
 	else
@@ -50,7 +49,7 @@ static int __init eraseconfig_init(void)
 				irq);
 	return 0;
 }
-module_init(eraseconfig_init);
+device_initcall(eraseconfig_init);
 
 /*
  * Initialize IRQ setting
@@ -72,6 +71,5 @@ static void __init init_snapgear_IRQ(void)
  */
 static struct sh_machine_vector mv_snapgear __initmv = {
 	.mv_name		= "SnapGear SecureEdge5410",
-	.mv_nr_irqs		= 72,
 	.mv_init_irq		= init_snapgear_IRQ,
 };

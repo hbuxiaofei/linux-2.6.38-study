@@ -1,21 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Driver for the Texas Instruments WL1273 FM radio.
  *
- * Copyright (C) 2010 Nokia Corporation
+ * Copyright (C) 2011 Nokia Corporation
  * Author: Matti J. Aaltonen <matti.j.aaltonen@nokia.com>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.	See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
 
 #include <linux/delay.h>
@@ -23,6 +11,7 @@
 #include <linux/interrupt.h>
 #include <linux/mfd/wl1273-core.h>
 #include <linux/slab.h>
+#include <linux/module.h>
 #include <media/v4l2-common.h>
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-device.h>
@@ -67,7 +56,6 @@ struct wl1273_device {
 
 	/* RDS */
 	unsigned int rds_on;
-	struct delayed_work work;
 
 	wait_queue_head_t read_queue;
 	struct mutex lock; /* for serializing fm radio operations */
@@ -104,58 +92,6 @@ static unsigned int rds_buf = 100;
 module_param(rds_buf, uint, 0);
 MODULE_PARM_DESC(rds_buf, "Number of RDS buffer entries. Default = 100");
 
-static int wl1273_fm_read_reg(struct wl1273_core *core, u8 reg, u16 *value)
-{
-	struct i2c_client *client = core->client;
-	u8 b[2];
-	int r;
-
-	r = i2c_smbus_read_i2c_block_data(client, reg, sizeof(b), b);
-	if (r != 2) {
-		dev_err(&client->dev, "%s: Read: %d fails.\n", __func__, reg);
-		return -EREMOTEIO;
-	}
-
-	*value = (u16)b[0] << 8 | b[1];
-
-	return 0;
-}
-
-static int wl1273_fm_write_cmd(struct wl1273_core *core, u8 cmd, u16 param)
-{
-	struct i2c_client *client = core->client;
-	u8 buf[] = { (param >> 8) & 0xff, param & 0xff };
-	int r;
-
-	r = i2c_smbus_write_i2c_block_data(client, cmd, sizeof(buf), buf);
-	if (r) {
-		dev_err(&client->dev, "%s: Cmd: %d fails.\n", __func__, cmd);
-		return r;
-	}
-
-	return 0;
-}
-
-static int wl1273_fm_write_data(struct wl1273_core *core, u8 *data, u16 len)
-{
-	struct i2c_client *client = core->client;
-	struct i2c_msg msg;
-	int r;
-
-	msg.addr = client->addr;
-	msg.flags = 0;
-	msg.buf = data;
-	msg.len = len;
-
-	r = i2c_transfer(client->adapter, &msg, 1);
-	if (r != 1) {
-		dev_err(&client->dev, "%s: write error.\n", __func__);
-		return -EREMOTEIO;
-	}
-
-	return 0;
-}
-
 static int wl1273_fm_write_fw(struct wl1273_core *core,
 			      __u8 *fw, int len)
 {
@@ -188,94 +124,6 @@ static int wl1273_fm_write_fw(struct wl1273_core *core,
 	return r;
 }
 
-/**
- * wl1273_fm_set_audio() -	Set audio mode.
- * @core:			A pointer to the device struct.
- * @new_mode:			The new audio mode.
- *
- * Audio modes are WL1273_AUDIO_DIGITAL and WL1273_AUDIO_ANALOG.
- */
-static int wl1273_fm_set_audio(struct wl1273_core *core, unsigned int new_mode)
-{
-	int r = 0;
-
-	if (core->mode == WL1273_MODE_OFF ||
-	    core->mode == WL1273_MODE_SUSPENDED)
-		return -EPERM;
-
-	if (core->mode == WL1273_MODE_RX && new_mode == WL1273_AUDIO_DIGITAL) {
-		r = wl1273_fm_write_cmd(core, WL1273_PCM_MODE_SET,
-					WL1273_PCM_DEF_MODE);
-		if (r)
-			goto out;
-
-		r = wl1273_fm_write_cmd(core, WL1273_I2S_MODE_CONFIG_SET,
-					core->i2s_mode);
-		if (r)
-			goto out;
-
-		r = wl1273_fm_write_cmd(core, WL1273_AUDIO_ENABLE,
-					WL1273_AUDIO_ENABLE_I2S);
-		if (r)
-			goto out;
-
-	} else if (core->mode == WL1273_MODE_RX &&
-		   new_mode == WL1273_AUDIO_ANALOG) {
-		r = wl1273_fm_write_cmd(core, WL1273_AUDIO_ENABLE,
-					WL1273_AUDIO_ENABLE_ANALOG);
-		if (r)
-			goto out;
-
-	} else if (core->mode == WL1273_MODE_TX &&
-		   new_mode == WL1273_AUDIO_DIGITAL) {
-		r = wl1273_fm_write_cmd(core, WL1273_I2S_MODE_CONFIG_SET,
-					core->i2s_mode);
-		if (r)
-			goto out;
-
-		r = wl1273_fm_write_cmd(core, WL1273_AUDIO_IO_SET,
-					WL1273_AUDIO_IO_SET_I2S);
-		if (r)
-			goto out;
-
-	} else if (core->mode == WL1273_MODE_TX &&
-		   new_mode == WL1273_AUDIO_ANALOG) {
-		r = wl1273_fm_write_cmd(core, WL1273_AUDIO_IO_SET,
-					WL1273_AUDIO_IO_SET_ANALOG);
-		if (r)
-			goto out;
-	}
-
-	core->audio_mode = new_mode;
-out:
-	return r;
-}
-
-/**
- * wl1273_fm_set_volume() -	Set volume.
- * @core:			A pointer to the device struct.
- * @volume:			The new volume value.
- */
-static int wl1273_fm_set_volume(struct wl1273_core *core, unsigned int volume)
-{
-	u16 val;
-	int r;
-
-	if (volume > WL1273_MAX_VOLUME)
-		return -EINVAL;
-
-	if (core->volume == volume)
-		return 0;
-
-	val = volume;
-	r = wl1273_fm_read_reg(core, WL1273_VOLUME_SET, &val);
-	if (r)
-		return r;
-
-	core->volume = volume;
-	return 0;
-}
-
 #define WL1273_FIFO_HAS_DATA(status)	(1 << 5 & status)
 #define WL1273_RDS_CORRECTABLE_ERROR	(1 << 3)
 #define WL1273_RDS_UNCORRECTABLE_ERROR	(1 << 4)
@@ -306,7 +154,7 @@ static int wl1273_fm_rds(struct wl1273_device *radio)
 	if (core->mode != WL1273_MODE_RX)
 		return 0;
 
-	r = wl1273_fm_read_reg(core, WL1273_RDS_SYNC_GET, &val);
+	r = core->read(core, WL1273_RDS_SYNC_GET, &val);
 	if (r)
 		return r;
 
@@ -374,7 +222,7 @@ static irqreturn_t wl1273_fm_irq_thread_handler(int irq, void *dev_id)
 	u16 flags;
 	int r;
 
-	r = wl1273_fm_read_reg(core, WL1273_FLAG_GET, &flags);
+	r = core->read(core, WL1273_FLAG_GET, &flags);
 	if (r)
 		goto out;
 
@@ -398,7 +246,7 @@ static irqreturn_t wl1273_fm_irq_thread_handler(int irq, void *dev_id)
 	if (flags & WL1273_LEV_EVENT) {
 		u16 level;
 
-		r = wl1273_fm_read_reg(core, WL1273_RSSI_LVL_GET, &level);
+		r = core->read(core, WL1273_RSSI_LVL_GET, &level);
 		if (r)
 			goto out;
 
@@ -439,8 +287,8 @@ static irqreturn_t wl1273_fm_irq_thread_handler(int irq, void *dev_id)
 		dev_dbg(radio->dev, "IRQ: FR:\n");
 
 		if (core->mode == WL1273_MODE_RX) {
-			r = wl1273_fm_write_cmd(core, WL1273_TUNER_MODE_SET,
-						TUNER_MODE_STOP_SEARCH);
+			r = core->write(core, WL1273_TUNER_MODE_SET,
+					TUNER_MODE_STOP_SEARCH);
 			if (r) {
 				dev_err(radio->dev,
 					"%s: TUNER_MODE_SET fails: %d\n",
@@ -448,7 +296,7 @@ static irqreturn_t wl1273_fm_irq_thread_handler(int irq, void *dev_id)
 				goto out;
 			}
 
-			r = wl1273_fm_read_reg(core, WL1273_FREQ_SET, &freq);
+			r = core->read(core, WL1273_FREQ_SET, &freq);
 			if (r)
 				goto out;
 
@@ -467,7 +315,7 @@ static irqreturn_t wl1273_fm_irq_thread_handler(int irq, void *dev_id)
 			dev_dbg(radio->dev, "%dkHz\n", radio->rx_frequency);
 
 		} else {
-			r = wl1273_fm_read_reg(core, WL1273_CHANL_SET, &freq);
+			r = core->read(core, WL1273_CHANL_SET, &freq);
 			if (r)
 				goto out;
 
@@ -477,8 +325,7 @@ static irqreturn_t wl1273_fm_irq_thread_handler(int irq, void *dev_id)
 	}
 
 out:
-	wl1273_fm_write_cmd(core, WL1273_INT_MASK_SET,
-			    radio->irq_flags);
+	core->write(core, WL1273_INT_MASK_SET, radio->irq_flags);
 	complete(&radio->busy);
 
 	return IRQ_HANDLED;
@@ -488,6 +335,7 @@ static int wl1273_fm_set_tx_freq(struct wl1273_device *radio, unsigned int freq)
 {
 	struct wl1273_core *core = radio->core;
 	int r = 0;
+	unsigned long t;
 
 	if (freq < WL1273_BAND_TX_LOW) {
 		dev_err(radio->dev,
@@ -512,33 +360,33 @@ static int wl1273_fm_set_tx_freq(struct wl1273_device *radio, unsigned int freq)
 	dev_dbg(radio->dev, "%s: freq: %d kHz\n", __func__, freq);
 
 	/* Set the current tx channel */
-	r = wl1273_fm_write_cmd(core, WL1273_CHANL_SET, freq / 10);
+	r = core->write(core, WL1273_CHANL_SET, freq / 10);
 	if (r)
 		return r;
 
-	INIT_COMPLETION(radio->busy);
+	reinit_completion(&radio->busy);
 
 	/* wait for the FR IRQ */
-	r = wait_for_completion_timeout(&radio->busy, msecs_to_jiffies(2000));
-	if (!r)
+	t = wait_for_completion_timeout(&radio->busy, msecs_to_jiffies(2000));
+	if (!t)
 		return -ETIMEDOUT;
 
-	dev_dbg(radio->dev, "WL1273_CHANL_SET: %d\n", r);
+	dev_dbg(radio->dev, "WL1273_CHANL_SET: %lu\n", t);
 
 	/* Enable the output power */
-	r = wl1273_fm_write_cmd(core, WL1273_POWER_ENB_SET, 1);
+	r = core->write(core, WL1273_POWER_ENB_SET, 1);
 	if (r)
 		return r;
 
-	INIT_COMPLETION(radio->busy);
+	reinit_completion(&radio->busy);
 
 	/* wait for the POWER_ENB IRQ */
-	r = wait_for_completion_timeout(&radio->busy, msecs_to_jiffies(1000));
-	if (!r)
+	t = wait_for_completion_timeout(&radio->busy, msecs_to_jiffies(1000));
+	if (!t)
 		return -ETIMEDOUT;
 
 	radio->tx_frequency = freq;
-	dev_dbg(radio->dev, "WL1273_POWER_ENB_SET: %d\n", r);
+	dev_dbg(radio->dev, "WL1273_POWER_ENB_SET: %lu\n", t);
 
 	return	0;
 }
@@ -547,6 +395,7 @@ static int wl1273_fm_set_rx_freq(struct wl1273_device *radio, unsigned int freq)
 {
 	struct wl1273_core *core = radio->core;
 	int r, f;
+	unsigned long t;
 
 	if (freq < radio->rangelow) {
 		dev_err(radio->dev,
@@ -566,29 +415,29 @@ static int wl1273_fm_set_rx_freq(struct wl1273_device *radio, unsigned int freq)
 
 	dev_dbg(radio->dev, "%s: %dkHz\n", __func__, freq);
 
-	wl1273_fm_write_cmd(core, WL1273_INT_MASK_SET, radio->irq_flags);
+	core->write(core, WL1273_INT_MASK_SET, radio->irq_flags);
 
 	if (radio->band == WL1273_BAND_JAPAN)
 		f = (freq - WL1273_BAND_JAPAN_LOW) / 50;
 	else
 		f = (freq - WL1273_BAND_OTHER_LOW) / 50;
 
-	r = wl1273_fm_write_cmd(core, WL1273_FREQ_SET, f);
+	r = core->write(core, WL1273_FREQ_SET, f);
 	if (r) {
 		dev_err(radio->dev, "FREQ_SET fails\n");
 		goto err;
 	}
 
-	r = wl1273_fm_write_cmd(core, WL1273_TUNER_MODE_SET, TUNER_MODE_PRESET);
+	r = core->write(core, WL1273_TUNER_MODE_SET, TUNER_MODE_PRESET);
 	if (r) {
 		dev_err(radio->dev, "TUNER_MODE_SET fails\n");
 		goto err;
 	}
 
-	INIT_COMPLETION(radio->busy);
+	reinit_completion(&radio->busy);
 
-	r = wait_for_completion_timeout(&radio->busy, msecs_to_jiffies(2000));
-	if (!r) {
+	t = wait_for_completion_timeout(&radio->busy, msecs_to_jiffies(2000));
+	if (!t) {
 		dev_err(radio->dev, "%s: TIMEOUT\n", __func__);
 		return -ETIMEDOUT;
 	}
@@ -609,7 +458,7 @@ static int wl1273_fm_get_freq(struct wl1273_device *radio)
 	int r;
 
 	if (core->mode == WL1273_MODE_RX) {
-		r = wl1273_fm_read_reg(core, WL1273_FREQ_SET, &f);
+		r = core->read(core, WL1273_FREQ_SET, &f);
 		if (r)
 			return r;
 
@@ -619,7 +468,7 @@ static int wl1273_fm_get_freq(struct wl1273_device *radio)
 		else
 			freq = WL1273_BAND_OTHER_LOW + 50 * f;
 	} else {
-		r = wl1273_fm_read_reg(core, WL1273_CHANL_SET, &f);
+		r = core->read(core, WL1273_CHANL_SET, &f);
 		if (r)
 			return r;
 
@@ -670,7 +519,7 @@ static int wl1273_fm_upload_firmware_patch(struct wl1273_device *radio)
 	}
 
 	/* ignore possible error here */
-	wl1273_fm_write_cmd(core, WL1273_RESET, 0);
+	core->write(core, WL1273_RESET, 0);
 
 	dev_dbg(dev, "%s - download OK, r: %d\n", __func__, r);
 out:
@@ -683,14 +532,14 @@ static int wl1273_fm_stop(struct wl1273_device *radio)
 	struct wl1273_core *core = radio->core;
 
 	if (core->mode == WL1273_MODE_RX) {
-		int r = wl1273_fm_write_cmd(core, WL1273_POWER_SET,
+		int r = core->write(core, WL1273_POWER_SET,
 				    WL1273_POWER_SET_OFF);
 		if (r)
 			dev_err(radio->dev, "%s: POWER_SET fails: %d\n",
 				__func__, r);
 	} else if (core->mode == WL1273_MODE_TX) {
-		int r = wl1273_fm_write_cmd(core, WL1273_PUPD_SET,
-					    WL1273_PUPD_SET_OFF);
+		int r = core->write(core, WL1273_PUPD_SET,
+				    WL1273_PUPD_SET_OFF);
 		if (r)
 			dev_err(radio->dev,
 				"%s: PUPD_SET fails: %d\n", __func__, r);
@@ -725,11 +574,11 @@ static int wl1273_fm_start(struct wl1273_device *radio, int new_mode)
 			val |= WL1273_POWER_SET_RDS;
 
 		/* If this fails try again */
-		r = wl1273_fm_write_cmd(core, WL1273_POWER_SET, val);
+		r = core->write(core, WL1273_POWER_SET, val);
 		if (r) {
 			msleep(100);
 
-			r = wl1273_fm_write_cmd(core, WL1273_POWER_SET, val);
+			r = core->write(core, WL1273_POWER_SET, val);
 			if (r) {
 				dev_err(dev, "%s: POWER_SET fails\n", __func__);
 				goto fail;
@@ -742,11 +591,10 @@ static int wl1273_fm_start(struct wl1273_device *radio, int new_mode)
 
 	} else if (new_mode == WL1273_MODE_TX) {
 		/* If this fails try again once */
-		r = wl1273_fm_write_cmd(core, WL1273_PUPD_SET,
-					WL1273_PUPD_SET_ON);
+		r = core->write(core, WL1273_PUPD_SET, WL1273_PUPD_SET_ON);
 		if (r) {
 			msleep(100);
-			r = wl1273_fm_write_cmd(core, WL1273_PUPD_SET,
+			r = core->write(core, WL1273_PUPD_SET,
 					WL1273_PUPD_SET_ON);
 			if (r) {
 				dev_err(dev, "%s: PUPD_SET fails\n", __func__);
@@ -754,10 +602,21 @@ static int wl1273_fm_start(struct wl1273_device *radio, int new_mode)
 			}
 		}
 
-		if (radio->rds_on)
-			r = wl1273_fm_write_cmd(core, WL1273_RDS_DATA_ENB, 1);
-		else
-			r = wl1273_fm_write_cmd(core, WL1273_RDS_DATA_ENB, 0);
+		if (radio->rds_on) {
+			r = core->write(core, WL1273_RDS_DATA_ENB, 1);
+			if (r) {
+				dev_err(dev, "%s: RDS_DATA_ENB ON fails\n",
+					__func__);
+				goto fail;
+			}
+		} else {
+			r = core->write(core, WL1273_RDS_DATA_ENB, 0);
+			if (r) {
+				dev_err(dev, "%s: RDS_DATA_ENB OFF fails\n",
+					__func__);
+				goto fail;
+			}
+		}
 	} else {
 		dev_warn(dev, "%s: Illegal mode.\n", __func__);
 	}
@@ -777,14 +636,14 @@ static int wl1273_fm_start(struct wl1273_device *radio, int new_mode)
 			if (radio->rds_on)
 				val |= WL1273_POWER_SET_RDS;
 
-			r = wl1273_fm_write_cmd(core, WL1273_POWER_SET, val);
+			r = core->write(core, WL1273_POWER_SET, val);
 			if (r) {
 				dev_err(dev, "%s: POWER_SET fails\n", __func__);
 				goto fail;
 			}
 		} else if (new_mode == WL1273_MODE_TX) {
-			r = wl1273_fm_write_cmd(core, WL1273_PUPD_SET,
-						WL1273_PUPD_SET_ON);
+			r = core->write(core, WL1273_PUPD_SET,
+					WL1273_PUPD_SET_ON);
 			if (r) {
 				dev_err(dev, "%s: PUPD_SET fails\n", __func__);
 				goto fail;
@@ -804,14 +663,14 @@ fail:
 static int wl1273_fm_suspend(struct wl1273_device *radio)
 {
 	struct wl1273_core *core = radio->core;
-	int r = 0;
+	int r;
 
 	/* Cannot go from OFF to SUSPENDED */
 	if (core->mode == WL1273_MODE_RX)
-		r = wl1273_fm_write_cmd(core, WL1273_POWER_SET,
+		r = core->write(core, WL1273_POWER_SET,
 				WL1273_POWER_SET_RETENTION);
 	else if (core->mode == WL1273_MODE_TX)
-		r = wl1273_fm_write_cmd(core, WL1273_PUPD_SET,
+		r = core->write(core, WL1273_PUPD_SET,
 				WL1273_PUPD_SET_RETENTION);
 	else
 		r = -EINVAL;
@@ -852,8 +711,7 @@ static int wl1273_fm_set_mode(struct wl1273_device *radio, int mode)
 		}
 
 		core->mode = mode;
-		r = wl1273_fm_write_cmd(core, WL1273_INT_MASK_SET,
-					radio->irq_flags);
+		r = core->write(core, WL1273_INT_MASK_SET, radio->irq_flags);
 		if (r) {
 			dev_err(dev, "INT_MASK_SET fails.\n");
 			goto out;
@@ -948,31 +806,33 @@ static int wl1273_fm_set_seek(struct wl1273_device *radio,
 	if (level < SCHAR_MIN || level > SCHAR_MAX)
 		return -EINVAL;
 
-	INIT_COMPLETION(radio->busy);
+	reinit_completion(&radio->busy);
 	dev_dbg(radio->dev, "%s: BUSY\n", __func__);
 
-	r = wl1273_fm_write_cmd(core, WL1273_INT_MASK_SET, radio->irq_flags);
+	r = core->write(core, WL1273_INT_MASK_SET, radio->irq_flags);
 	if (r)
 		goto out;
 
 	dev_dbg(radio->dev, "%s\n", __func__);
 
-	r = wl1273_fm_write_cmd(core, WL1273_SEARCH_LVL_SET, level);
+	r = core->write(core, WL1273_SEARCH_LVL_SET, level);
 	if (r)
 		goto out;
 
-	r = wl1273_fm_write_cmd(core, WL1273_SEARCH_DIR_SET, dir);
+	r = core->write(core, WL1273_SEARCH_DIR_SET, dir);
 	if (r)
 		goto out;
 
-	r = wl1273_fm_write_cmd(core, WL1273_TUNER_MODE_SET,
-				TUNER_MODE_AUTO_SEEK);
+	r = core->write(core, WL1273_TUNER_MODE_SET, TUNER_MODE_AUTO_SEEK);
 	if (r)
 		goto out;
 
+	/* wait for the FR IRQ */
 	wait_for_completion_timeout(&radio->busy, msecs_to_jiffies(1000));
-	if (!(radio->irq_received & WL1273_BL_EVENT))
+	if (!(radio->irq_received & WL1273_BL_EVENT)) {
+		r = -ETIMEDOUT;
 		goto out;
+	}
 
 	radio->irq_received &= ~WL1273_BL_EVENT;
 
@@ -991,15 +851,16 @@ static int wl1273_fm_set_seek(struct wl1273_device *radio,
 	if (r)
 		goto out;
 
-	INIT_COMPLETION(radio->busy);
+	reinit_completion(&radio->busy);
 	dev_dbg(radio->dev, "%s: BUSY\n", __func__);
 
-	r = wl1273_fm_write_cmd(core, WL1273_TUNER_MODE_SET,
-				TUNER_MODE_AUTO_SEEK);
+	r = core->write(core, WL1273_TUNER_MODE_SET, TUNER_MODE_AUTO_SEEK);
 	if (r)
 		goto out;
 
-	wait_for_completion_timeout(&radio->busy, msecs_to_jiffies(1000));
+	/* wait for the FR IRQ */
+	if (!wait_for_completion_timeout(&radio->busy, msecs_to_jiffies(1000)))
+		r = -ETIMEDOUT;
 out:
 	dev_dbg(radio->dev, "%s: Err: %d\n", __func__, r);
 	return r;
@@ -1020,7 +881,7 @@ static unsigned int wl1273_fm_get_tx_ctune(struct wl1273_device *radio)
 	    core->mode == WL1273_MODE_SUSPENDED)
 		return -EPERM;
 
-	r = wl1273_fm_read_reg(core, WL1273_READ_FMANT_TUNE_VALUE, &val);
+	r = core->read(core, WL1273_READ_FMANT_TUNE_VALUE, &val);
 	if (r) {
 		dev_err(dev, "%s: read error: %d\n", __func__, r);
 		goto out;
@@ -1066,7 +927,7 @@ static int wl1273_fm_set_preemphasis(struct wl1273_device *radio,
 		goto out;
 	}
 
-	r = wl1273_fm_write_cmd(core, WL1273_PREMPH_SET, em);
+	r = core->write(core, WL1273_PREMPH_SET, em);
 	if (r)
 		goto out;
 
@@ -1086,7 +947,7 @@ static int wl1273_fm_rds_on(struct wl1273_device *radio)
 	if (radio->rds_on)
 		return 0;
 
-	r = wl1273_fm_write_cmd(core, WL1273_POWER_SET,
+	r = core->write(core, WL1273_POWER_SET,
 			WL1273_POWER_SET_FM | WL1273_POWER_SET_RDS);
 	if (r)
 		goto out;
@@ -1108,19 +969,16 @@ static int wl1273_fm_rds_off(struct wl1273_device *radio)
 
 	radio->irq_flags &= ~WL1273_RDS_EVENT;
 
-	r = wl1273_fm_write_cmd(core, WL1273_INT_MASK_SET, radio->irq_flags);
+	r = core->write(core, WL1273_INT_MASK_SET, radio->irq_flags);
 	if (r)
 		goto out;
-
-	/* stop rds reception */
-	cancel_delayed_work(&radio->work);
 
 	/* Service pending read */
 	wake_up_interruptible(&radio->read_queue);
 
 	dev_dbg(radio->dev, "%s\n", __func__);
 
-	r = wl1273_fm_write_cmd(core, WL1273_POWER_SET, WL1273_POWER_SET_FM);
+	r = core->write(core, WL1273_POWER_SET, WL1273_POWER_SET_FM);
 	if (r)
 		goto out;
 
@@ -1143,14 +1001,14 @@ static int wl1273_fm_set_rds(struct wl1273_device *radio, unsigned int new_mode)
 		return -EPERM;
 
 	if (new_mode == WL1273_RDS_RESET) {
-		r = wl1273_fm_write_cmd(core, WL1273_RDS_CNTRL_SET, 1);
+		r = core->write(core, WL1273_RDS_CNTRL_SET, 1);
 		return r;
 	}
 
 	if (core->mode == WL1273_MODE_TX && new_mode == WL1273_RDS_OFF) {
-		r = wl1273_fm_write_cmd(core, WL1273_RDS_DATA_ENB, 0);
+		r = core->write(core, WL1273_RDS_DATA_ENB, 0);
 	} else if (core->mode == WL1273_MODE_TX && new_mode == WL1273_RDS_ON) {
-		r = wl1273_fm_write_cmd(core, WL1273_RDS_DATA_ENB, 1);
+		r = core->write(core, WL1273_RDS_DATA_ENB, 1);
 	} else if (core->mode == WL1273_MODE_RX && new_mode == WL1273_RDS_OFF) {
 		r = wl1273_fm_rds_off(radio);
 	} else if (core->mode == WL1273_MODE_RX && new_mode == WL1273_RDS_ON) {
@@ -1171,12 +1029,13 @@ static ssize_t wl1273_fm_fops_write(struct file *file, const char __user *buf,
 				    size_t count, loff_t *ppos)
 {
 	struct wl1273_device *radio = video_get_drvdata(video_devdata(file));
+	struct wl1273_core *core = radio->core;
 	u16 val;
 	int r;
 
 	dev_dbg(radio->dev, "%s\n", __func__);
 
-	if (radio->core->mode != WL1273_MODE_TX)
+	if (core->mode != WL1273_MODE_TX)
 		return count;
 
 	if (radio->rds_users == 0) {
@@ -1184,7 +1043,7 @@ static ssize_t wl1273_fm_fops_write(struct file *file, const char __user *buf,
 		return 0;
 	}
 
-	if (mutex_lock_interruptible(&radio->core->lock))
+	if (mutex_lock_interruptible(&core->lock))
 		return -EINTR;
 	/*
 	 * Multiple processes can open the device, but only
@@ -1202,7 +1061,7 @@ static ssize_t wl1273_fm_fops_write(struct file *file, const char __user *buf,
 	else
 		val = count;
 
-	wl1273_fm_write_cmd(radio->core, WL1273_RDS_CONFIG_DATA_SET, val);
+	core->write(core, WL1273_RDS_CONFIG_DATA_SET, val);
 
 	if (copy_from_user(radio->write_buf + 1, buf, val)) {
 		r = -EFAULT;
@@ -1213,23 +1072,23 @@ static ssize_t wl1273_fm_fops_write(struct file *file, const char __user *buf,
 	dev_dbg(radio->dev, "From user: \"%s\"\n", radio->write_buf);
 
 	radio->write_buf[0] = WL1273_RDS_DATA_SET;
-	wl1273_fm_write_data(radio->core, radio->write_buf, val + 1);
+	core->write_data(core, radio->write_buf, val + 1);
 
 	r = val;
 out:
-	mutex_unlock(&radio->core->lock);
+	mutex_unlock(&core->lock);
 
 	return r;
 }
 
-static unsigned int wl1273_fm_fops_poll(struct file *file,
+static __poll_t wl1273_fm_fops_poll(struct file *file,
 					struct poll_table_struct *pts)
 {
 	struct wl1273_device *radio = video_get_drvdata(video_devdata(file));
 	struct wl1273_core *core = radio->core;
 
 	if (radio->owner && radio->owner != file)
-		return -EBUSY;
+		return EPOLLERR;
 
 	radio->owner = file;
 
@@ -1237,10 +1096,10 @@ static unsigned int wl1273_fm_fops_poll(struct file *file,
 		poll_wait(file, &radio->read_queue, pts);
 
 		if (radio->rd_index != radio->wr_index)
-			return POLLIN | POLLRDNORM;
+			return EPOLLIN | EPOLLRDNORM;
 
 	} else if (core->mode == WL1273_MODE_TX) {
-		return POLLOUT | POLLWRNORM;
+		return EPOLLOUT | EPOLLWRNORM;
 	}
 
 	return 0;
@@ -1263,8 +1122,8 @@ static int wl1273_fm_fops_open(struct file *file)
 
 		radio->irq_flags |= WL1273_RDS_EVENT;
 
-		r = wl1273_fm_write_cmd(core, WL1273_INT_MASK_SET,
-					radio->irq_flags);
+		r = core->write(core, WL1273_INT_MASK_SET,
+				radio->irq_flags);
 		if (r) {
 			mutex_unlock(&core->lock);
 			goto out;
@@ -1289,15 +1148,14 @@ static int wl1273_fm_fops_release(struct file *file)
 	if (radio->rds_users > 0) {
 		radio->rds_users--;
 		if (radio->rds_users == 0) {
-			if (mutex_lock_interruptible(&core->lock))
-				return -EINTR;
+			mutex_lock(&core->lock);
 
 			radio->irq_flags &= ~WL1273_RDS_EVENT;
 
 			if (core->mode == WL1273_MODE_RX) {
-				r = wl1273_fm_write_cmd(core,
-							WL1273_INT_MASK_SET,
-							radio->irq_flags);
+				r = core->write(core,
+						WL1273_INT_MASK_SET,
+						radio->irq_flags);
 				if (r) {
 					mutex_unlock(&core->lock);
 					goto out;
@@ -1324,7 +1182,7 @@ static ssize_t wl1273_fm_fops_read(struct file *file, char __user *buf,
 
 	dev_dbg(radio->dev, "%s\n", __func__);
 
-	if (radio->core->mode != WL1273_MODE_RX)
+	if (core->mode != WL1273_MODE_RX)
 		return 0;
 
 	if (radio->rds_users == 0) {
@@ -1345,7 +1203,7 @@ static ssize_t wl1273_fm_fops_read(struct file *file, char __user *buf,
 	}
 	radio->owner = file;
 
-	r = wl1273_fm_read_reg(core, WL1273_RDS_SYNC_GET, &val);
+	r = core->read(core, WL1273_RDS_SYNC_GET, &val);
 	if (r) {
 		dev_err(radio->dev, "%s: Get RDS_SYNC fails.\n", __func__);
 		goto out;
@@ -1419,18 +1277,12 @@ static int wl1273_fm_vidioc_querycap(struct file *file, void *priv,
 
 	dev_dbg(radio->dev, "%s\n", __func__);
 
-	strlcpy(capability->driver, WL1273_FM_DRIVER_NAME,
+	strscpy(capability->driver, WL1273_FM_DRIVER_NAME,
 		sizeof(capability->driver));
-	strlcpy(capability->card, "Texas Instruments Wl1273 FM Radio",
+	strscpy(capability->card, "TI Wl1273 FM Radio",
 		sizeof(capability->card));
-	strlcpy(capability->bus_info, radio->bus_type,
+	strscpy(capability->bus_info, radio->bus_type,
 		sizeof(capability->bus_info));
-
-	capability->capabilities = V4L2_CAP_HW_FREQ_SEEK |
-		V4L2_CAP_TUNER | V4L2_CAP_RADIO | V4L2_CAP_AUDIO |
-		V4L2_CAP_RDS_CAPTURE | V4L2_CAP_MODULATOR |
-		V4L2_CAP_RDS_OUTPUT;
-
 	return 0;
 }
 
@@ -1461,28 +1313,29 @@ static int wl1273_fm_vidioc_s_input(struct file *file, void *priv,
 
 /**
  * wl1273_fm_set_tx_power() -	Set the transmission power value.
- * @core:			A pointer to the device struct.
+ * @radio:			A pointer to the device struct.
  * @power:			The new power value.
  */
 static int wl1273_fm_set_tx_power(struct wl1273_device *radio, u16 power)
 {
+	struct wl1273_core *core = radio->core;
 	int r;
 
-	if (radio->core->mode == WL1273_MODE_OFF ||
-	    radio->core->mode == WL1273_MODE_SUSPENDED)
+	if (core->mode == WL1273_MODE_OFF ||
+	    core->mode == WL1273_MODE_SUSPENDED)
 		return -EPERM;
 
-	mutex_lock(&radio->core->lock);
+	mutex_lock(&core->lock);
 
 	/* Convert the dBuV value to chip presentation */
-	r = wl1273_fm_write_cmd(radio->core, WL1273_POWER_LEV_SET, 122 - power);
+	r = core->write(core, WL1273_POWER_LEV_SET, 122 - power);
 	if (r)
 		goto out;
 
 	radio->tx_power = power;
 
 out:
-	mutex_unlock(&radio->core->lock);
+	mutex_unlock(&core->lock);
 	return r;
 }
 
@@ -1493,23 +1346,24 @@ out:
 static int wl1273_fm_tx_set_spacing(struct wl1273_device *radio,
 				    unsigned int spacing)
 {
+	struct wl1273_core *core = radio->core;
 	int r;
 
 	if (spacing == 0) {
-		r = wl1273_fm_write_cmd(radio->core, WL1273_SCAN_SPACING_SET,
-					WL1273_SPACING_100kHz);
+		r = core->write(core, WL1273_SCAN_SPACING_SET,
+				WL1273_SPACING_100kHz);
 		radio->spacing = 100;
 	} else if (spacing - 50000 < 25000) {
-		r = wl1273_fm_write_cmd(radio->core, WL1273_SCAN_SPACING_SET,
-					WL1273_SPACING_50kHz);
+		r = core->write(core, WL1273_SCAN_SPACING_SET,
+				WL1273_SPACING_50kHz);
 		radio->spacing = 50;
 	} else if (spacing - 100000 < 50000) {
-		r = wl1273_fm_write_cmd(radio->core, WL1273_SCAN_SPACING_SET,
-					WL1273_SPACING_100kHz);
+		r = core->write(core, WL1273_SCAN_SPACING_SET,
+				WL1273_SPACING_100kHz);
 		radio->spacing = 100;
 	} else {
-		r = wl1273_fm_write_cmd(radio->core, WL1273_SCAN_SPACING_SET,
-					WL1273_SPACING_200kHz);
+		r = core->write(core, WL1273_SCAN_SPACING_SET,
+				WL1273_SPACING_200kHz);
 		radio->spacing = 200;
 	}
 
@@ -1567,17 +1421,17 @@ static int wl1273_fm_vidioc_s_ctrl(struct v4l2_ctrl *ctrl)
 			return -EINTR;
 
 		if (core->mode == WL1273_MODE_RX && ctrl->val)
-			r = wl1273_fm_write_cmd(core,
-						WL1273_MUTE_STATUS_SET,
-						WL1273_MUTE_HARD_LEFT |
-						WL1273_MUTE_HARD_RIGHT);
+			r = core->write(core,
+					WL1273_MUTE_STATUS_SET,
+					WL1273_MUTE_HARD_LEFT |
+					WL1273_MUTE_HARD_RIGHT);
 		else if (core->mode == WL1273_MODE_RX)
-			r = wl1273_fm_write_cmd(core,
-						WL1273_MUTE_STATUS_SET, 0x0);
+			r = core->write(core,
+					WL1273_MUTE_STATUS_SET, 0x0);
 		else if (core->mode == WL1273_MODE_TX && ctrl->val)
-			r = wl1273_fm_write_cmd(core, WL1273_MUTE, 1);
+			r = core->write(core, WL1273_MUTE, 1);
 		else if (core->mode == WL1273_MODE_TX)
-			r = wl1273_fm_write_cmd(core, WL1273_MUTE, 0);
+			r = core->write(core, WL1273_MUTE, 0);
 
 		mutex_unlock(&core->lock);
 		break;
@@ -1617,14 +1471,14 @@ static int wl1273_fm_vidioc_g_audio(struct file *file, void *priv,
 	if (audio->index > 1)
 		return -EINVAL;
 
-	strlcpy(audio->name, "Radio", sizeof(audio->name));
+	strscpy(audio->name, "Radio", sizeof(audio->name));
 	audio->capability = V4L2_AUDCAP_STEREO;
 
 	return 0;
 }
 
 static int wl1273_fm_vidioc_s_audio(struct file *file, void *priv,
-				    struct v4l2_audio *audio)
+				    const struct v4l2_audio *audio)
 {
 	struct wl1273_device *radio = video_get_drvdata(video_devdata(file));
 
@@ -1652,14 +1506,15 @@ static int wl1273_fm_vidioc_g_tuner(struct file *file, void *priv,
 	if (tuner->index > 0)
 		return -EINVAL;
 
-	strlcpy(tuner->name, WL1273_FM_DRIVER_NAME, sizeof(tuner->name));
+	strscpy(tuner->name, WL1273_FM_DRIVER_NAME, sizeof(tuner->name));
 	tuner->type = V4L2_TUNER_RADIO;
 
 	tuner->rangelow	= WL1273_FREQ(WL1273_BAND_JAPAN_LOW);
 	tuner->rangehigh = WL1273_FREQ(WL1273_BAND_OTHER_HIGH);
 
 	tuner->capability = V4L2_TUNER_CAP_LOW | V4L2_TUNER_CAP_RDS |
-		V4L2_TUNER_CAP_STEREO | V4L2_TUNER_CAP_RDS_BLOCK_IO;
+		V4L2_TUNER_CAP_STEREO | V4L2_TUNER_CAP_RDS_BLOCK_IO |
+		V4L2_TUNER_CAP_HWSEEK_BOUNDED | V4L2_TUNER_CAP_HWSEEK_WRAP;
 
 	if (radio->stereo)
 		tuner->audmode = V4L2_TUNER_MODE_STEREO;
@@ -1672,7 +1527,7 @@ static int wl1273_fm_vidioc_g_tuner(struct file *file, void *priv,
 	if (mutex_lock_interruptible(&core->lock))
 		return -EINTR;
 
-	r = wl1273_fm_read_reg(core, WL1273_STEREO_GET, &val);
+	r = core->read(core, WL1273_STEREO_GET, &val);
 	if (r)
 		goto out;
 
@@ -1681,7 +1536,7 @@ static int wl1273_fm_vidioc_g_tuner(struct file *file, void *priv,
 	else
 		tuner->rxsubchans = V4L2_TUNER_SUB_MONO;
 
-	r = wl1273_fm_read_reg(core, WL1273_RSSI_LVL_GET, &val);
+	r = core->read(core, WL1273_RSSI_LVL_GET, &val);
 	if (r)
 		goto out;
 
@@ -1690,7 +1545,7 @@ static int wl1273_fm_vidioc_g_tuner(struct file *file, void *priv,
 
 	tuner->afc = 0;
 
-	r = wl1273_fm_read_reg(core, WL1273_RDS_SYNC_GET, &val);
+	r = core->read(core, WL1273_RDS_SYNC_GET, &val);
 	if (r)
 		goto out;
 
@@ -1703,7 +1558,7 @@ out:
 }
 
 static int wl1273_fm_vidioc_s_tuner(struct file *file, void *priv,
-				    struct v4l2_tuner *tuner)
+				    const struct v4l2_tuner *tuner)
 {
 	struct wl1273_device *radio = video_get_drvdata(video_devdata(file));
 	struct wl1273_core *core = radio->core;
@@ -1736,8 +1591,7 @@ static int wl1273_fm_vidioc_s_tuner(struct file *file, void *priv,
 		dev_warn(radio->dev, "%s: RDS fails: %d\n", __func__, r);
 
 	if (tuner->audmode == V4L2_TUNER_MODE_MONO) {
-		r = wl1273_fm_write_cmd(core, WL1273_MOST_MODE_SET,
-					WL1273_RX_MONO);
+		r = core->write(core, WL1273_MOST_MODE_SET, WL1273_RX_MONO);
 		if (r < 0) {
 			dev_warn(radio->dev, "%s: MOST_MODE fails: %d\n",
 				 __func__, r);
@@ -1745,8 +1599,7 @@ static int wl1273_fm_vidioc_s_tuner(struct file *file, void *priv,
 		}
 		radio->stereo = false;
 	} else if (tuner->audmode == V4L2_TUNER_MODE_STEREO) {
-		r = wl1273_fm_write_cmd(core, WL1273_MOST_MODE_SET,
-					WL1273_RX_STEREO);
+		r = core->write(core, WL1273_MOST_MODE_SET, WL1273_RX_STEREO);
 		if (r < 0) {
 			dev_warn(radio->dev, "%s: MOST_MODE fails: %d\n",
 				 __func__, r);
@@ -1786,7 +1639,7 @@ static int wl1273_fm_vidioc_g_frequency(struct file *file, void *priv,
 }
 
 static int wl1273_fm_vidioc_s_frequency(struct file *file, void *priv,
-					struct v4l2_frequency *freq)
+					const struct v4l2_frequency *freq)
 {
 	struct wl1273_device *radio = video_get_drvdata(video_devdata(file));
 	struct wl1273_core *core = radio->core;
@@ -1828,7 +1681,7 @@ static int wl1273_fm_vidioc_s_frequency(struct file *file, void *priv,
 #define WL1273_DEFAULT_SEEK_LEVEL	7
 
 static int wl1273_fm_vidioc_s_hw_freq_seek(struct file *file, void *priv,
-					   struct v4l2_hw_freq_seek *seek)
+					   const struct v4l2_hw_freq_seek *seek)
 {
 	struct wl1273_device *radio = video_get_drvdata(video_devdata(file));
 	struct wl1273_core *core = radio->core;
@@ -1838,6 +1691,9 @@ static int wl1273_fm_vidioc_s_hw_freq_seek(struct file *file, void *priv,
 
 	if (seek->tuner != 0 || seek->type != V4L2_TUNER_RADIO)
 		return -EINVAL;
+
+	if (file->f_flags & O_NONBLOCK)
+		return -EWOULDBLOCK;
 
 	if (mutex_lock_interruptible(&core->lock))
 		return -EINTR;
@@ -1861,7 +1717,7 @@ out:
 }
 
 static int wl1273_fm_vidioc_s_modulator(struct file *file, void *priv,
-					struct v4l2_modulator *modulator)
+					const struct v4l2_modulator *modulator)
 {
 	struct wl1273_device *radio = video_get_drvdata(video_devdata(file));
 	struct wl1273_core *core = radio->core;
@@ -1885,10 +1741,10 @@ static int wl1273_fm_vidioc_s_modulator(struct file *file, void *priv,
 		r = wl1273_fm_set_rds(radio, WL1273_RDS_OFF);
 
 	if (modulator->txsubchans & V4L2_TUNER_SUB_MONO)
-		r = wl1273_fm_write_cmd(core, WL1273_MONO_SET, WL1273_TX_MONO);
+		r = core->write(core, WL1273_MONO_SET, WL1273_TX_MONO);
 	else
-		r = wl1273_fm_write_cmd(core, WL1273_MONO_SET,
-					WL1273_RX_STEREO);
+		r = core->write(core, WL1273_MONO_SET,
+				WL1273_RX_STEREO);
 	if (r < 0)
 		dev_warn(radio->dev, WL1273_FM_DRIVER_NAME
 			 "MONO_SET fails: %d\n", r);
@@ -1908,7 +1764,7 @@ static int wl1273_fm_vidioc_g_modulator(struct file *file, void *priv,
 
 	dev_dbg(radio->dev, "%s\n", __func__);
 
-	strlcpy(modulator->name, WL1273_FM_DRIVER_NAME,
+	strscpy(modulator->name, WL1273_FM_DRIVER_NAME,
 		sizeof(modulator->name));
 
 	modulator->rangelow = WL1273_FREQ(WL1273_BAND_JAPAN_LOW);
@@ -1923,7 +1779,7 @@ static int wl1273_fm_vidioc_g_modulator(struct file *file, void *priv,
 	if (mutex_lock_interruptible(&core->lock))
 		return -EINTR;
 
-	r = wl1273_fm_read_reg(core, WL1273_MONO_SET, &val);
+	r = core->read(core, WL1273_MONO_SET, &val);
 	if (r)
 		goto out;
 
@@ -1960,38 +1816,38 @@ static int wl1273_fm_vidioc_log_status(struct file *file, void *priv)
 		return 0;
 	}
 
-	r = wl1273_fm_read_reg(core, WL1273_ASIC_ID_GET, &val);
+	r = core->read(core, WL1273_ASIC_ID_GET, &val);
 	if (r)
 		dev_err(dev, "%s: Get ASIC_ID fails.\n", __func__);
 	else
 		dev_info(dev, "ASIC_ID: 0x%04x\n", val);
 
-	r = wl1273_fm_read_reg(core, WL1273_ASIC_VER_GET, &val);
+	r = core->read(core, WL1273_ASIC_VER_GET, &val);
 	if (r)
 		dev_err(dev, "%s: Get ASIC_VER fails.\n", __func__);
 	else
 		dev_info(dev, "ASIC Version: 0x%04x\n", val);
 
-	r = wl1273_fm_read_reg(core, WL1273_FIRM_VER_GET, &val);
+	r = core->read(core, WL1273_FIRM_VER_GET, &val);
 	if (r)
 		dev_err(dev, "%s: Get FIRM_VER fails.\n", __func__);
 	else
 		dev_info(dev, "FW version: %d(0x%04x)\n", val, val);
 
-	r = wl1273_fm_read_reg(core, WL1273_BAND_SET, &val);
+	r = core->read(core, WL1273_BAND_SET, &val);
 	if (r)
 		dev_err(dev, "%s: Get BAND fails.\n", __func__);
 	else
 		dev_info(dev, "BAND: %d\n", val);
 
 	if (core->mode == WL1273_MODE_TX) {
-		r = wl1273_fm_read_reg(core, WL1273_PUPD_SET, &val);
+		r = core->read(core, WL1273_PUPD_SET, &val);
 		if (r)
 			dev_err(dev, "%s: Get PUPD fails.\n", __func__);
 		else
 			dev_info(dev, "PUPD: 0x%04x\n", val);
 
-		r = wl1273_fm_read_reg(core, WL1273_CHANL_SET, &val);
+		r = core->read(core, WL1273_CHANL_SET, &val);
 		if (r)
 			dev_err(dev, "%s: Get CHANL fails.\n", __func__);
 		else
@@ -1999,13 +1855,13 @@ static int wl1273_fm_vidioc_log_status(struct file *file, void *priv)
 	} else if (core->mode == WL1273_MODE_RX) {
 		int bf = radio->rangelow;
 
-		r = wl1273_fm_read_reg(core, WL1273_FREQ_SET, &val);
+		r = core->read(core, WL1273_FREQ_SET, &val);
 		if (r)
 			dev_err(dev, "%s: Get FREQ fails.\n", __func__);
 		else
 			dev_info(dev, "RX Frequency: %dkHz\n", bf + val*50);
 
-		r = wl1273_fm_read_reg(core, WL1273_MOST_MODE_SET, &val);
+		r = core->read(core, WL1273_MOST_MODE_SET, &val);
 		if (r)
 			dev_err(dev, "%s: Get MOST_MODE fails.\n",
 				__func__);
@@ -2016,7 +1872,7 @@ static int wl1273_fm_vidioc_log_status(struct file *file, void *priv)
 		else
 			dev_info(dev, "MOST_MODE: Unexpected value: %d\n", val);
 
-		r = wl1273_fm_read_reg(core, WL1273_MOST_BLEND_SET, &val);
+		r = core->read(core, WL1273_MOST_BLEND_SET, &val);
 		if (r)
 			dev_err(dev, "%s: Get MOST_BLEND fails.\n", __func__);
 		else if (val == 0)
@@ -2027,7 +1883,7 @@ static int wl1273_fm_vidioc_log_status(struct file *file, void *priv)
 		else
 			dev_info(dev, "MOST_BLEND: Unexpected val: %d\n", val);
 
-		r = wl1273_fm_read_reg(core, WL1273_STEREO_GET, &val);
+		r = core->read(core, WL1273_STEREO_GET, &val);
 		if (r)
 			dev_err(dev, "%s: Get STEREO fails.\n", __func__);
 		else if (val == 0)
@@ -2037,25 +1893,25 @@ static int wl1273_fm_vidioc_log_status(struct file *file, void *priv)
 		else
 			dev_info(dev, "STEREO: Unexpected value: %d\n", val);
 
-		r = wl1273_fm_read_reg(core, WL1273_RSSI_LVL_GET, &val);
+		r = core->read(core, WL1273_RSSI_LVL_GET, &val);
 		if (r)
 			dev_err(dev, "%s: Get RSSI_LVL fails.\n", __func__);
 		else
 			dev_info(dev, "RX signal strength: %d\n", (s16) val);
 
-		r = wl1273_fm_read_reg(core, WL1273_POWER_SET, &val);
+		r = core->read(core, WL1273_POWER_SET, &val);
 		if (r)
 			dev_err(dev, "%s: Get POWER fails.\n", __func__);
 		else
 			dev_info(dev, "POWER: 0x%04x\n", val);
 
-		r = wl1273_fm_read_reg(core, WL1273_INT_MASK_SET, &val);
+		r = core->read(core, WL1273_INT_MASK_SET, &val);
 		if (r)
 			dev_err(dev, "%s: Get INT_MASK fails.\n", __func__);
 		else
 			dev_info(dev, "INT_MASK: 0x%04x\n", val);
 
-		r = wl1273_fm_read_reg(core, WL1273_RDS_SYNC_GET, &val);
+		r = core->read(core, WL1273_RDS_SYNC_GET, &val);
 		if (r)
 			dev_err(dev, "%s: Get RDS_SYNC fails.\n",
 				__func__);
@@ -2067,14 +1923,14 @@ static int wl1273_fm_vidioc_log_status(struct file *file, void *priv)
 		else
 			dev_info(dev, "RDS_SYNC: Unexpected value: %d\n", val);
 
-		r = wl1273_fm_read_reg(core, WL1273_I2S_MODE_CONFIG_SET, &val);
+		r = core->read(core, WL1273_I2S_MODE_CONFIG_SET, &val);
 		if (r)
 			dev_err(dev, "%s: Get I2S_MODE_CONFIG fails.\n",
 				__func__);
 		else
 			dev_info(dev, "I2S_MODE_CONFIG: 0x%04x\n", val);
 
-		r = wl1273_fm_read_reg(core, WL1273_VOLUME_SET, &val);
+		r = core->read(core, WL1273_VOLUME_SET, &val);
 		if (r)
 			dev_err(dev, "%s: Get VOLUME fails.\n", __func__);
 		else
@@ -2109,11 +1965,16 @@ static const struct v4l2_ioctl_ops wl1273_ioctl_ops = {
 	.vidioc_log_status      = wl1273_fm_vidioc_log_status,
 };
 
-static struct video_device wl1273_viddev_template = {
+static const struct video_device wl1273_viddev_template = {
 	.fops			= &wl1273_fops,
 	.ioctl_ops		= &wl1273_ioctl_ops,
 	.name			= WL1273_FM_DRIVER_NAME,
 	.release		= wl1273_vdev_release,
+	.vfl_dir		= VFL_DIR_TX,
+	.device_caps		= V4L2_CAP_HW_FREQ_SEEK | V4L2_CAP_TUNER |
+				  V4L2_CAP_RADIO | V4L2_CAP_AUDIO |
+				  V4L2_CAP_RDS_CAPTURE | V4L2_CAP_MODULATOR |
+				  V4L2_CAP_RDS_OUTPUT,
 };
 
 static int wl1273_fm_radio_remove(struct platform_device *pdev)
@@ -2129,14 +1990,11 @@ static int wl1273_fm_radio_remove(struct platform_device *pdev)
 	v4l2_ctrl_handler_free(&radio->ctrl_handler);
 	video_unregister_device(&radio->videodev);
 	v4l2_device_unregister(&radio->v4l2dev);
-	kfree(radio->buffer);
-	kfree(radio->write_buf);
-	kfree(radio);
 
 	return 0;
 }
 
-static int __devinit wl1273_fm_radio_probe(struct platform_device *pdev)
+static int wl1273_fm_radio_probe(struct platform_device *pdev)
 {
 	struct wl1273_core **core = pdev->dev.platform_data;
 	struct wl1273_device *radio;
@@ -2151,7 +2009,7 @@ static int __devinit wl1273_fm_radio_probe(struct platform_device *pdev)
 		goto pdata_err;
 	}
 
-	radio = kzalloc(sizeof(*radio), GFP_KERNEL);
+	radio = devm_kzalloc(&pdev->dev, sizeof(*radio), GFP_KERNEL);
 	if (!radio) {
 		r = -ENOMEM;
 		goto pdata_err;
@@ -2159,11 +2017,11 @@ static int __devinit wl1273_fm_radio_probe(struct platform_device *pdev)
 
 	/* RDS buffer allocation */
 	radio->buf_size = rds_buf * RDS_BLOCK_SIZE;
-	radio->buffer = kmalloc(radio->buf_size, GFP_KERNEL);
+	radio->buffer = devm_kzalloc(&pdev->dev, radio->buf_size, GFP_KERNEL);
 	if (!radio->buffer) {
 		pr_err("Cannot allocate memory for RDS buffer.\n");
 		r = -ENOMEM;
-		goto err_kmalloc;
+		goto pdata_err;
 	}
 
 	radio->core = *core;
@@ -2184,16 +2042,12 @@ static int __devinit wl1273_fm_radio_probe(struct platform_device *pdev)
 	radio->stereo = true;
 	radio->bus_type = "I2C";
 
-	radio->core->write = wl1273_fm_write_cmd;
-	radio->core->set_audio = wl1273_fm_set_audio;
-	radio->core->set_volume = wl1273_fm_set_volume;
-
 	if (radio->core->pdata->request_resources) {
 		r = radio->core->pdata->request_resources(radio->core->client);
 		if (r) {
 			dev_err(radio->dev, WL1273_FM_DRIVER_NAME
 				": Cannot get platform data\n");
-			goto err_resources;
+			goto pdata_err;
 		}
 
 		dev_dbg(radio->dev, "irq: %d\n", radio->core->client->irq);
@@ -2208,16 +2062,15 @@ static int __devinit wl1273_fm_radio_probe(struct platform_device *pdev)
 			goto err_request_irq;
 		}
 	} else {
-		dev_err(radio->dev, WL1273_FM_DRIVER_NAME ": Core WL1273 IRQ"
-			" not configured");
+		dev_err(radio->dev, WL1273_FM_DRIVER_NAME ": Core WL1273 IRQ not configured");
 		r = -EINVAL;
-		goto err_resources;
+		goto pdata_err;
 	}
 
 	init_completion(&radio->busy);
 	init_waitqueue_head(&radio->read_queue);
 
-	radio->write_buf = kmalloc(256, GFP_KERNEL);
+	radio->write_buf = devm_kzalloc(&pdev->dev, 256, GFP_KERNEL);
 	if (!radio->write_buf) {
 		r = -ENOMEM;
 		goto write_buf_err;
@@ -2230,12 +2083,11 @@ static int __devinit wl1273_fm_radio_probe(struct platform_device *pdev)
 	r = v4l2_device_register(&pdev->dev, &radio->v4l2dev);
 	if (r) {
 		dev_err(&pdev->dev, "Cannot register v4l2_device.\n");
-		goto device_register_err;
+		goto write_buf_err;
 	}
 
 	/* V4L2 configuration */
-	memcpy(&radio->videodev, &wl1273_viddev_template,
-	       sizeof(wl1273_viddev_template));
+	radio->videodev = wl1273_viddev_template;
 
 	radio->videodev.v4l2_dev = &radio->v4l2dev;
 
@@ -2261,7 +2113,7 @@ static int __devinit wl1273_fm_radio_probe(struct platform_device *pdev)
 				 V4L2_CID_TUNE_ANTENNA_CAPACITOR,
 				 0, 255, 1, 255);
 	if (ctrl)
-		ctrl->is_volatile = 1;
+		ctrl->flags |= V4L2_CTRL_FLAG_VOLATILE;
 
 	if (radio->ctrl_handler.error) {
 		r = radio->ctrl_handler.error;
@@ -2285,46 +2137,25 @@ static int __devinit wl1273_fm_radio_probe(struct platform_device *pdev)
 handler_init_err:
 	v4l2_ctrl_handler_free(&radio->ctrl_handler);
 	v4l2_device_unregister(&radio->v4l2dev);
-device_register_err:
-	kfree(radio->write_buf);
 write_buf_err:
 	free_irq(radio->core->client->irq, radio);
 err_request_irq:
 	radio->core->pdata->free_resources();
-err_resources:
-	kfree(radio->buffer);
-err_kmalloc:
-	kfree(radio);
 pdata_err:
 	return r;
 }
 
-MODULE_ALIAS("platform:wl1273_fm_radio");
-
 static struct platform_driver wl1273_fm_radio_driver = {
 	.probe		= wl1273_fm_radio_probe,
-	.remove		= __devexit_p(wl1273_fm_radio_remove),
+	.remove		= wl1273_fm_radio_remove,
 	.driver		= {
 		.name	= "wl1273_fm_radio",
-		.owner	= THIS_MODULE,
 	},
 };
 
-static int __init wl1273_fm_module_init(void)
-{
-	pr_info("%s\n", __func__);
-	return platform_driver_register(&wl1273_fm_radio_driver);
-}
-module_init(wl1273_fm_module_init);
-
-static void __exit wl1273_fm_module_exit(void)
-{
-	flush_scheduled_work();
-	platform_driver_unregister(&wl1273_fm_radio_driver);
-	pr_info(DRIVER_DESC ", Exiting.\n");
-}
-module_exit(wl1273_fm_module_exit);
+module_platform_driver(wl1273_fm_radio_driver);
 
 MODULE_AUTHOR("Matti Aaltonen <matti.j.aaltonen@nokia.com>");
 MODULE_DESCRIPTION(DRIVER_DESC);
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("platform:wl1273_fm_radio");

@@ -1,12 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
  *  linux/include/linux/mtd/onenand.h
  *
  *  Copyright © 2005-2009 Samsung Electronics
  *  Kyungmin Park <kyungmin.park@samsung.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #ifndef __LINUX_MTD_ONENAND_H
@@ -80,7 +77,6 @@ struct onenand_bufferram {
  * @page_buf:		[INTERN] page main data buffer
  * @oob_buf:		[INTERN] page oob data buffer
  * @subpagesize:	[INTERN] holds the subpagesize
- * @ecclayout:		[REPLACEABLE] the default ecc placement scheme
  * @bbm:		[REPLACEABLE] pointer to Bad Block Management
  * @priv:		[OPTIONAL] pointer to private chip date
  */
@@ -95,6 +91,7 @@ struct onenand_chip {
 	unsigned int		technology;
 	unsigned int		density_mask;
 	unsigned int		options;
+	unsigned int		badblockpos;
 
 	unsigned int		erase_shift;
 	unsigned int		page_shift;
@@ -134,7 +131,6 @@ struct onenand_chip {
 #endif
 
 	int			subpagesize;
-	struct nand_ecclayout	*ecclayout;
 
 	void			*bbm;
 
@@ -184,8 +180,13 @@ struct onenand_chip {
 #define ONENAND_IS_CACHE_PROGRAM(this)					\
 	(this->options & ONENAND_HAS_CACHE_PROGRAM)
 
+#define ONENAND_IS_NOP_1(this)						\
+	(this->options & ONENAND_HAS_NOP_1)
+
 /* Check byte access in OneNAND */
 #define ONENAND_CHECK_BYTE_ACCESS(addr)		(addr & 0x1)
+
+#define ONENAND_BADBLOCK_POS		0
 
 /*
  * Options bits
@@ -195,9 +196,11 @@ struct onenand_chip {
 #define ONENAND_HAS_2PLANE		(0x0004)
 #define ONENAND_HAS_4KB_PAGE		(0x0008)
 #define ONENAND_HAS_CACHE_PROGRAM	(0x0010)
+#define ONENAND_HAS_NOP_1		(0x0020)
 #define ONENAND_SKIP_UNLOCK_CHECK	(0x0100)
 #define ONENAND_PAGEBUF_ALLOC		(0x1000)
 #define ONENAND_OOBBUF_ALLOC		(0x2000)
+#define ONENAND_SKIP_INITIAL_UNLOCKING	(0x4000)
 
 #define ONENAND_IS_4KB_PAGE(this)					\
 	(this->options & ONENAND_HAS_4KB_PAGE)

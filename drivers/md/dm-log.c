@@ -197,15 +197,21 @@ EXPORT_SYMBOL(dm_dirty_log_destroy);
 #define MIRROR_DISK_VERSION 2
 #define LOG_OFFSET 2
 
-struct log_header {
-	uint32_t magic;
+struct log_header_disk {
+	__le32 magic;
 
 	/*
 	 * Simple, incrementing version. no backward
 	 * compatibility.
 	 */
+	__le32 version;
+	__le64 nr_regions;
+} __packed;
+
+struct log_header_core {
+	uint32_t magic;
 	uint32_t version;
-	sector_t nr_regions;
+	uint64_t nr_regions;
 };
 
 struct log_c {
@@ -217,7 +223,7 @@ struct log_c {
 	unsigned int region_count;
 	region_t sync_count;
 
-	unsigned bitset_uint32_count;
+	unsigned int bitset_uint32_count;
 	uint32_t *clean_bits;
 	uint32_t *sync_bits;
 	uint32_t *recovering_bits;	/* FIXME: this seems excessive */
@@ -239,55 +245,55 @@ struct log_c {
 	int log_dev_failed;
 	int log_dev_flush_failed;
 	struct dm_dev *log_dev;
-	struct log_header header;
+	struct log_header_core header;
 
 	struct dm_io_region header_location;
-	struct log_header *disk_header;
+	struct log_header_disk *disk_header;
 };
 
 /*
  * The touched member needs to be updated every time we access
  * one of the bitsets.
  */
-static inline int log_test_bit(uint32_t *bs, unsigned bit)
+static inline int log_test_bit(uint32_t *bs, unsigned int bit)
 {
-	return ext2_test_bit(bit, (unsigned long *) bs) ? 1 : 0;
+	return test_bit_le(bit, bs) ? 1 : 0;
 }
 
 static inline void log_set_bit(struct log_c *l,
-			       uint32_t *bs, unsigned bit)
+			       uint32_t *bs, unsigned int bit)
 {
-	ext2_set_bit(bit, (unsigned long *) bs);
+	__set_bit_le(bit, bs);
 	l->touched_cleaned = 1;
 }
 
 static inline void log_clear_bit(struct log_c *l,
-				 uint32_t *bs, unsigned bit)
+				 uint32_t *bs, unsigned int bit)
 {
-	ext2_clear_bit(bit, (unsigned long *) bs);
+	__clear_bit_le(bit, bs);
 	l->touched_dirtied = 1;
 }
 
 /*----------------------------------------------------------------
  * Header IO
  *--------------------------------------------------------------*/
-static void header_to_disk(struct log_header *core, struct log_header *disk)
+static void header_to_disk(struct log_header_core *core, struct log_header_disk *disk)
 {
 	disk->magic = cpu_to_le32(core->magic);
 	disk->version = cpu_to_le32(core->version);
 	disk->nr_regions = cpu_to_le64(core->nr_regions);
 }
 
-static void header_from_disk(struct log_header *core, struct log_header *disk)
+static void header_from_disk(struct log_header_core *core, struct log_header_disk *disk)
 {
 	core->magic = le32_to_cpu(disk->magic);
 	core->version = le32_to_cpu(disk->version);
 	core->nr_regions = le64_to_cpu(disk->nr_regions);
 }
 
-static int rw_header(struct log_c *lc, int rw)
+static int rw_header(struct log_c *lc, enum req_op op)
 {
-	lc->io_req.bi_rw = rw;
+	lc->io_req.bi_opf = op;
 
 	return dm_io(&lc->io_req, 1, &lc->header_location, NULL);
 }
@@ -300,7 +306,7 @@ static int flush_header(struct log_c *lc)
 		.count = 0,
 	};
 
-	lc->io_req.bi_rw = WRITE_FLUSH;
+	lc->io_req.bi_opf = REQ_OP_WRITE | REQ_PREFLUSH;
 
 	return dm_io(&lc->io_req, 1, &null_location, NULL);
 }
@@ -309,7 +315,7 @@ static int read_header(struct log_c *log)
 {
 	int r;
 
-	r = rw_header(log, READ);
+	r = rw_header(log, REQ_OP_READ);
 	if (r)
 		return r;
 
@@ -363,6 +369,7 @@ static int create_log_context(struct dm_dirty_log *log, struct dm_target *ti,
 	unsigned int region_count;
 	size_t bitset_size, buf_size;
 	int r;
+	char dummy;
 
 	if (argc < 1 || argc > 2) {
 		DMWARN("wrong number of arguments to dirty region log");
@@ -381,7 +388,7 @@ static int create_log_context(struct dm_dirty_log *log, struct dm_target *ti,
 		}
 	}
 
-	if (sscanf(argv[0], "%u", &region_size) != 1 ||
+	if (sscanf(argv[0], "%u%c", &region_size, &dummy) != 1 ||
 	    !_check_region_size(ti, region_size)) {
 		DMWARN("invalid region size %s", argv[0]);
 		return -EINVAL;
@@ -406,8 +413,7 @@ static int create_log_context(struct dm_dirty_log *log, struct dm_target *ti,
 	/*
 	 * Work out how many "unsigned long"s we need to hold the bitset.
 	 */
-	bitset_size = dm_round_up(region_count,
-				  sizeof(*lc->clean_bits) << BYTE_SHIFT);
+	bitset_size = dm_round_up(region_count, BITS_PER_LONG);
 	bitset_size >>= BYTE_SHIFT;
 
 	lc->bitset_uint32_count = bitset_size / sizeof(*lc->clean_bits);
@@ -438,7 +444,7 @@ static int create_log_context(struct dm_dirty_log *log, struct dm_target *ti,
 				bdev_logical_block_size(lc->header_location.
 							    bdev));
 
-		if (buf_size > i_size_read(dev->bdev->bd_inode)) {
+		if (buf_size > bdev_nr_bytes(dev->bdev)) {
 			DMWARN("log device %s too small: need %llu bytes",
 				dev->name, (unsigned long long)buf_size);
 			kfree(lc);
@@ -449,8 +455,7 @@ static int create_log_context(struct dm_dirty_log *log, struct dm_target *ti,
 
 		lc->io_req.mem.type = DM_IO_VMA;
 		lc->io_req.notify.fn = NULL;
-		lc->io_req.client = dm_io_client_create(dm_div_up(buf_size,
-								   PAGE_SIZE));
+		lc->io_req.client = dm_io_client_create();
 		if (IS_ERR(lc->io_req.client)) {
 			r = PTR_ERR(lc->io_req.client);
 			DMWARN("couldn't allocate disk io client");
@@ -487,7 +492,7 @@ static int create_log_context(struct dm_dirty_log *log, struct dm_target *ti,
 	memset(lc->sync_bits, (sync == NOSYNC) ? -1 : 0, bitset_size);
 	lc->sync_count = (sync == NOSYNC) ? region_count : 0;
 
-	lc->recovering_bits = vmalloc(bitset_size);
+	lc->recovering_bits = vzalloc(bitset_size);
 	if (!lc->recovering_bits) {
 		DMWARN("couldn't allocate sync bitset");
 		vfree(lc->sync_bits);
@@ -499,7 +504,6 @@ static int create_log_context(struct dm_dirty_log *log, struct dm_target *ti,
 		kfree(lc);
 		return -ENOMEM;
 	}
-	memset(lc->recovering_bits, 0, bitset_size);
 	lc->sync_search = 0;
 	log->context = lc;
 
@@ -543,7 +547,7 @@ static int disk_ctr(struct dm_dirty_log *log, struct dm_target *ti,
 		return -EINVAL;
 	}
 
-	r = dm_get_device(ti, argv[0], FMODE_READ | FMODE_WRITE, &dev);
+	r = dm_get_device(ti, argv[0], dm_table_get_mode(ti->table), &dev);
 	if (r)
 		return r;
 
@@ -566,16 +570,6 @@ static void disk_dtr(struct dm_dirty_log *log)
 	destroy_log_context(lc);
 }
 
-static int count_bits32(uint32_t *addr, unsigned size)
-{
-	int count = 0, i;
-
-	for (i = 0; i < size; i++) {
-		count += hweight32(*(addr+i));
-	}
-	return count;
-}
-
 static void fail_log_device(struct log_c *lc)
 {
 	if (lc->log_dev_failed)
@@ -588,7 +582,7 @@ static void fail_log_device(struct log_c *lc)
 static int disk_resume(struct dm_dirty_log *log)
 {
 	int r;
-	unsigned i;
+	unsigned int i;
 	struct log_c *lc = (struct log_c *) log->context;
 	size_t size = lc->bitset_uint32_count * sizeof(uint32_t);
 
@@ -619,12 +613,13 @@ static int disk_resume(struct dm_dirty_log *log)
 			log_clear_bit(lc, lc->clean_bits, i);
 
 	/* clear any old bits -- device has shrunk */
-	for (i = lc->region_count; i % (sizeof(*lc->clean_bits) << BYTE_SHIFT); i++)
+	for (i = lc->region_count; i % BITS_PER_LONG; i++)
 		log_clear_bit(lc, lc->clean_bits, i);
 
 	/* copy clean across to sync */
 	memcpy(lc->sync_bits, lc->clean_bits, size);
-	lc->sync_count = count_bits32(lc->clean_bits, lc->bitset_uint32_count);
+	lc->sync_count = memweight(lc->clean_bits,
+				lc->bitset_uint32_count * sizeof(uint32_t));
 	lc->sync_search = 0;
 
 	/* set the correct number of regions in the header */
@@ -633,7 +628,7 @@ static int disk_resume(struct dm_dirty_log *log)
 	header_to_disk(&lc->header, lc->disk_header);
 
 	/* write the new header */
-	r = rw_header(lc, WRITE);
+	r = rw_header(lc, REQ_OP_WRITE);
 	if (!r) {
 		r = flush_header(lc);
 		if (r)
@@ -701,7 +696,7 @@ static int disk_flush(struct dm_dirty_log *log)
 			log_clear_bit(lc, lc->clean_bits, i);
 	}
 
-	r = rw_header(lc, WRITE);
+	r = rw_header(lc, REQ_OP_WRITE);
 	if (r)
 		fail_log_device(lc);
 	else {
@@ -740,8 +735,7 @@ static int core_get_resync_work(struct dm_dirty_log *log, region_t *region)
 		return 0;
 
 	do {
-		*region = ext2_find_next_zero_bit(
-					     (unsigned long *) lc->sync_bits,
+		*region = find_next_zero_bit_le(lc->sync_bits,
 					     lc->region_count,
 					     lc->sync_search);
 		lc->sync_search = *region + 1;
@@ -796,6 +790,11 @@ static int core_status(struct dm_dirty_log *log, status_type_t status,
 		DMEMIT("%s %u %u ", log->type->name,
 		       lc->sync == DEFAULTSYNC ? 1 : 2, lc->region_size);
 		DMEMIT_SYNC;
+		break;
+
+	case STATUSTYPE_IMA:
+		*result = '\0';
+		break;
 	}
 
 	return sz;
@@ -820,6 +819,11 @@ static int disk_status(struct dm_dirty_log *log, status_type_t status,
 		       lc->sync == DEFAULTSYNC ? 2 : 3, lc->log_dev->name,
 		       lc->region_size);
 		DMEMIT_SYNC;
+		break;
+
+	case STATUSTYPE_IMA:
+		*result = '\0';
+		break;
 	}
 
 	return sz;

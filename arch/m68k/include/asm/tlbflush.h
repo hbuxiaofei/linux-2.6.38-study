@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _M68K_TLBFLUSH_H
 #define _M68K_TLBFLUSH_H
 
@@ -5,17 +6,19 @@
 #ifndef CONFIG_SUN3
 
 #include <asm/current.h>
+#include <asm/mcfmmu.h>
 
 static inline void flush_tlb_kernel_page(void *addr)
 {
-	if (CPU_IS_040_OR_060) {
-		mm_segment_t old_fs = get_fs();
-		set_fs(KERNEL_DS);
+	if (CPU_IS_COLDFIRE) {
+		mmu_write(MMUOR, MMUOR_CNL);
+	} else if (CPU_IS_040_OR_060) {
+		set_fc(SUPER_DATA);
 		__asm__ __volatile__(".chip 68040\n\t"
 				     "pflush (%0)\n\t"
 				     ".chip 68k"
 				     : : "a" (addr));
-		set_fs(old_fs);
+		set_fc(USER_DATA);
 	} else if (CPU_IS_020_OR_030)
 		__asm__ __volatile__("pflush #4,#4,(%0)" : : "a" (addr));
 }
@@ -25,12 +28,15 @@ static inline void flush_tlb_kernel_page(void *addr)
  */
 static inline void __flush_tlb(void)
 {
-	if (CPU_IS_040_OR_060)
+	if (CPU_IS_COLDFIRE) {
+		mmu_write(MMUOR, MMUOR_CNL);
+	} else if (CPU_IS_040_OR_060) {
 		__asm__ __volatile__(".chip 68040\n\t"
 				     "pflushan\n\t"
 				     ".chip 68k");
-	else if (CPU_IS_020_OR_030)
+	} else if (CPU_IS_020_OR_030) {
 		__asm__ __volatile__("pflush #0,#4");
+	}
 }
 
 static inline void __flush_tlb040_one(unsigned long addr)
@@ -43,7 +49,9 @@ static inline void __flush_tlb040_one(unsigned long addr)
 
 static inline void __flush_tlb_one(unsigned long addr)
 {
-	if (CPU_IS_040_OR_060)
+	if (CPU_IS_COLDFIRE)
+		mmu_write(MMUOR, MMUOR_CNL);
+	else if (CPU_IS_040_OR_060)
 		__flush_tlb040_one(addr);
 	else if (CPU_IS_020_OR_030)
 		__asm__ __volatile__("pflush #0,#4,(%0)" : : "a" (addr));
@@ -56,12 +64,15 @@ static inline void __flush_tlb_one(unsigned long addr)
  */
 static inline void flush_tlb_all(void)
 {
-	if (CPU_IS_040_OR_060)
+	if (CPU_IS_COLDFIRE) {
+		mmu_write(MMUOR, MMUOR_CNL);
+	} else if (CPU_IS_040_OR_060) {
 		__asm__ __volatile__(".chip 68040\n\t"
 				     "pflusha\n\t"
 				     ".chip 68k");
-	else if (CPU_IS_020_OR_030)
+	} else if (CPU_IS_020_OR_030) {
 		__asm__ __volatile__("pflusha");
+	}
 }
 
 static inline void flush_tlb_mm(struct mm_struct *mm)
@@ -72,12 +83,8 @@ static inline void flush_tlb_mm(struct mm_struct *mm)
 
 static inline void flush_tlb_page(struct vm_area_struct *vma, unsigned long addr)
 {
-	if (vma->vm_mm == current->active_mm) {
-		mm_segment_t old_fs = get_fs();
-		set_fs(USER_DS);
+	if (vma->vm_mm == current->active_mm)
 		__flush_tlb_one(addr);
-		set_fs(old_fs);
-	}
 }
 
 static inline void flush_tlb_range(struct vm_area_struct *vma,
@@ -251,7 +258,7 @@ static inline void flush_tlb_page(struct vm_area_struct *vma, unsigned long addr
 	BUG();
 }
 
-static inline void flush_tlb_range(struct mm_struct *mm,
+static inline void flush_tlb_range(struct vm_area_struct *vma,
 				   unsigned long start, unsigned long end)
 {
 	BUG();

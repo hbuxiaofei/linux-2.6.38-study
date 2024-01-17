@@ -1,15 +1,16 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * ADLX345/346 Three-Axis Digital Accelerometers (SPI Interface)
  *
  * Enter bugs at http://blackfin.uclinux.org/
  *
  * Copyright (C) 2009 Michael Hennerich, Analog Devices Inc.
- * Licensed under the GPL-2 or later.
  */
 
 #include <linux/input.h>	/* BUS_SPI */
 #include <linux/module.h>
 #include <linux/spi/spi.h>
+#include <linux/pm.h>
 #include <linux/types.h>
 #include "adxl34x.h"
 
@@ -57,14 +58,14 @@ static int adxl34x_spi_read_block(struct device *dev,
 	return (status < 0) ? status : 0;
 }
 
-static const struct adxl34x_bus_ops adx134x_spi_bops = {
+static const struct adxl34x_bus_ops adxl34x_spi_bops = {
 	.bustype	= BUS_SPI,
 	.write		= adxl34x_spi_write,
 	.read		= adxl34x_spi_read,
 	.read_block	= adxl34x_spi_read_block,
 };
 
-static int __devinit adxl34x_spi_probe(struct spi_device *spi)
+static int adxl34x_spi_probe(struct spi_device *spi)
 {
 	struct adxl34x *ac;
 
@@ -76,7 +77,7 @@ static int __devinit adxl34x_spi_probe(struct spi_device *spi)
 
 	ac = adxl34x_probe(&spi->dev, spi->irq,
 			   spi->max_speed_hz > MAX_FREQ_NO_FIFODELAY,
-			   &adx134x_spi_bops);
+			   &adxl34x_spi_bops);
 
 	if (IS_ERR(ac))
 		return PTR_ERR(ac);
@@ -86,59 +87,46 @@ static int __devinit adxl34x_spi_probe(struct spi_device *spi)
 	return 0;
 }
 
-static int __devexit adxl34x_spi_remove(struct spi_device *spi)
+static void adxl34x_spi_remove(struct spi_device *spi)
 {
-	struct adxl34x *ac = dev_get_drvdata(&spi->dev);
+	struct adxl34x *ac = spi_get_drvdata(spi);
 
-	return adxl34x_remove(ac);
+	adxl34x_remove(ac);
 }
 
-#ifdef CONFIG_PM
-static int adxl34x_spi_suspend(struct spi_device *spi, pm_message_t message)
+static int __maybe_unused adxl34x_spi_suspend(struct device *dev)
 {
-	struct adxl34x *ac = dev_get_drvdata(&spi->dev);
+	struct spi_device *spi = to_spi_device(dev);
+	struct adxl34x *ac = spi_get_drvdata(spi);
 
 	adxl34x_suspend(ac);
 
 	return 0;
 }
 
-static int adxl34x_spi_resume(struct spi_device *spi)
+static int __maybe_unused adxl34x_spi_resume(struct device *dev)
 {
-	struct adxl34x *ac = dev_get_drvdata(&spi->dev);
+	struct spi_device *spi = to_spi_device(dev);
+	struct adxl34x *ac = spi_get_drvdata(spi);
 
 	adxl34x_resume(ac);
 
 	return 0;
 }
-#else
-# define adxl34x_spi_suspend NULL
-# define adxl34x_spi_resume  NULL
-#endif
+
+static SIMPLE_DEV_PM_OPS(adxl34x_spi_pm, adxl34x_spi_suspend,
+			 adxl34x_spi_resume);
 
 static struct spi_driver adxl34x_driver = {
 	.driver = {
 		.name = "adxl34x",
-		.bus = &spi_bus_type,
-		.owner = THIS_MODULE,
+		.pm = &adxl34x_spi_pm,
 	},
 	.probe   = adxl34x_spi_probe,
-	.remove  = __devexit_p(adxl34x_spi_remove),
-	.suspend = adxl34x_spi_suspend,
-	.resume  = adxl34x_spi_resume,
+	.remove  = adxl34x_spi_remove,
 };
 
-static int __init adxl34x_spi_init(void)
-{
-	return spi_register_driver(&adxl34x_driver);
-}
-module_init(adxl34x_spi_init);
-
-static void __exit adxl34x_spi_exit(void)
-{
-	spi_unregister_driver(&adxl34x_driver);
-}
-module_exit(adxl34x_spi_exit);
+module_spi_driver(adxl34x_driver);
 
 MODULE_AUTHOR("Michael Hennerich <hennerich@blackfin.uclinux.org>");
 MODULE_DESCRIPTION("ADXL345/346 Three-Axis Digital Accelerometer SPI Bus Driver");

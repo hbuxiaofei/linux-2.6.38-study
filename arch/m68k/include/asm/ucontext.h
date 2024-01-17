@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _M68K_UCONTEXT_H
 #define _M68K_UCONTEXT_H
 
@@ -7,11 +8,7 @@ typedef greg_t gregset_t[NGREG];
 
 typedef struct fpregset {
 	int f_fpcntl[3];
-#ifdef __mcoldfire__
-	int f_fpregs[8][2];
-#else
 	int f_fpregs[8*3];
-#endif
 } fpregset_t;
 
 struct mcontext {

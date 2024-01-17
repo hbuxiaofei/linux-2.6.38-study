@@ -1,20 +1,9 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /******************************************************************************
 
     AudioScience HPI driver
-    Copyright (C) 1997-2010  AudioScience Inc. <support@audioscience.com>
+    Copyright (C) 1997-2011  AudioScience Inc. <support@audioscience.com>
 
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of version 2 of the GNU General Public License as
-    published by the Free Software Foundation;
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
 HPI Operating System Specific macros for Linux Kernel driver
 
@@ -27,12 +16,9 @@ HPI Operating System Specific macros for Linux Kernel driver
 #define HPI_OS_LINUX_KERNEL
 
 #define HPI_OS_DEFINED
-#define HPI_KERNEL_MODE
-
-#define HPI_REASSIGN_DUPLICATE_ADAPTER_IDX
+#define HPI_BUILD_KERNEL_MODE
 
 #include <linux/io.h>
-#include <asm/system.h>
 #include <linux/ioctl.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
@@ -40,12 +26,9 @@ HPI Operating System Specific macros for Linux Kernel driver
 #include <linux/firmware.h>
 #include <linux/interrupt.h>
 #include <linux/pci.h>
+#include <linux/mutex.h>
 
 #define HPI_NO_OS_FILE_OPS
-
-#ifdef CONFIG_64BIT
-#define HPI64BIT
-#endif
 
 /** Details of a memory area allocated with  pci_alloc_consistent
 Need all info for parameters to pci_free_consistent
@@ -84,7 +67,7 @@ struct hpi_ioctl_linux {
 };
 
 /* Conflict?: H is already used by a number of drivers hid, bluetooth hci,
-   and some sound drivers sb16, hdsp, emu10k. AFAIK 0xFC is ununsed command
+   and some sound drivers sb16, hdsp, emu10k. AFAIK 0xFC is unused command
 */
 #define HPI_IOCTL_LINUX _IOWR('H', 0xFC, struct hpi_ioctl_linux)
 
@@ -135,35 +118,37 @@ static inline void cond_unlock(struct hpios_spinlock *l)
 
 #define hpios_msgxlock_init(obj)      spin_lock_init(&(obj)->lock)
 #define hpios_msgxlock_lock(obj)   cond_lock(obj)
-#define hpios_msgxlock_un_lock(obj) cond_unlock(obj)
+#define hpios_msgxlock_unlock(obj) cond_unlock(obj)
 
 #define hpios_dsplock_init(obj)       spin_lock_init(&(obj)->dsp_lock.lock)
 #define hpios_dsplock_lock(obj)    cond_lock(&(obj)->dsp_lock)
 #define hpios_dsplock_unlock(obj)  cond_unlock(&(obj)->dsp_lock)
 
 #ifdef CONFIG_SND_DEBUG
-#define HPI_DEBUG
+#define HPI_BUILD_DEBUG
 #endif
 
 #define HPI_ALIST_LOCKING
 #define hpios_alistlock_init(obj)    spin_lock_init(&((obj)->list_lock.lock))
 #define hpios_alistlock_lock(obj) spin_lock(&((obj)->list_lock.lock))
-#define hpios_alistlock_un_lock(obj) spin_unlock(&((obj)->list_lock.lock))
+#define hpios_alistlock_unlock(obj) spin_unlock(&((obj)->list_lock.lock))
 
+struct snd_card;
+
+/** pci drvdata points to an instance of this struct */
 struct hpi_adapter {
+	struct hpi_adapter_obj *adapter;
+	struct snd_card *snd_card;
+
+	int irq;
+	int interrupt_mode;
+	void (*interrupt_callback) (struct hpi_adapter *);
+
 	/* mutex prevents contention for one card
 	   between multiple user programs (via ioctl) */
 	struct mutex mutex;
-	u16 index;
-	u16 type;
-
-	/* ALSA card structure */
-	void *snd_card_asihpi;
-
 	char *p_buffer;
 	size_t buffer_size;
-	struct pci_dev *pci;
-	void __iomem *ap_remapped_mem_base[HPI_MAX_ADAPTER_MEM_SPACES];
 };
 
 #endif

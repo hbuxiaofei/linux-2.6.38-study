@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2008-2010 Atheros Communications Inc.
+ * Copyright (c) 2008-2011 Atheros Communications Inc.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -60,6 +60,8 @@
 #define AR_PHY_RF_CTL3                  0x9828
 #define AR_PHY_TX_END_TO_A2_RX_ON       0x00FF0000
 #define AR_PHY_TX_END_TO_A2_RX_ON_S     16
+#define AR_PHY_TX_END_TO_ADC_ON         0xFF000000
+#define AR_PHY_TX_END_TO_ADC_ON_S       24
 
 #define AR_PHY_ADC_CTL                  0x982C
 #define AR_PHY_ADC_CTL_OFF_INBUFGAIN    0x00000003
@@ -175,8 +177,11 @@
 #define AR_PHY_SPECTRAL_SCAN_PERIOD_S		8
 #define AR_PHY_SPECTRAL_SCAN_COUNT		0x00FF0000  /* Number of reports, reg 68, bits 16-23*/
 #define AR_PHY_SPECTRAL_SCAN_COUNT_S		16
+#define AR_PHY_SPECTRAL_SCAN_COUNT_KIWI		0x0FFF0000  /* Number of reports, reg 68, bits 16-27*/
+#define AR_PHY_SPECTRAL_SCAN_COUNT_KIWI_S	16
 #define AR_PHY_SPECTRAL_SCAN_SHORT_REPEAT	0x01000000  /* Short repeat, reg 68, bit 24*/
-#define AR_PHY_SPECTRAL_SCAN_SHORT_REPEAT_S	24  /* Short repeat, reg 68, bit 24*/
+#define AR_PHY_SPECTRAL_SCAN_SHORT_REPEAT_KIWI	0x10000000  /* Short repeat, reg 68, bit 28*/
+#define AR_PHY_SPECTRAL_SCAN_PHYERR_MASK_SELECT	0x40000000
 
 #define AR_PHY_RX_DELAY           0x9914
 #define AR_PHY_SEARCH_START_DELAY 0x9918
@@ -315,12 +320,14 @@
 #define AR_PHY_9285_ANT_DIV_ALT_GAINTB_S    29
 #define AR_PHY_9285_ANT_DIV_MAIN_GAINTB     0x40000000
 #define AR_PHY_9285_ANT_DIV_MAIN_GAINTB_S   30
-#define AR_PHY_9285_ANT_DIV_LNA1            2
-#define AR_PHY_9285_ANT_DIV_LNA2            1
-#define AR_PHY_9285_ANT_DIV_LNA1_PLUS_LNA2  3
-#define AR_PHY_9285_ANT_DIV_LNA1_MINUS_LNA2 0
 #define AR_PHY_9285_ANT_DIV_GAINTB_0        0
 #define AR_PHY_9285_ANT_DIV_GAINTB_1        1
+
+#define ATH_BT_COEX_ANTDIV_CONTROL1_ENABLE  0x0b
+#define ATH_BT_COEX_ANTDIV_CONTROL2_ENABLE  0x09
+#define ATH_BT_COEX_ANTDIV_CONTROL1_FIXED_A 0x04
+#define ATH_BT_COEX_ANTDIV_CONTROL2_FIXED_A 0x09
+#define ATH_BT_COEX_ANT_DIV_SWITCH_COM      0x66666666
 
 #define AR_PHY_EXT_CCA0             0x99b8
 #define AR_PHY_EXT_CCA0_THRESH62    0x000000FF
@@ -483,7 +490,11 @@
 #define AR_PHY_TX_PWRCTRL_INIT_TX_GAIN     0x01F80000
 #define AR_PHY_TX_PWRCTRL_INIT_TX_GAIN_S   19
 
+#define AR_PHY_TX_PWRCTRL8       0xa278
+
 #define AR_PHY_TX_PWRCTRL9       0xa27C
+
+#define AR_PHY_TX_PWRCTRL10       0xa394
 #define AR_PHY_TX_DESIRED_SCALE_CCK        0x00007C00
 #define AR_PHY_TX_DESIRED_SCALE_CCK_S      10
 #define AR_PHY_TX_PWRCTRL9_RES_DC_REMOVAL  0x80000000
@@ -495,6 +506,8 @@
 
 #define AR_PHY_CH0_TX_PWRCTRL11  0xa398
 #define AR_PHY_CH1_TX_PWRCTRL11  0xb398
+#define AR_PHY_CH0_TX_PWRCTRL12  0xa3dc
+#define AR_PHY_CH0_TX_PWRCTRL13  0xa3e0
 #define AR_PHY_TX_PWRCTRL_OLPC_TEMP_COMP   0x0000FC00
 #define AR_PHY_TX_PWRCTRL_OLPC_TEMP_COMP_S 10
 
@@ -600,8 +613,8 @@
 #define AR_PHY_CCA_MIN_GOOD_VAL_9271_2GHZ      -127
 #define AR_PHY_CCA_MAX_GOOD_VAL_9271_2GHZ      -116
 
-#define AR_PHY_CCA_NOM_VAL_9287_2GHZ           -120
+#define AR_PHY_CCA_NOM_VAL_9287_2GHZ           -112
 #define AR_PHY_CCA_MIN_GOOD_VAL_9287_2GHZ    -127
-#define AR_PHY_CCA_MAX_GOOD_VAL_9287_2GHZ    -110
+#define AR_PHY_CCA_MAX_GOOD_VAL_9287_2GHZ    -97
 
 #endif

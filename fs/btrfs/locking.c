@@ -1,233 +1,404 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (C) 2008 Oracle.  All rights reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public
- * License v2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public
- * License along with this program; if not, write to the
- * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
- * Boston, MA 021110-1307, USA.
  */
+
 #include <linux/sched.h>
 #include <linux/pagemap.h>
 #include <linux/spinlock.h>
 #include <linux/page-flags.h>
 #include <asm/bug.h>
+#include "misc.h"
 #include "ctree.h"
 #include "extent_io.h"
 #include "locking.h"
 
-static inline void spin_nested(struct extent_buffer *eb)
-{
-	spin_lock(&eb->lock);
-}
-
 /*
- * Setting a lock to blocking will drop the spinlock and set the
- * flag that forces other procs who want the lock to wait.  After
- * this you can safely schedule with the lock held.
- */
-void btrfs_set_lock_blocking(struct extent_buffer *eb)
-{
-	if (!test_bit(EXTENT_BUFFER_BLOCKING, &eb->bflags)) {
-		set_bit(EXTENT_BUFFER_BLOCKING, &eb->bflags);
-		spin_unlock(&eb->lock);
-	}
-	/* exit with the spin lock released and the bit set */
-}
-
-/*
- * clearing the blocking flag will take the spinlock again.
- * After this you can't safely schedule
- */
-void btrfs_clear_lock_blocking(struct extent_buffer *eb)
-{
-	if (test_bit(EXTENT_BUFFER_BLOCKING, &eb->bflags)) {
-		spin_nested(eb);
-		clear_bit(EXTENT_BUFFER_BLOCKING, &eb->bflags);
-		smp_mb__after_clear_bit();
-	}
-	/* exit with the spin lock held */
-}
-
-/*
- * unfortunately, many of the places that currently set a lock to blocking
- * don't end up blocking for very long, and often they don't block
- * at all.  For a dbench 50 run, if we don't spin on the blocking bit
- * at all, the context switch rate can jump up to 400,000/sec or more.
+ * Lockdep class keys for extent_buffer->lock's in this root.  For a given
+ * eb, the lockdep key is determined by the btrfs_root it belongs to and
+ * the level the eb occupies in the tree.
  *
- * So, we're still stuck with this crummy spin on the blocking bit,
- * at least until the most common causes of the short blocks
- * can be dealt with.
- */
-static int btrfs_spin_on_block(struct extent_buffer *eb)
-{
-	int i;
-
-	for (i = 0; i < 512; i++) {
-		if (!test_bit(EXTENT_BUFFER_BLOCKING, &eb->bflags))
-			return 1;
-		if (need_resched())
-			break;
-		cpu_relax();
-	}
-	return 0;
-}
-
-/*
- * This is somewhat different from trylock.  It will take the
- * spinlock but if it finds the lock is set to blocking, it will
- * return without the lock held.
+ * Different roots are used for different purposes and may nest inside each
+ * other and they require separate keysets.  As lockdep keys should be
+ * static, assign keysets according to the purpose of the root as indicated
+ * by btrfs_root->root_key.objectid.  This ensures that all special purpose
+ * roots have separate keysets.
  *
- * returns 1 if it was able to take the lock and zero otherwise
+ * Lock-nesting across peer nodes is always done with the immediate parent
+ * node locked thus preventing deadlock.  As lockdep doesn't know this, use
+ * subclass to avoid triggering lockdep warning in such cases.
  *
- * After this call, scheduling is not safe without first calling
- * btrfs_set_lock_blocking()
+ * The key is set by the readpage_end_io_hook after the buffer has passed
+ * csum validation but before the pages are unlocked.  It is also set by
+ * btrfs_init_new_buffer on freshly allocated blocks.
+ *
+ * We also add a check to make sure the highest level of the tree is the
+ * same as our lockdep setup here.  If BTRFS_MAX_LEVEL changes, this code
+ * needs update as well.
  */
-int btrfs_try_spin_lock(struct extent_buffer *eb)
-{
-	int i;
+#ifdef CONFIG_DEBUG_LOCK_ALLOC
+#if BTRFS_MAX_LEVEL != 8
+#error
+#endif
 
-	if (btrfs_spin_on_block(eb)) {
-		spin_nested(eb);
-		if (!test_bit(EXTENT_BUFFER_BLOCKING, &eb->bflags))
-			return 1;
-		spin_unlock(&eb->lock);
-	}
-	/* spin for a bit on the BLOCKING flag */
-	for (i = 0; i < 2; i++) {
-		cpu_relax();
-		if (!btrfs_spin_on_block(eb))
+#define DEFINE_LEVEL(stem, level)					\
+	.names[level] = "btrfs-" stem "-0" #level,
+
+#define DEFINE_NAME(stem)						\
+	DEFINE_LEVEL(stem, 0)						\
+	DEFINE_LEVEL(stem, 1)						\
+	DEFINE_LEVEL(stem, 2)						\
+	DEFINE_LEVEL(stem, 3)						\
+	DEFINE_LEVEL(stem, 4)						\
+	DEFINE_LEVEL(stem, 5)						\
+	DEFINE_LEVEL(stem, 6)						\
+	DEFINE_LEVEL(stem, 7)
+
+static struct btrfs_lockdep_keyset {
+	u64			id;		/* root objectid */
+	/* Longest entry: btrfs-free-space-00 */
+	char			names[BTRFS_MAX_LEVEL][20];
+	struct lock_class_key	keys[BTRFS_MAX_LEVEL];
+} btrfs_lockdep_keysets[] = {
+	{ .id = BTRFS_ROOT_TREE_OBJECTID,	DEFINE_NAME("root")	},
+	{ .id = BTRFS_EXTENT_TREE_OBJECTID,	DEFINE_NAME("extent")	},
+	{ .id = BTRFS_CHUNK_TREE_OBJECTID,	DEFINE_NAME("chunk")	},
+	{ .id = BTRFS_DEV_TREE_OBJECTID,	DEFINE_NAME("dev")	},
+	{ .id = BTRFS_CSUM_TREE_OBJECTID,	DEFINE_NAME("csum")	},
+	{ .id = BTRFS_QUOTA_TREE_OBJECTID,	DEFINE_NAME("quota")	},
+	{ .id = BTRFS_TREE_LOG_OBJECTID,	DEFINE_NAME("log")	},
+	{ .id = BTRFS_TREE_RELOC_OBJECTID,	DEFINE_NAME("treloc")	},
+	{ .id = BTRFS_DATA_RELOC_TREE_OBJECTID,	DEFINE_NAME("dreloc")	},
+	{ .id = BTRFS_UUID_TREE_OBJECTID,	DEFINE_NAME("uuid")	},
+	{ .id = BTRFS_FREE_SPACE_TREE_OBJECTID,	DEFINE_NAME("free-space") },
+	{ .id = 0,				DEFINE_NAME("tree")	},
+};
+
+#undef DEFINE_LEVEL
+#undef DEFINE_NAME
+
+void btrfs_set_buffer_lockdep_class(u64 objectid, struct extent_buffer *eb, int level)
+{
+	struct btrfs_lockdep_keyset *ks;
+
+	BUG_ON(level >= ARRAY_SIZE(ks->keys));
+
+	/* Find the matching keyset, id 0 is the default entry */
+	for (ks = btrfs_lockdep_keysets; ks->id; ks++)
+		if (ks->id == objectid)
 			break;
 
-		spin_nested(eb);
-		if (!test_bit(EXTENT_BUFFER_BLOCKING, &eb->bflags))
-			return 1;
-		spin_unlock(&eb->lock);
-	}
-	return 0;
+	lockdep_set_class_and_name(&eb->lock, &ks->keys[level], ks->names[level]);
+}
+
+void btrfs_maybe_reset_lockdep_class(struct btrfs_root *root, struct extent_buffer *eb)
+{
+	if (test_bit(BTRFS_ROOT_RESET_LOCKDEP_CLASS, &root->state))
+		btrfs_set_buffer_lockdep_class(root->root_key.objectid,
+					       eb, btrfs_header_level(eb));
+}
+
+#endif
+
+/*
+ * Extent buffer locking
+ * =====================
+ *
+ * We use a rw_semaphore for tree locking, and the semantics are exactly the
+ * same:
+ *
+ * - reader/writer exclusion
+ * - writer/writer exclusion
+ * - reader/reader sharing
+ * - try-lock semantics for readers and writers
+ *
+ * The rwsem implementation does opportunistic spinning which reduces number of
+ * times the locking task needs to sleep.
+ */
+
+/*
+ * __btrfs_tree_read_lock - lock extent buffer for read
+ * @eb:		the eb to be locked
+ * @nest:	the nesting level to be used for lockdep
+ *
+ * This takes the read lock on the extent buffer, using the specified nesting
+ * level for lockdep purposes.
+ */
+void __btrfs_tree_read_lock(struct extent_buffer *eb, enum btrfs_lock_nesting nest)
+{
+	u64 start_ns = 0;
+
+	if (trace_btrfs_tree_read_lock_enabled())
+		start_ns = ktime_get_ns();
+
+	down_read_nested(&eb->lock, nest);
+	trace_btrfs_tree_read_lock(eb, start_ns);
+}
+
+void btrfs_tree_read_lock(struct extent_buffer *eb)
+{
+	__btrfs_tree_read_lock(eb, BTRFS_NESTING_NORMAL);
 }
 
 /*
- * the autoremove wake function will return 0 if it tried to wake up
- * a process that was already awake, which means that process won't
- * count as an exclusive wakeup.  The waitq code will continue waking
- * procs until it finds one that was actually sleeping.
+ * Try-lock for read.
  *
- * For btrfs, this isn't quite what we want.  We want a single proc
- * to be notified that the lock is ready for taking.  If that proc
- * already happen to be awake, great, it will loop around and try for
- * the lock.
- *
- * So, btrfs_wake_function always returns 1, even when the proc that we
- * tried to wake up was already awake.
+ * Return 1 if the rwlock has been taken, 0 otherwise
  */
-static int btrfs_wake_function(wait_queue_t *wait, unsigned mode,
-			       int sync, void *key)
+int btrfs_try_tree_read_lock(struct extent_buffer *eb)
 {
-	autoremove_wake_function(wait, mode, sync, key);
-	return 1;
-}
-
-/*
- * returns with the extent buffer spinlocked.
- *
- * This will spin and/or wait as required to take the lock, and then
- * return with the spinlock held.
- *
- * After this call, scheduling is not safe without first calling
- * btrfs_set_lock_blocking()
- */
-int btrfs_tree_lock(struct extent_buffer *eb)
-{
-	DEFINE_WAIT(wait);
-	wait.func = btrfs_wake_function;
-
-	if (!btrfs_spin_on_block(eb))
-		goto sleep;
-
-	while(1) {
-		spin_nested(eb);
-
-		/* nobody is blocking, exit with the spinlock held */
-		if (!test_bit(EXTENT_BUFFER_BLOCKING, &eb->bflags))
-			return 0;
-
-		/*
-		 * we have the spinlock, but the real owner is blocking.
-		 * wait for them
-		 */
-		spin_unlock(&eb->lock);
-
-		/*
-		 * spin for a bit, and if the blocking flag goes away,
-		 * loop around
-		 */
-		cpu_relax();
-		if (btrfs_spin_on_block(eb))
-			continue;
-sleep:
-		prepare_to_wait_exclusive(&eb->lock_wq, &wait,
-					  TASK_UNINTERRUPTIBLE);
-
-		if (test_bit(EXTENT_BUFFER_BLOCKING, &eb->bflags))
-			schedule();
-
-		finish_wait(&eb->lock_wq, &wait);
-	}
-	return 0;
-}
-
-/*
- * Very quick trylock, this does not spin or schedule.  It returns
- * 1 with the spinlock held if it was able to take the lock, or it
- * returns zero if it was unable to take the lock.
- *
- * After this call, scheduling is not safe without first calling
- * btrfs_set_lock_blocking()
- */
-int btrfs_try_tree_lock(struct extent_buffer *eb)
-{
-	if (spin_trylock(&eb->lock)) {
-		if (test_bit(EXTENT_BUFFER_BLOCKING, &eb->bflags)) {
-			/*
-			 * we've got the spinlock, but the real owner is
-			 * blocking.  Drop the spinlock and return failure
-			 */
-			spin_unlock(&eb->lock);
-			return 0;
-		}
+	if (down_read_trylock(&eb->lock)) {
+		trace_btrfs_try_tree_read_lock(eb);
 		return 1;
 	}
-	/* someone else has the spinlock giveup */
 	return 0;
 }
 
-int btrfs_tree_unlock(struct extent_buffer *eb)
+/*
+ * Try-lock for write.
+ *
+ * Return 1 if the rwlock has been taken, 0 otherwise
+ */
+int btrfs_try_tree_write_lock(struct extent_buffer *eb)
+{
+	if (down_write_trylock(&eb->lock)) {
+		eb->lock_owner = current->pid;
+		trace_btrfs_try_tree_write_lock(eb);
+		return 1;
+	}
+	return 0;
+}
+
+/*
+ * Release read lock.
+ */
+void btrfs_tree_read_unlock(struct extent_buffer *eb)
+{
+	trace_btrfs_tree_read_unlock(eb);
+	up_read(&eb->lock);
+}
+
+/*
+ * __btrfs_tree_lock - lock eb for write
+ * @eb:		the eb to lock
+ * @nest:	the nesting to use for the lock
+ *
+ * Returns with the eb->lock write locked.
+ */
+void __btrfs_tree_lock(struct extent_buffer *eb, enum btrfs_lock_nesting nest)
+	__acquires(&eb->lock)
+{
+	u64 start_ns = 0;
+
+	if (trace_btrfs_tree_lock_enabled())
+		start_ns = ktime_get_ns();
+
+	down_write_nested(&eb->lock, nest);
+	eb->lock_owner = current->pid;
+	trace_btrfs_tree_lock(eb, start_ns);
+}
+
+void btrfs_tree_lock(struct extent_buffer *eb)
+{
+	__btrfs_tree_lock(eb, BTRFS_NESTING_NORMAL);
+}
+
+/*
+ * Release the write lock.
+ */
+void btrfs_tree_unlock(struct extent_buffer *eb)
+{
+	trace_btrfs_tree_unlock(eb);
+	eb->lock_owner = 0;
+	up_write(&eb->lock);
+}
+
+/*
+ * This releases any locks held in the path starting at level and going all the
+ * way up to the root.
+ *
+ * btrfs_search_slot will keep the lock held on higher nodes in a few corner
+ * cases, such as COW of the block at slot zero in the node.  This ignores
+ * those rules, and it should only be called when there are no more updates to
+ * be done higher up in the tree.
+ */
+void btrfs_unlock_up_safe(struct btrfs_path *path, int level)
+{
+	int i;
+
+	if (path->keep_locks)
+		return;
+
+	for (i = level; i < BTRFS_MAX_LEVEL; i++) {
+		if (!path->nodes[i])
+			continue;
+		if (!path->locks[i])
+			continue;
+		btrfs_tree_unlock_rw(path->nodes[i], path->locks[i]);
+		path->locks[i] = 0;
+	}
+}
+
+/*
+ * Loop around taking references on and locking the root node of the tree until
+ * we end up with a lock on the root node.
+ *
+ * Return: root extent buffer with write lock held
+ */
+struct extent_buffer *btrfs_lock_root_node(struct btrfs_root *root)
+{
+	struct extent_buffer *eb;
+
+	while (1) {
+		eb = btrfs_root_node(root);
+
+		btrfs_maybe_reset_lockdep_class(root, eb);
+		btrfs_tree_lock(eb);
+		if (eb == root->node)
+			break;
+		btrfs_tree_unlock(eb);
+		free_extent_buffer(eb);
+	}
+	return eb;
+}
+
+/*
+ * Loop around taking references on and locking the root node of the tree until
+ * we end up with a lock on the root node.
+ *
+ * Return: root extent buffer with read lock held
+ */
+struct extent_buffer *btrfs_read_lock_root_node(struct btrfs_root *root)
+{
+	struct extent_buffer *eb;
+
+	while (1) {
+		eb = btrfs_root_node(root);
+
+		btrfs_maybe_reset_lockdep_class(root, eb);
+		btrfs_tree_read_lock(eb);
+		if (eb == root->node)
+			break;
+		btrfs_tree_read_unlock(eb);
+		free_extent_buffer(eb);
+	}
+	return eb;
+}
+
+/*
+ * Loop around taking references on and locking the root node of the tree in
+ * nowait mode until we end up with a lock on the root node or returning to
+ * avoid blocking.
+ *
+ * Return: root extent buffer with read lock held or -EAGAIN.
+ */
+struct extent_buffer *btrfs_try_read_lock_root_node(struct btrfs_root *root)
+{
+	struct extent_buffer *eb;
+
+	while (1) {
+		eb = btrfs_root_node(root);
+		if (!btrfs_try_tree_read_lock(eb)) {
+			free_extent_buffer(eb);
+			return ERR_PTR(-EAGAIN);
+		}
+		if (eb == root->node)
+			break;
+		btrfs_tree_read_unlock(eb);
+		free_extent_buffer(eb);
+	}
+	return eb;
+}
+
+/*
+ * DREW locks
+ * ==========
+ *
+ * DREW stands for double-reader-writer-exclusion lock. It's used in situation
+ * where you want to provide A-B exclusion but not AA or BB.
+ *
+ * Currently implementation gives more priority to reader. If a reader and a
+ * writer both race to acquire their respective sides of the lock the writer
+ * would yield its lock as soon as it detects a concurrent reader. Additionally
+ * if there are pending readers no new writers would be allowed to come in and
+ * acquire the lock.
+ */
+
+int btrfs_drew_lock_init(struct btrfs_drew_lock *lock)
+{
+	int ret;
+
+	ret = percpu_counter_init(&lock->writers, 0, GFP_KERNEL);
+	if (ret)
+		return ret;
+
+	atomic_set(&lock->readers, 0);
+	init_waitqueue_head(&lock->pending_readers);
+	init_waitqueue_head(&lock->pending_writers);
+
+	return 0;
+}
+
+void btrfs_drew_lock_destroy(struct btrfs_drew_lock *lock)
+{
+	percpu_counter_destroy(&lock->writers);
+}
+
+/* Return true if acquisition is successful, false otherwise */
+bool btrfs_drew_try_write_lock(struct btrfs_drew_lock *lock)
+{
+	if (atomic_read(&lock->readers))
+		return false;
+
+	percpu_counter_inc(&lock->writers);
+
+	/* Ensure writers count is updated before we check for pending readers */
+	smp_mb();
+	if (atomic_read(&lock->readers)) {
+		btrfs_drew_write_unlock(lock);
+		return false;
+	}
+
+	return true;
+}
+
+void btrfs_drew_write_lock(struct btrfs_drew_lock *lock)
+{
+	while (true) {
+		if (btrfs_drew_try_write_lock(lock))
+			return;
+		wait_event(lock->pending_writers, !atomic_read(&lock->readers));
+	}
+}
+
+void btrfs_drew_write_unlock(struct btrfs_drew_lock *lock)
+{
+	percpu_counter_dec(&lock->writers);
+	cond_wake_up(&lock->pending_readers);
+}
+
+void btrfs_drew_read_lock(struct btrfs_drew_lock *lock)
+{
+	atomic_inc(&lock->readers);
+
+	/*
+	 * Ensure the pending reader count is perceieved BEFORE this reader
+	 * goes to sleep in case of active writers. This guarantees new writers
+	 * won't be allowed and that the current reader will be woken up when
+	 * the last active writer finishes its jobs.
+	 */
+	smp_mb__after_atomic();
+
+	wait_event(lock->pending_readers,
+		   percpu_counter_sum(&lock->writers) == 0);
+}
+
+void btrfs_drew_read_unlock(struct btrfs_drew_lock *lock)
 {
 	/*
-	 * if we were a blocking owner, we don't have the spinlock held
-	 * just clear the bit and look for waiters
+	 * atomic_dec_and_test implies a full barrier, so woken up writers
+	 * are guaranteed to see the decrement
 	 */
-	if (test_and_clear_bit(EXTENT_BUFFER_BLOCKING, &eb->bflags))
-		smp_mb__after_clear_bit();
-	else
-		spin_unlock(&eb->lock);
-
-	if (waitqueue_active(&eb->lock_wq))
-		wake_up(&eb->lock_wq);
-	return 0;
-}
-
-void btrfs_assert_tree_locked(struct extent_buffer *eb)
-{
-	if (!test_bit(EXTENT_BUFFER_BLOCKING, &eb->bflags))
-		assert_spin_locked(&eb->lock);
+	if (atomic_dec_and_test(&lock->readers))
+		wake_up(&lock->pending_writers);
 }

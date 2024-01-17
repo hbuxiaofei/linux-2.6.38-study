@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * PPC476 board specific routines
  *
@@ -12,11 +13,6 @@
  *
  *    Rewritten and ported to the merged powerpc tree:
  *    Copyright 2007 David Gibson <dwg@au1.ibm.com>, IBM Corporation.
- *
- * This program is free software; you can redistribute  it and/or modify it
- * under  the terms of  the GNU General  Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
  */
 
 #include <linux/init.h>
@@ -32,7 +28,7 @@
 #include <asm/mpic.h>
 #include <asm/mmu.h>
 
-static __initdata struct of_device_id iss4xx_of_bus[] = {
+static const struct of_device_id iss4xx_of_bus[] __initconst = {
 	{ .compatible = "ibm,plb4", },
 	{ .compatible = "ibm,plb6", },
 	{ .compatible = "ibm,opb", },
@@ -71,8 +67,7 @@ static void __init iss4xx_init_irq(void)
 		/* The MPIC driver will get everything it needs from the
 		 * device-tree, just pass 0 to all arguments
 		 */
-		struct mpic *mpic = mpic_alloc(np, 0, MPIC_PRIMARY, 0, 0,
-					       " MPIC     ");
+		struct mpic *mpic = mpic_alloc(np, 0, MPIC_NO_RESET, 0, 0, " MPIC     ");
 		BUG_ON(mpic == NULL);
 		mpic_init(mpic);
 		ppc_md.get_irq = mpic_get_irq;
@@ -82,12 +77,12 @@ static void __init iss4xx_init_irq(void)
 }
 
 #ifdef CONFIG_SMP
-static void __cpuinit smp_iss4xx_setup_cpu(int cpu)
+static void smp_iss4xx_setup_cpu(int cpu)
 {
 	mpic_setup_this_cpu();
 }
 
-static void __cpuinit smp_iss4xx_kick_cpu(int cpu)
+static int smp_iss4xx_kick_cpu(int cpu)
 {
 	struct device_node *cpunode = of_get_cpu_node(cpu, NULL);
 	const u64 *spin_table_addr_prop;
@@ -104,7 +99,7 @@ static void __cpuinit smp_iss4xx_kick_cpu(int cpu)
 					       NULL);
 	if (spin_table_addr_prop == NULL) {
 		pr_err("CPU%d: Can't start, missing cpu-release-addr !\n", cpu);
-		return;
+		return -ENOENT;
 	}
 
 	/* Assume it's mapped as part of the linear mapping. This is a bit
@@ -117,6 +112,8 @@ static void __cpuinit smp_iss4xx_kick_cpu(int cpu)
 	smp_wmb();
 	spin_table[1] = __pa(start_secondary_47x);
 	mb();
+
+	return 0;
 }
 
 static struct smp_ops_t iss_smp_ops = {
@@ -148,9 +145,7 @@ static void __init iss4xx_setup_arch(void)
  */
 static int __init iss4xx_probe(void)
 {
-	unsigned long root = of_get_flat_dt_root();
-
-	if (!of_flat_dt_is_compatible(root, "ibm,iss-4xx"))
+	if (!of_machine_is_compatible("ibm,iss-4xx"))
 		return 0;
 
 	return 1;

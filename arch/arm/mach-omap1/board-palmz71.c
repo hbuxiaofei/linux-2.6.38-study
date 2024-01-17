@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * linux/arch/arm/mach-omap1/board-palmz71.c
  *
@@ -8,13 +9,10 @@
  * Original version : Laurent Gonzalez
  *
  * Modified for zire71 : Marek Vasut
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/delay.h>
+#include <linux/gpio.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/platform_device.h>
@@ -26,26 +24,23 @@
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/partitions.h>
 #include <linux/mtd/physmap.h>
+#include <linux/omapfb.h>
+#include <linux/spi/spi.h>
+#include <linux/spi/ads7846.h>
+#include <linux/platform_data/omap1_bl.h>
+#include <linux/platform_data/keypad-omap.h>
+#include <linux/omap-dma.h>
 
-#include <mach/hardware.h>
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
 
-#include <mach/gpio.h>
-#include <plat/flash.h>
-#include <plat/mux.h>
-#include <plat/usb.h>
-#include <plat/dma.h>
-#include <plat/tc.h>
-#include <plat/board.h>
-#include <plat/irda.h>
-#include <plat/keypad.h>
-#include <plat/common.h>
-#include <plat/omap-alsa.h>
-
-#include <linux/spi/spi.h>
-#include <linux/spi/ads7846.h>
+#include "tc.h"
+#include "flash.h"
+#include "mux.h"
+#include "hardware.h"
+#include "usb.h"
+#include "common.h"
 
 #define PALMZ71_USBDETECT_GPIO	0
 #define PALMZ71_PENIRQ_GPIO	6
@@ -56,13 +51,6 @@
 #define PALMZ71_CABLE_GPIO	OMAP_MPUIO(2)
 #define PALMZ71_SLIDER_GPIO	OMAP_MPUIO(3)
 #define PALMZ71_MMC_IN_GPIO	OMAP_MPUIO(4)
-
-static void __init
-omap_palmz71_init_irq(void)
-{
-	omap1_init_common_hw();
-	omap_init_irq();
-}
 
 static const unsigned int palmz71_keymap[] = {
 	KEY(0, 0, KEY_F1),
@@ -158,34 +146,6 @@ static struct platform_device palmz71_lcd_device = {
 	.id	= -1,
 };
 
-static struct omap_irda_config palmz71_irda_config = {
-	.transceiver_cap	= IR_SIRMODE,
-	.rx_channel		= OMAP_DMA_UART3_RX,
-	.tx_channel		= OMAP_DMA_UART3_TX,
-	.dest_start		= UART3_THR,
-	.src_start		= UART3_RHR,
-	.tx_trigger		= 0,
-	.rx_trigger		= 0,
-};
-
-static struct resource palmz71_irda_resources[] = {
-	[0] = {
-		.start	= INT_UART3,
-		.end	= INT_UART3,
-		.flags	= IORESOURCE_IRQ,
-	},
-};
-
-static struct platform_device palmz71_irda_device = {
-	.name	= "omapirda",
-	.id	= -1,
-	.dev = {
-		.platform_data = &palmz71_irda_config,
-	},
-	.num_resources	= ARRAY_SIZE(palmz71_irda_resources),
-	.resource	= palmz71_irda_resources,
-};
-
 static struct platform_device palmz71_spi_device = {
 	.name	= "spi_palmz71",
 	.id	= -1,
@@ -207,7 +167,6 @@ static struct platform_device *devices[] __initdata = {
 	&palmz71_rom_device,
 	&palmz71_kp_device,
 	&palmz71_lcd_device,
-	&palmz71_irda_device,
 	&palmz71_spi_device,
 	&palmz71_backlight_device,
 };
@@ -230,7 +189,6 @@ static struct spi_board_info __initdata palmz71_boardinfo[] = { {
 	/* MicroWire (bus 2) CS0 has an ads7846e */
 	.modalias	= "ads7846",
 	.platform_data	= &palmz71_ts_info,
-	.irq		= OMAP_GPIO_IRQ(PALMZ71_PENIRQ_GPIO),
 	.max_speed_hz	= 120000	/* max sample rate at 3V */
 				* 26	/* command + data + overhead */,
 	.bus_num	= 2,
@@ -243,12 +201,8 @@ static struct omap_usb_config palmz71_usb_config __initdata = {
 	.pins[0]	= 2,
 };
 
-static struct omap_lcd_config palmz71_lcd_config __initdata = {
+static const struct omap_lcd_config palmz71_lcd_config __initconst = {
 	.ctrl_name = "internal",
-};
-
-static struct omap_board_config_kernel palmz71_config[] __initdata = {
-	{OMAP_TAG_LCD,	&palmz71_lcd_config},
 };
 
 static irqreturn_t
@@ -256,12 +210,12 @@ palmz71_powercable(int irq, void *dev_id)
 {
 	if (gpio_get_value(PALMZ71_USBDETECT_GPIO)) {
 		printk(KERN_INFO "PM: Power cable connected\n");
-		set_irq_type(gpio_to_irq(PALMZ71_USBDETECT_GPIO),
-				IRQ_TYPE_EDGE_FALLING);
+		irq_set_irq_type(gpio_to_irq(PALMZ71_USBDETECT_GPIO),
+				 IRQ_TYPE_EDGE_FALLING);
 	} else {
 		printk(KERN_INFO "PM: Power cable disconnected\n");
-		set_irq_type(gpio_to_irq(PALMZ71_USBDETECT_GPIO),
-				IRQ_TYPE_EDGE_RISING);
+		irq_set_irq_type(gpio_to_irq(PALMZ71_USBDETECT_GPIO),
+				 IRQ_TYPE_EDGE_RISING);
 	}
 	return IRQ_HANDLED;
 }
@@ -299,11 +253,10 @@ palmz71_gpio_setup(int early)
 		}
 		gpio_direction_input(PALMZ71_USBDETECT_GPIO);
 		if (request_irq(gpio_to_irq(PALMZ71_USBDETECT_GPIO),
-				palmz71_powercable, IRQF_SAMPLE_RANDOM,
-				"palmz71-cable", 0))
+				palmz71_powercable, 0, "palmz71-cable", NULL))
 			printk(KERN_ERR
 					"IRQ request for power cable failed!\n");
-		palmz71_powercable(gpio_to_irq(PALMZ71_USBDETECT_GPIO), 0);
+		palmz71_powercable(gpio_to_irq(PALMZ71_USBDETECT_GPIO), NULL);
 	}
 }
 
@@ -321,30 +274,27 @@ omap_palmz71_init(void)
 	palmz71_gpio_setup(1);
 	omap_mpu_wdt_mode(0);
 
-	omap_board_config = palmz71_config;
-	omap_board_config_size = ARRAY_SIZE(palmz71_config);
-
 	platform_add_devices(devices, ARRAY_SIZE(devices));
 
+	palmz71_boardinfo[0].irq = gpio_to_irq(PALMZ71_PENIRQ_GPIO);
 	spi_register_board_info(palmz71_boardinfo,
 				ARRAY_SIZE(palmz71_boardinfo));
 	omap1_usb_init(&palmz71_usb_config);
 	omap_serial_init();
 	omap_register_i2c_bus(1, 100, NULL, 0);
 	palmz71_gpio_setup(0);
-}
 
-static void __init
-omap_palmz71_map_io(void)
-{
-	omap1_map_common_io();
+	omapfb_set_lcd_config(&palmz71_lcd_config);
 }
 
 MACHINE_START(OMAP_PALMZ71, "OMAP310 based Palm Zire71")
-	.boot_params	= 0x10000100,
-	.map_io		= omap_palmz71_map_io,
-	.reserve	= omap_reserve,
-	.init_irq	= omap_palmz71_init_irq,
+	.atag_offset	= 0x100,
+	.map_io		= omap15xx_map_io,
+	.init_early     = omap1_init_early,
+	.init_irq	= omap1_init_irq,
+	.handle_irq	= omap1_handle_irq,
 	.init_machine	= omap_palmz71_init,
-	.timer		= &omap_timer,
+	.init_late	= omap1_init_late,
+	.init_time	= omap1_timer_init,
+	.restart	= omap1_restart,
 MACHINE_END

@@ -1,8 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  *
  * Copyright (C) Jonathan Naylor G4KLX (g4klx@g4klx.demon.co.uk)
  */
@@ -23,8 +20,7 @@
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
-#include <asm/uaccess.h>
-#include <asm/system.h>
+#include <linux/uaccess.h>
 #include <linux/fcntl.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
@@ -58,7 +54,7 @@ EXPORT_SYMBOL_GPL(ax25_register_pid);
 
 void ax25_protocol_release(unsigned int pid)
 {
-	struct ax25_protocol *s, *protocol;
+	struct ax25_protocol *protocol;
 
 	write_lock_bh(&protocol_list_lock);
 	protocol = protocol_list;
@@ -72,7 +68,6 @@ void ax25_protocol_release(unsigned int pid)
 
 	while (protocol != NULL && protocol->next != NULL) {
 		if (protocol->next->pid == pid) {
-			s = protocol->next;
 			protocol->next = protocol->next->next;
 			goto out;
 		}
@@ -103,7 +98,7 @@ void ax25_linkfail_release(struct ax25_linkfail *lf)
 
 EXPORT_SYMBOL(ax25_linkfail_release);
 
-int ax25_listen_register(ax25_address *callsign, struct net_device *dev)
+int ax25_listen_register(const ax25_address *callsign, struct net_device *dev)
 {
 	struct listen_struct *listen;
 
@@ -126,7 +121,7 @@ int ax25_listen_register(ax25_address *callsign, struct net_device *dev)
 
 EXPORT_SYMBOL(ax25_listen_register);
 
-void ax25_listen_release(ax25_address *callsign, struct net_device *dev)
+void ax25_listen_release(const ax25_address *callsign, struct net_device *dev)
 {
 	struct listen_struct *s, *listen;
 
@@ -176,7 +171,7 @@ int (*ax25_protocol_function(unsigned int pid))(struct sk_buff *, ax25_cb *)
 	return res;
 }
 
-int ax25_listen_mine(ax25_address *callsign, struct net_device *dev)
+int ax25_listen_mine(const ax25_address *callsign, struct net_device *dev)
 {
 	struct listen_struct *listen;
 
@@ -195,10 +190,9 @@ int ax25_listen_mine(ax25_address *callsign, struct net_device *dev)
 void ax25_link_failed(ax25_cb *ax25, int reason)
 {
 	struct ax25_linkfail *lf;
-	struct hlist_node *node;
 
 	spin_lock_bh(&linkfail_lock);
-	hlist_for_each_entry(lf, node, &ax25_linkfail_list, lf_node)
+	hlist_for_each_entry(lf, &ax25_linkfail_list, lf_node)
 		lf->func(ax25, reason);
 	spin_unlock_bh(&linkfail_lock);
 }

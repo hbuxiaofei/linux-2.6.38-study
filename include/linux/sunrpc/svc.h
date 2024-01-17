@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * linux/include/linux/sunrpc/svc.h
  *
@@ -18,18 +19,14 @@
 #include <linux/sunrpc/svcauth.h>
 #include <linux/wait.h>
 #include <linux/mm.h>
-
-/*
- * This is the RPC server thread function prototype
- */
-typedef int		(*svc_thread_fn)(void *);
+#include <linux/pagevec.h>
 
 /* statistics for svc_pool structures */
 struct svc_pool_stats {
-	unsigned long	packets;
+	atomic_long_t	packets;
 	unsigned long	sockets_queued;
-	unsigned long	threads_woken;
-	unsigned long	threads_timedout;
+	atomic_long_t	threads_woken;
+	atomic_long_t	threads_timedout;
 };
 
 /*
@@ -45,11 +42,14 @@ struct svc_pool_stats {
 struct svc_pool {
 	unsigned int		sp_id;	    	/* pool id; also node id on NUMA */
 	spinlock_t		sp_lock;	/* protects all fields */
-	struct list_head	sp_threads;	/* idle server threads */
 	struct list_head	sp_sockets;	/* pending sockets */
 	unsigned int		sp_nrthreads;	/* # of threads in pool */
 	struct list_head	sp_all_threads;	/* all server threads */
 	struct svc_pool_stats	sp_stats;	/* statistics on pool operation */
+#define	SP_TASK_PENDING		(0)		/* still work to do even if no
+						 * xprt is queued. */
+#define SP_CONGESTED		(1)
+	unsigned long		sp_flags;
 } ____cacheline_aligned_in_smp;
 
 /*
@@ -66,6 +66,7 @@ struct svc_serv {
 	struct svc_program *	sv_program;	/* RPC program */
 	struct svc_stat *	sv_stats;	/* RPC statistics */
 	spinlock_t		sv_lock;
+	struct kref		sv_refcnt;
 	unsigned int		sv_nrthreads;	/* # of server threads */
 	unsigned int		sv_maxconn;	/* max connections allowed or
 						 * '0' causing max to be based
@@ -83,35 +84,56 @@ struct svc_serv {
 
 	unsigned int		sv_nrpools;	/* number of thread pools */
 	struct svc_pool *	sv_pools;	/* array of thread pools */
+	int			(*sv_threadfn)(void *data);
 
-	void			(*sv_shutdown)(struct svc_serv *serv);
-						/* Callback to use when last thread
-						 * exits.
-						 */
-
-	struct module *		sv_module;	/* optional module to count when
-						 * adding threads */
-	svc_thread_fn		sv_function;	/* main function for threads */
-#if defined(CONFIG_NFS_V4_1)
+#if defined(CONFIG_SUNRPC_BACKCHANNEL)
 	struct list_head	sv_cb_list;	/* queue for callback requests
 						 * that arrive over the same
 						 * connection */
 	spinlock_t		sv_cb_lock;	/* protects the svc_cb_list */
 	wait_queue_head_t	sv_cb_waitq;	/* sleep here if there are no
 						 * entries in the svc_cb_list */
-	struct svc_xprt		*sv_bc_xprt;	/* callback on fore channel */
-#endif /* CONFIG_NFS_V4_1 */
+	bool			sv_bc_enabled;	/* service uses backchannel */
+#endif /* CONFIG_SUNRPC_BACKCHANNEL */
 };
 
-/*
- * We use sv_nrthreads as a reference count.  svc_destroy() drops
- * this refcount, so we need to bump it up around operations that
- * change the number of threads.  Horrible, but there it is.
- * Should be called with the BKL held.
+/**
+ * svc_get() - increment reference count on a SUNRPC serv
+ * @serv:  the svc_serv to have count incremented
+ *
+ * Returns: the svc_serv that was passed in.
  */
-static inline void svc_get(struct svc_serv *serv)
+static inline struct svc_serv *svc_get(struct svc_serv *serv)
 {
-	serv->sv_nrthreads++;
+	kref_get(&serv->sv_refcnt);
+	return serv;
+}
+
+void svc_destroy(struct kref *);
+
+/**
+ * svc_put - decrement reference count on a SUNRPC serv
+ * @serv:  the svc_serv to have count decremented
+ *
+ * When the reference count reaches zero, svc_destroy()
+ * is called to clean up and free the serv.
+ */
+static inline void svc_put(struct svc_serv *serv)
+{
+	kref_put(&serv->sv_refcnt, svc_destroy);
+}
+
+/**
+ * svc_put_not_last - decrement non-final reference count on SUNRPC serv
+ * @serv:  the svc_serv to have count decremented
+ *
+ * Returns: %true is refcount was decremented.
+ *
+ * If the refcount is 1, it is not decremented and instead failure is reported.
+ */
+static inline bool svc_put_not_last(struct svc_serv *serv)
+{
+	return refcount_dec_not_one(&serv->sv_refcnt.refcount);
 }
 
 /*
@@ -121,7 +143,7 @@ static inline void svc_get(struct svc_serv *serv)
  *
  * These happen to all be powers of 2, which is not strictly
  * necessary but helps enforce the real limitation, which is
- * that they should be multiples of PAGE_CACHE_SIZE.
+ * that they should be multiples of PAGE_SIZE.
  *
  * For UDP transports, a block plus NFS,RPC, and UDP headers
  * has to fit into the IP datagram limit of 64K.  The largest
@@ -212,74 +234,91 @@ static inline void svc_putu32(struct kvec *iov, __be32 val)
 	iov->iov_len += sizeof(__be32);
 }
 
-union svc_addr_u {
-    struct in_addr	addr;
-    struct in6_addr	addr6;
-};
-
 /*
  * The context of a single thread, including the request currently being
  * processed.
  */
 struct svc_rqst {
-	struct list_head	rq_list;	/* idle list */
 	struct list_head	rq_all;		/* all threads list */
+	struct rcu_head		rq_rcu_head;	/* for RCU deferred kfree */
 	struct svc_xprt *	rq_xprt;	/* transport ptr */
+
 	struct sockaddr_storage	rq_addr;	/* peer address */
 	size_t			rq_addrlen;
+	struct sockaddr_storage	rq_daddr;	/* dest addr of request
+						 *  - reply from here */
+	size_t			rq_daddrlen;
 
 	struct svc_serv *	rq_server;	/* RPC service definition */
 	struct svc_pool *	rq_pool;	/* thread pool */
-	struct svc_procedure *	rq_procinfo;	/* procedure info */
+	const struct svc_procedure *rq_procinfo;/* procedure info */
 	struct auth_ops *	rq_authop;	/* authentication flavour */
-	u32			rq_flavor;	/* pseudoflavor */
 	struct svc_cred		rq_cred;	/* auth info */
 	void *			rq_xprt_ctxt;	/* transport specific context ptr */
 	struct svc_deferred_req*rq_deferred;	/* deferred request we are replaying */
-	int			rq_usedeferral;	/* use deferral */
 
-	size_t			rq_xprt_hlen;	/* xprt header len */
 	struct xdr_buf		rq_arg;
+	struct xdr_stream	rq_arg_stream;
+	struct xdr_stream	rq_res_stream;
+	struct page		*rq_scratch_page;
 	struct xdr_buf		rq_res;
-	struct page *		rq_pages[RPCSVC_MAXPAGES];
+	struct page		*rq_pages[RPCSVC_MAXPAGES + 1];
 	struct page *		*rq_respages;	/* points into rq_pages */
-	int			rq_resused;	/* number of pages used for result */
+	struct page *		*rq_next_page; /* next reply page to use */
+	struct page *		*rq_page_end;  /* one past the last page */
 
+	struct pagevec		rq_pvec;
 	struct kvec		rq_vec[RPCSVC_MAXPAGES]; /* generally useful.. */
+	struct bio_vec		rq_bvec[RPCSVC_MAXPAGES];
 
 	__be32			rq_xid;		/* transmission id */
 	u32			rq_prog;	/* program number */
 	u32			rq_vers;	/* program version */
 	u32			rq_proc;	/* procedure number */
 	u32			rq_prot;	/* IP protocol */
-	unsigned short
-				rq_secure  : 1;	/* secure port */
-
-	union svc_addr_u	rq_daddr;	/* dest addr of request
-						 *  - reply from here */
+	int			rq_cachetype;	/* catering to nfsd */
+#define	RQ_SECURE	(0)			/* secure port */
+#define	RQ_LOCAL	(1)			/* local request */
+#define	RQ_USEDEFERRAL	(2)			/* use deferral */
+#define	RQ_DROPME	(3)			/* drop current reply */
+#define	RQ_SPLICE_OK	(4)			/* turned off in gss privacy
+						 * to prevent encrypting page
+						 * cache pages */
+#define	RQ_VICTIM	(5)			/* about to be shut down */
+#define	RQ_BUSY		(6)			/* request is busy */
+#define	RQ_DATA		(7)			/* request has data */
+	unsigned long		rq_flags;	/* flags field */
+	ktime_t			rq_qtime;	/* enqueue time */
 
 	void *			rq_argp;	/* decoded arguments */
 	void *			rq_resp;	/* xdr'd results */
 	void *			rq_auth_data;	/* flavor-specific data */
-
+	__be32			rq_auth_stat;	/* authentication status */
+	int			rq_auth_slack;	/* extra space xdr code
+						 * should leave in head
+						 * for krb5i, krb5p.
+						 */
 	int			rq_reserved;	/* space on socket outq
 						 * reserved for this request
 						 */
+	ktime_t			rq_stime;	/* start time */
 
 	struct cache_req	rq_chandle;	/* handle passed to caches for 
 						 * request delaying 
 						 */
-	bool			rq_dropme;
 	/* Catering to nfsd */
 	struct auth_domain *	rq_client;	/* RPC peer info */
 	struct auth_domain *	rq_gssclient;	/* "gss/"-style peer info */
 	struct svc_cacherep *	rq_cacherep;	/* cache info */
-	int			rq_splice_ok;   /* turned off in gss privacy
-						 * to prevent encrypting page
-						 * cache pages */
-	wait_queue_head_t	rq_wait;	/* synchronization */
 	struct task_struct	*rq_task;	/* service thread */
+	spinlock_t		rq_lock;	/* per-request lock */
+	struct net		*rq_bc_net;	/* pointer to backchannel's
+						 * net namespace
+						 */
+	void **			rq_lease_breaker; /* The v4 client breaking a lease */
 };
+
+#define SVC_NET(rqst) (rqst->rq_xprt ? rqst->rq_xprt->xpt_net : rqst->rq_bc_net)
 
 /*
  * Rigorous type checking on sockaddr type conversions
@@ -297,6 +336,21 @@ static inline struct sockaddr_in6 *svc_addr_in6(const struct svc_rqst *rqst)
 static inline struct sockaddr *svc_addr(const struct svc_rqst *rqst)
 {
 	return (struct sockaddr *) &rqst->rq_addr;
+}
+
+static inline struct sockaddr_in *svc_daddr_in(const struct svc_rqst *rqst)
+{
+	return (struct sockaddr_in *) &rqst->rq_daddr;
+}
+
+static inline struct sockaddr_in6 *svc_daddr_in6(const struct svc_rqst *rqst)
+{
+	return (struct sockaddr_in6 *) &rqst->rq_daddr;
+}
+
+static inline struct sockaddr *svc_daddr(const struct svc_rqst *rqst)
+{
+	return (struct sockaddr *) &rqst->rq_daddr;
 }
 
 /*
@@ -324,9 +378,8 @@ xdr_ressize_check(struct svc_rqst *rqstp, __be32 *p)
 
 static inline void svc_free_res_pages(struct svc_rqst *rqstp)
 {
-	while (rqstp->rq_resused) {
-		struct page **pp = (rqstp->rq_respages +
-				    --rqstp->rq_resused);
+	while (rqstp->rq_next_page != rqstp->rq_respages) {
+		struct page **pp = --rqstp->rq_next_page;
 		if (*pp) {
 			put_page(*pp);
 			*pp = NULL;
@@ -339,11 +392,22 @@ struct svc_deferred_req {
 	struct svc_xprt		*xprt;
 	struct sockaddr_storage	addr;	/* where reply must go */
 	size_t			addrlen;
-	union svc_addr_u	daddr;	/* where reply must come from */
+	struct sockaddr_storage	daddr;	/* where reply must come from */
+	size_t			daddrlen;
+	void			*xprt_ctxt;
 	struct cache_deferred_req handle;
-	size_t			xprt_hlen;
 	int			argslen;
-	__be32			args[0];
+	__be32			args[];
+};
+
+struct svc_process_info {
+	union {
+		int  (*dispatch)(struct svc_rqst *, __be32 *);
+		struct {
+			unsigned int lovers;
+			unsigned int hivers;
+		} mismatch;
+	};
 };
 
 /*
@@ -353,13 +417,21 @@ struct svc_program {
 	struct svc_program *	pg_next;	/* other programs (same xprt) */
 	u32			pg_prog;	/* program number */
 	unsigned int		pg_lovers;	/* lowest version */
-	unsigned int		pg_hivers;	/* lowest version */
+	unsigned int		pg_hivers;	/* highest version */
 	unsigned int		pg_nvers;	/* number of versions */
-	struct svc_version **	pg_vers;	/* version array */
+	const struct svc_version **pg_vers;	/* version array */
 	char *			pg_name;	/* service name */
 	char *			pg_class;	/* class name: services sharing authentication */
 	struct svc_stat *	pg_stats;	/* rpc statistics */
 	int			(*pg_authenticate)(struct svc_rqst *);
+	__be32			(*pg_init_request)(struct svc_rqst *,
+						   const struct svc_program *,
+						   struct svc_process_info *);
+	int			(*pg_rpcbind_set)(struct net *net,
+						  const struct svc_program *,
+						  u32 version, int family,
+						  unsigned short proto,
+						  unsigned short port);
 };
 
 /*
@@ -368,59 +440,95 @@ struct svc_program {
 struct svc_version {
 	u32			vs_vers;	/* version number */
 	u32			vs_nproc;	/* number of procedures */
-	struct svc_procedure *	vs_proc;	/* per-procedure info */
+	const struct svc_procedure *vs_proc;	/* per-procedure info */
+	unsigned int		*vs_count;	/* call counts */
 	u32			vs_xdrsize;	/* xdrsize needed for this version */
 
-	unsigned int		vs_hidden : 1;	/* Don't register with portmapper.
-						 * Only used for nfsacl so far. */
+	/* Don't register with rpcbind */
+	bool			vs_hidden;
 
-	/* Override dispatch function (e.g. when caching replies).
-	 * A return value of 0 means drop the request. 
-	 * vs_dispatch == NULL means use default dispatcher.
-	 */
+	/* Don't care if the rpcbind registration fails */
+	bool			vs_rpcb_optnl;
+
+	/* Need xprt with congestion control */
+	bool			vs_need_cong_ctrl;
+
+	/* Dispatch function */
 	int			(*vs_dispatch)(struct svc_rqst *, __be32 *);
 };
 
 /*
  * RPC procedure info
  */
-typedef __be32	(*svc_procfunc)(struct svc_rqst *, void *argp, void *resp);
 struct svc_procedure {
-	svc_procfunc		pc_func;	/* process the request */
-	kxdrproc_t		pc_decode;	/* XDR decode args */
-	kxdrproc_t		pc_encode;	/* XDR encode result */
-	kxdrproc_t		pc_release;	/* XDR free result */
+	/* process the request: */
+	__be32			(*pc_func)(struct svc_rqst *);
+	/* XDR decode args: */
+	bool			(*pc_decode)(struct svc_rqst *rqstp,
+					     struct xdr_stream *xdr);
+	/* XDR encode result: */
+	bool			(*pc_encode)(struct svc_rqst *rqstp,
+					     struct xdr_stream *xdr);
+	/* XDR free result: */
+	void			(*pc_release)(struct svc_rqst *);
 	unsigned int		pc_argsize;	/* argument struct size */
+	unsigned int		pc_argzero;	/* how much of argument to clear */
 	unsigned int		pc_ressize;	/* result struct size */
-	unsigned int		pc_count;	/* call count */
 	unsigned int		pc_cachetype;	/* cache info (NFS) */
 	unsigned int		pc_xdrressize;	/* maximum size of XDR reply */
+	const char *		pc_name;	/* for display */
 };
 
 /*
  * Function prototypes.
  */
+int svc_rpcb_setup(struct svc_serv *serv, struct net *net);
+void svc_rpcb_cleanup(struct svc_serv *serv, struct net *net);
+int svc_bind(struct svc_serv *serv, struct net *net);
 struct svc_serv *svc_create(struct svc_program *, unsigned int,
-			    void (*shutdown)(struct svc_serv *));
-struct svc_rqst *svc_prepare_thread(struct svc_serv *serv,
-					struct svc_pool *pool);
+			    int (*threadfn)(void *data));
+struct svc_rqst *svc_rqst_alloc(struct svc_serv *serv,
+					struct svc_pool *pool, int node);
+void		   svc_rqst_replace_page(struct svc_rqst *rqstp,
+					 struct page *page);
+void		   svc_rqst_free(struct svc_rqst *);
 void		   svc_exit_thread(struct svc_rqst *);
 struct svc_serv *  svc_create_pooled(struct svc_program *, unsigned int,
-			void (*shutdown)(struct svc_serv *),
-			svc_thread_fn, struct module *);
+				     int (*threadfn)(void *data));
 int		   svc_set_num_threads(struct svc_serv *, struct svc_pool *, int);
 int		   svc_pool_stats_open(struct svc_serv *serv, struct file *file);
-void		   svc_destroy(struct svc_serv *);
 int		   svc_process(struct svc_rqst *);
 int		   bc_svc_process(struct svc_serv *, struct rpc_rqst *,
 			struct svc_rqst *);
-int		   svc_register(const struct svc_serv *, const int,
+int		   svc_register(const struct svc_serv *, struct net *, const int,
 				const unsigned short, const unsigned short);
 
 void		   svc_wake_up(struct svc_serv *);
 void		   svc_reserve(struct svc_rqst *rqstp, int space);
-struct svc_pool *  svc_pool_for_cpu(struct svc_serv *serv, int cpu);
+struct svc_pool   *svc_pool_for_cpu(struct svc_serv *serv);
 char *		   svc_print_addr(struct svc_rqst *, char *, size_t);
+const char *	   svc_proc_name(const struct svc_rqst *rqstp);
+int		   svc_encode_result_payload(struct svc_rqst *rqstp,
+					     unsigned int offset,
+					     unsigned int length);
+unsigned int	   svc_fill_write_vector(struct svc_rqst *rqstp,
+					 struct xdr_buf *payload);
+char		  *svc_fill_symlink_pathname(struct svc_rqst *rqstp,
+					     struct kvec *first, void *p,
+					     size_t total);
+__be32		   svc_generic_init_request(struct svc_rqst *rqstp,
+					    const struct svc_program *progp,
+					    struct svc_process_info *procinfo);
+int		   svc_generic_rpcbind_set(struct net *net,
+					   const struct svc_program *progp,
+					   u32 version, int family,
+					   unsigned short proto,
+					   unsigned short port);
+int		   svc_rpcbind_set_version(struct net *net,
+					   const struct svc_program *progp,
+					   u32 version, int family,
+					   unsigned short proto,
+					   unsigned short port);
 
 #define	RPC_MAX_ADDRBUFLEN	(63U)
 
@@ -433,11 +541,56 @@ char *		   svc_print_addr(struct svc_rqst *, char *, size_t);
  */
 static inline void svc_reserve_auth(struct svc_rqst *rqstp, int space)
 {
-	int added_space = 0;
+	svc_reserve(rqstp, space + rqstp->rq_auth_slack);
+}
 
-	if (rqstp->rq_authop->flavour)
-		added_space = RPC_MAX_AUTH_SIZE;
-	svc_reserve(rqstp, space + added_space);
+/**
+ * svcxdr_init_decode - Prepare an xdr_stream for Call decoding
+ * @rqstp: controlling server RPC transaction context
+ *
+ * This function currently assumes the RPC header in rq_arg has
+ * already been decoded. Upon return, xdr->p points to the
+ * location of the upper layer header.
+ */
+static inline void svcxdr_init_decode(struct svc_rqst *rqstp)
+{
+	struct xdr_stream *xdr = &rqstp->rq_arg_stream;
+	struct xdr_buf *buf = &rqstp->rq_arg;
+	struct kvec *argv = buf->head;
+
+	/*
+	 * svc_getnl() and friends do not keep the xdr_buf's ::len
+	 * field up to date. Refresh that field before initializing
+	 * the argument decoding stream.
+	 */
+	buf->len = buf->head->iov_len + buf->page_len + buf->tail->iov_len;
+
+	xdr_init_decode(xdr, buf, argv->iov_base, NULL);
+	xdr_set_scratch_page(xdr, rqstp->rq_scratch_page);
+}
+
+/**
+ * svcxdr_init_encode - Prepare an xdr_stream for svc Reply encoding
+ * @rqstp: controlling server RPC transaction context
+ *
+ */
+static inline void svcxdr_init_encode(struct svc_rqst *rqstp)
+{
+	struct xdr_stream *xdr = &rqstp->rq_res_stream;
+	struct xdr_buf *buf = &rqstp->rq_res;
+	struct kvec *resv = buf->head;
+
+	xdr_reset_scratch_buffer(xdr);
+
+	xdr->buf = buf;
+	xdr->iov = resv;
+	xdr->p   = resv->iov_base + resv->iov_len;
+	xdr->end = resv->iov_base + PAGE_SIZE - rqstp->rq_auth_slack;
+	buf->len = resv->iov_len;
+	xdr->page_ptr = buf->pages - 1;
+	buf->buflen = PAGE_SIZE * (rqstp->rq_page_end - buf->pages);
+	buf->buflen -= rqstp->rq_auth_slack;
+	xdr->rqst = NULL;
 }
 
 #endif /* SUNRPC_SVC_H */

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * class.c - basic device class management
  *
@@ -5,11 +6,9 @@
  * Copyright (c) 2002-3 Open Source Development Labs
  * Copyright (c) 2003-2004 Greg Kroah-Hartman
  * Copyright (c) 2003-2004 IBM Corp.
- *
- * This file is released under the GPLv2
- *
  */
 
+#include <linux/device/class.h>
 #include <linux/device.h>
 #include <linux/module.h>
 #include <linux/init.h>
@@ -17,7 +16,7 @@
 #include <linux/kdev_t.h>
 #include <linux/err.h>
 #include <linux/slab.h>
-#include <linux/genhd.h>
+#include <linux/blkdev.h>
 #include <linux/mutex.h>
 #include "base.h"
 
@@ -72,8 +71,8 @@ static const struct kobj_ns_type_operations *class_child_ns_type(struct kobject 
 }
 
 static const struct sysfs_ops class_sysfs_ops = {
-	.show	= class_attr_show,
-	.store	= class_attr_store,
+	.show	   = class_attr_show,
+	.store	   = class_attr_store,
 };
 
 static struct kobj_type class_ktype = {
@@ -86,21 +85,24 @@ static struct kobj_type class_ktype = {
 static struct kset *class_kset;
 
 
-int class_create_file(struct class *cls, const struct class_attribute *attr)
+int class_create_file_ns(struct class *cls, const struct class_attribute *attr,
+			 const void *ns)
 {
 	int error;
+
 	if (cls)
-		error = sysfs_create_file(&cls->p->subsys.kobj,
-					  &attr->attr);
+		error = sysfs_create_file_ns(&cls->p->subsys.kobj,
+					     &attr->attr, ns);
 	else
 		error = -EINVAL;
 	return error;
 }
 
-void class_remove_file(struct class *cls, const struct class_attribute *attr)
+void class_remove_file_ns(struct class *cls, const struct class_attribute *attr,
+			  const void *ns)
 {
 	if (cls)
-		sysfs_remove_file(&cls->p->subsys.kobj, &attr->attr);
+		sysfs_remove_file_ns(&cls->p->subsys.kobj, &attr->attr, ns);
 }
 
 static struct class *class_get(struct class *cls)
@@ -116,48 +118,36 @@ static void class_put(struct class *cls)
 		kset_put(&cls->p->subsys);
 }
 
-static int add_class_attrs(struct class *cls)
+static struct device *klist_class_to_dev(struct klist_node *n)
 {
-	int i;
-	int error = 0;
-
-	if (cls->class_attrs) {
-		for (i = 0; attr_name(cls->class_attrs[i]); i++) {
-			error = class_create_file(cls, &cls->class_attrs[i]);
-			if (error)
-				goto error;
-		}
-	}
-done:
-	return error;
-error:
-	while (--i >= 0)
-		class_remove_file(cls, &cls->class_attrs[i]);
-	goto done;
-}
-
-static void remove_class_attrs(struct class *cls)
-{
-	int i;
-
-	if (cls->class_attrs) {
-		for (i = 0; attr_name(cls->class_attrs[i]); i++)
-			class_remove_file(cls, &cls->class_attrs[i]);
-	}
+	struct device_private *p = to_device_private_class(n);
+	return p->device;
 }
 
 static void klist_class_dev_get(struct klist_node *n)
 {
-	struct device *dev = container_of(n, struct device, knode_class);
+	struct device *dev = klist_class_to_dev(n);
 
 	get_device(dev);
 }
 
 static void klist_class_dev_put(struct klist_node *n)
 {
-	struct device *dev = container_of(n, struct device, knode_class);
+	struct device *dev = klist_class_to_dev(n);
 
 	put_device(dev);
+}
+
+static int class_add_groups(struct class *cls,
+			    const struct attribute_group **groups)
+{
+	return sysfs_create_groups(&cls->p->subsys.kobj, groups);
+}
+
+static void class_remove_groups(struct class *cls,
+				const struct attribute_group **groups)
+{
+	return sysfs_remove_groups(&cls->p->subsys.kobj, groups);
 }
 
 int __class_register(struct class *cls, struct lock_class_key *key)
@@ -171,9 +161,9 @@ int __class_register(struct class *cls, struct lock_class_key *key)
 	if (!cp)
 		return -ENOMEM;
 	klist_init(&cp->klist_devices, klist_class_dev_get, klist_class_dev_put);
-	INIT_LIST_HEAD(&cp->class_interfaces);
+	INIT_LIST_HEAD(&cp->interfaces);
 	kset_init(&cp->glue_dirs);
-	__mutex_init(&cp->class_mutex, "struct class mutex", key);
+	__mutex_init(&cp->mutex, "subsys mutex", key);
 	error = kobject_set_name(&cp->subsys.kobj, "%s", cls->name);
 	if (error) {
 		kfree(cp);
@@ -200,8 +190,13 @@ int __class_register(struct class *cls, struct lock_class_key *key)
 		kfree(cp);
 		return error;
 	}
-	error = add_class_attrs(class_get(cls));
+	error = class_add_groups(class_get(cls), cls->class_groups);
 	class_put(cls);
+	if (error) {
+		kobject_del(&cp->subsys.kobj);
+		kfree_const(cp->subsys.kobj.name);
+		kfree(cp);
+	}
 	return error;
 }
 EXPORT_SYMBOL_GPL(__class_register);
@@ -209,7 +204,7 @@ EXPORT_SYMBOL_GPL(__class_register);
 void class_unregister(struct class *cls)
 {
 	pr_debug("device class '%s': unregistering\n", cls->name);
-	remove_class_attrs(cls);
+	class_remove_groups(cls, cls->class_groups);
 	kset_unregister(&cls->p->subsys);
 }
 
@@ -220,7 +215,7 @@ static void class_create_release(struct class *cls)
 }
 
 /**
- * class_create - create a struct class structure
+ * __class_create - create a struct class structure
  * @owner: pointer to the module that is to "own" this struct class
  * @name: pointer to a string for the name of this class.
  * @key: the lock_class_key for this class; used by mutex lock debugging
@@ -270,7 +265,7 @@ EXPORT_SYMBOL_GPL(__class_create);
  */
 void class_destroy(struct class *cls)
 {
-	if ((cls == NULL) || (IS_ERR(cls)))
+	if (IS_ERR_OR_NULL(cls))
 		return;
 
 	class_unregister(cls);
@@ -294,7 +289,7 @@ void class_dev_iter_init(struct class_dev_iter *iter, struct class *class,
 	struct klist_node *start_knode = NULL;
 
 	if (start)
-		start_knode = &start->knode_class;
+		start_knode = &start->p->knode_class;
 	klist_iter_init_node(&class->p->klist_devices, &iter->ki, start_knode);
 	iter->type = type;
 }
@@ -321,7 +316,7 @@ struct device *class_dev_iter_next(struct class_dev_iter *iter)
 		knode = klist_next(&iter->ki);
 		if (!knode)
 			return NULL;
-		dev = container_of(knode, struct device, knode_class);
+		dev = klist_class_to_dev(knode);
 		if (!iter->type || iter->type == dev->type)
 			return dev;
 	}
@@ -403,12 +398,12 @@ EXPORT_SYMBOL_GPL(class_for_each_device);
  *
  * Note, you will need to drop the reference with put_device() after use.
  *
- * @fn is allowed to do anything including calling back into class
+ * @match is allowed to do anything including calling back into class
  * code.  There's no locking restriction.
  */
 struct device *class_find_device(struct class *class, struct device *start,
-				 void *data,
-				 int (*match)(struct device *, void *))
+				 const void *data,
+				 int (*match)(struct device *, const void *))
 {
 	struct class_dev_iter iter;
 	struct device *dev;
@@ -447,15 +442,15 @@ int class_interface_register(struct class_interface *class_intf)
 	if (!parent)
 		return -EINVAL;
 
-	mutex_lock(&parent->p->class_mutex);
-	list_add_tail(&class_intf->node, &parent->p->class_interfaces);
+	mutex_lock(&parent->p->mutex);
+	list_add_tail(&class_intf->node, &parent->p->interfaces);
 	if (class_intf->add_dev) {
 		class_dev_iter_init(&iter, parent, NULL, NULL);
 		while ((dev = class_dev_iter_next(&iter)))
 			class_intf->add_dev(dev, class_intf);
 		class_dev_iter_exit(&iter);
 	}
-	mutex_unlock(&parent->p->class_mutex);
+	mutex_unlock(&parent->p->mutex);
 
 	return 0;
 }
@@ -469,7 +464,7 @@ void class_interface_unregister(struct class_interface *class_intf)
 	if (!parent)
 		return;
 
-	mutex_lock(&parent->p->class_mutex);
+	mutex_lock(&parent->p->mutex);
 	list_del_init(&class_intf->node);
 	if (class_intf->remove_dev) {
 		class_dev_iter_init(&iter, parent, NULL, NULL);
@@ -477,7 +472,7 @@ void class_interface_unregister(struct class_interface *class_intf)
 			class_intf->remove_dev(dev, class_intf);
 		class_dev_iter_exit(&iter);
 	}
-	mutex_unlock(&parent->p->class_mutex);
+	mutex_unlock(&parent->p->mutex);
 
 	class_put(parent);
 }
@@ -486,8 +481,9 @@ ssize_t show_class_attr_string(struct class *class,
 			       struct class_attribute *attr, char *buf)
 {
 	struct class_attribute_string *cs;
+
 	cs = container_of(attr, struct class_attribute_string, attr);
-	return snprintf(buf, PAGE_SIZE, "%s\n", cs->str);
+	return sysfs_emit(buf, "%s\n", cs->str);
 }
 
 EXPORT_SYMBOL_GPL(show_class_attr_string);
@@ -587,8 +583,8 @@ int __init classes_init(void)
 	return 0;
 }
 
-EXPORT_SYMBOL_GPL(class_create_file);
-EXPORT_SYMBOL_GPL(class_remove_file);
+EXPORT_SYMBOL_GPL(class_create_file_ns);
+EXPORT_SYMBOL_GPL(class_remove_file_ns);
 EXPORT_SYMBOL_GPL(class_unregister);
 EXPORT_SYMBOL_GPL(class_destroy);
 

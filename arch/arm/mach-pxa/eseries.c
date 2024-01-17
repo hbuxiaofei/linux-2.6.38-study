@@ -1,25 +1,25 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Hardware definitions for the Toshiba eseries PDAs
  *
  * Copyright (c) 2003 Ian Molton <spyro@f2s.com>
- *
- * This file is licensed under
- * the terms of the GNU General Public License version 2. This program
- * is licensed "as is" without any warranty of any kind, whether express
- * or implied.
- *
  */
 
+#include <linux/clkdev.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
+#include <linux/clk-provider.h>
+#include <linux/gpio/machine.h>
 #include <linux/gpio.h>
 #include <linux/delay.h>
 #include <linux/platform_device.h>
 #include <linux/mfd/tc6387xb.h>
 #include <linux/mfd/tc6393xb.h>
 #include <linux/mfd/t7l66xb.h>
-#include <linux/mtd/nand.h>
+#include <linux/mtd/rawnand.h>
 #include <linux/mtd/partitions.h>
+#include <linux/memblock.h>
+#include <linux/gpio/machine.h>
 
 #include <video/w100fb.h>
 
@@ -27,34 +27,40 @@
 #include <asm/mach/arch.h>
 #include <asm/mach-types.h>
 
-#include <mach/pxa25x.h>
-#include <mach/eseries-gpio.h>
-#include <mach/eseries-irq.h>
-#include <mach/audio.h>
-#include <mach/pxafb.h>
-#include <mach/udc.h>
-#include <mach/irda.h>
+#include "pxa25x.h"
+#include "eseries-gpio.h"
+#include "eseries-irq.h"
+#include <linux/platform_data/asoc-pxa.h>
+#include <linux/platform_data/video-pxafb.h>
+#include "udc.h"
+#include <linux/platform_data/irda-pxaficp.h>
 
 #include "devices.h"
 #include "generic.h"
-#include "clock.h"
 
 /* Only e800 has 128MB RAM */
-void __init eseries_fixup(struct machine_desc *desc,
-	struct tag *tags, char **cmdline, struct meminfo *mi)
+void __init eseries_fixup(struct tag *tags, char **cmdline)
 {
-	mi->nr_banks=1;
-	mi->bank[0].start = 0xa0000000;
 	if (machine_is_e800())
-		mi->bank[0].size = (128*1024*1024);
+		memblock_add(0xa0000000, SZ_128M);
 	else
-		mi->bank[0].size = (64*1024*1024);
+		memblock_add(0xa0000000, SZ_64M);
 }
 
-struct pxa2xx_udc_mach_info e7xx_udc_mach_info = {
-	.gpio_vbus   = GPIO_E7XX_USB_DISC,
-	.gpio_pullup = GPIO_E7XX_USB_PULLUP,
-	.gpio_pullup_inverted = 1
+static struct gpiod_lookup_table e7xx_gpio_vbus_gpiod_table __maybe_unused = {
+	.dev_id = "gpio-vbus",
+	.table = {
+		GPIO_LOOKUP("gpio-pxa", GPIO_E7XX_USB_DISC,
+			    "vbus", GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP("gpio-pxa", GPIO_E7XX_USB_PULLUP,
+			    "pullup", GPIO_ACTIVE_LOW),
+		{ },
+	},
+};
+
+static struct platform_device e7xx_gpio_vbus __maybe_unused = {
+	.name	= "gpio-vbus",
+	.id	= -1,
 };
 
 struct pxaficp_platform_data e7xx_ficp_platform_data = {
@@ -75,11 +81,10 @@ int eseries_tmio_enable(struct platform_device *dev)
 	return 0;
 }
 
-int eseries_tmio_disable(struct platform_device *dev)
+void eseries_tmio_disable(struct platform_device *dev)
 {
 	gpio_set_value(GPIO_ESERIES_TMIO_SUSPEND, 0);
 	gpio_set_value(GPIO_ESERIES_TMIO_PCLR, 0);
-	return 0;
 }
 
 int eseries_tmio_suspend(struct platform_device *dev)
@@ -111,34 +116,16 @@ struct resource eseries_tmio_resources[] = {
 		.flags  = IORESOURCE_MEM,
 	},
 	[1] = {
-		.start  = IRQ_GPIO(GPIO_ESERIES_TMIO_IRQ),
-		.end    = IRQ_GPIO(GPIO_ESERIES_TMIO_IRQ),
+		.start  = PXA_GPIO_TO_IRQ(GPIO_ESERIES_TMIO_IRQ),
+		.end    = PXA_GPIO_TO_IRQ(GPIO_ESERIES_TMIO_IRQ),
 		.flags  = IORESOURCE_IRQ,
 	},
 };
 
 /* Some e-series hardware cannot control the 32K clock */
-static void clk_32k_dummy(struct clk *clk)
+static void __init __maybe_unused eseries_register_clks(void)
 {
-}
-
-static const struct clkops clk_32k_dummy_ops = {
-	.enable         = clk_32k_dummy,
-	.disable        = clk_32k_dummy,
-};
-
-static struct clk tmio_dummy_clk = {
-	.ops	= &clk_32k_dummy_ops,
-	.rate	= 32768,
-};
-
-static struct clk_lookup eseries_clkregs[] = {
-	INIT_CLKREG(&tmio_dummy_clk, NULL, "CLK_CK32K"),
-};
-
-void eseries_register_clks(void)
-{
-	clkdev_add_table(eseries_clkregs, ARRAY_SIZE(eseries_clkregs));
+	clk_register_fixed_rate(NULL, "CLK_CK32K", NULL, 0, 32768);
 }
 
 #ifdef CONFIG_MACH_E330
@@ -146,7 +133,6 @@ void eseries_register_clks(void)
 
 static struct tc6387xb_platform_data e330_tc6387xb_info = {
 	.enable   = &eseries_tmio_enable,
-	.disable  = &eseries_tmio_disable,
 	.suspend  = &eseries_tmio_suspend,
 	.resume   = &eseries_tmio_resume,
 };
@@ -165,6 +151,7 @@ static struct platform_device e330_tc6387xb_device = {
 
 static struct platform_device *e330_devices[] __initdata = {
 	&e330_tc6387xb_device,
+	&e7xx_gpio_vbus,
 };
 
 static void __init e330_init(void)
@@ -174,19 +161,21 @@ static void __init e330_init(void)
 	pxa_set_stuart_info(NULL);
 	eseries_register_clks();
 	eseries_get_tmio_gpios();
+	gpiod_add_lookup_table(&e7xx_gpio_vbus_gpiod_table);
 	platform_add_devices(ARRAY_AND_SIZE(e330_devices));
-	pxa_set_udc_info(&e7xx_udc_mach_info);
 }
 
 MACHINE_START(E330, "Toshiba e330")
 	/* Maintainer: Ian Molton (spyro@f2s.com) */
-	.boot_params	= 0xa0000100,
+	.atag_offset	= 0x100,
 	.map_io		= pxa25x_map_io,
 	.nr_irqs	= ESERIES_NR_IRQS,
 	.init_irq	= pxa25x_init_irq,
+	.handle_irq	= pxa25x_handle_irq,
 	.fixup		= eseries_fixup,
 	.init_machine	= e330_init,
-	.timer		= &pxa_timer,
+	.init_time	= pxa_timer_init,
+	.restart	= pxa_restart,
 MACHINE_END
 #endif
 
@@ -214,6 +203,7 @@ static struct platform_device e350_t7l66xb_device = {
 
 static struct platform_device *e350_devices[] __initdata = {
 	&e350_t7l66xb_device,
+	&e7xx_gpio_vbus,
 };
 
 static void __init e350_init(void)
@@ -223,19 +213,21 @@ static void __init e350_init(void)
 	pxa_set_stuart_info(NULL);
 	eseries_register_clks();
 	eseries_get_tmio_gpios();
+	gpiod_add_lookup_table(&e7xx_gpio_vbus_gpiod_table);
 	platform_add_devices(ARRAY_AND_SIZE(e350_devices));
-	pxa_set_udc_info(&e7xx_udc_mach_info);
 }
 
 MACHINE_START(E350, "Toshiba e350")
 	/* Maintainer: Ian Molton (spyro@f2s.com) */
-	.boot_params	= 0xa0000100,
+	.atag_offset	= 0x100,
 	.map_io		= pxa25x_map_io,
 	.nr_irqs	= ESERIES_NR_IRQS,
 	.init_irq	= pxa25x_init_irq,
+	.handle_irq	= pxa25x_handle_irq,
 	.fixup		= eseries_fixup,
 	.init_machine	= e350_init,
-	.timer		= &pxa_timer,
+	.init_time	= pxa_timer_init,
+	.restart	= pxa_restart,
 MACHINE_END
 #endif
 
@@ -333,6 +325,7 @@ static struct platform_device e400_t7l66xb_device = {
 
 static struct platform_device *e400_devices[] __initdata = {
 	&e400_t7l66xb_device,
+	&e7xx_gpio_vbus,
 };
 
 static void __init e400_init(void)
@@ -344,20 +337,22 @@ static void __init e400_init(void)
 	/* Fixme - e400 may have a switched clock */
 	eseries_register_clks();
 	eseries_get_tmio_gpios();
-	set_pxa_fb_info(&e400_pxafb_mach_info);
+	pxa_set_fb_info(NULL, &e400_pxafb_mach_info);
+	gpiod_add_lookup_table(&e7xx_gpio_vbus_gpiod_table);
 	platform_add_devices(ARRAY_AND_SIZE(e400_devices));
-	pxa_set_udc_info(&e7xx_udc_mach_info);
 }
 
 MACHINE_START(E400, "Toshiba e400")
 	/* Maintainer: Ian Molton (spyro@f2s.com) */
-	.boot_params	= 0xa0000100,
+	.atag_offset	= 0x100,
 	.map_io		= pxa25x_map_io,
 	.nr_irqs	= ESERIES_NR_IRQS,
 	.init_irq	= pxa25x_init_irq,
+	.handle_irq	= pxa25x_handle_irq,
 	.fixup		= eseries_fixup,
 	.init_machine	= e400_init,
-	.timer		= &pxa_timer,
+	.init_time	= pxa_timer_init,
+	.restart	= pxa_restart,
 MACHINE_END
 #endif
 
@@ -514,11 +509,28 @@ static struct platform_device e740_t7l66xb_device = {
 	.resource      = eseries_tmio_resources,
 };
 
+static struct platform_device e740_audio_device = {
+	.name		= "e740-audio",
+	.id		= -1,
+};
+
+static struct gpiod_lookup_table e740_audio_gpio_table = {
+	.dev_id = "e740-audio",
+	.table = {
+		GPIO_LOOKUP("gpio-pxa",  GPIO_E740_WM9705_nAVDD2, "Audio power",  GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP("gpio-pxa",  GPIO_E740_AMP_ON, "Output amp",  GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP("gpio-pxa",  GPIO_E740_MIC_ON, "Mic amp", GPIO_ACTIVE_HIGH),
+		{ },
+	},
+};
+
 /* ----------------------------------------------------------------------- */
 
 static struct platform_device *e740_devices[] __initdata = {
 	&e740_fb_device,
 	&e740_t7l66xb_device,
+	&e7xx_gpio_vbus,
+	&e740_audio_device,
 };
 
 static void __init e740_init(void)
@@ -531,21 +543,24 @@ static void __init e740_init(void)
 	clk_add_alias("CLK_CK48M", e740_t7l66xb_device.name,
 			"UDCCLK", &pxa25x_device_udc.dev),
 	eseries_get_tmio_gpios();
+	gpiod_add_lookup_table(&e7xx_gpio_vbus_gpiod_table);
+	gpiod_add_lookup_table(&e740_audio_gpio_table);
 	platform_add_devices(ARRAY_AND_SIZE(e740_devices));
-	pxa_set_udc_info(&e7xx_udc_mach_info);
 	pxa_set_ac97_info(NULL);
 	pxa_set_ficp_info(&e7xx_ficp_platform_data);
 }
 
 MACHINE_START(E740, "Toshiba e740")
 	/* Maintainer: Ian Molton (spyro@f2s.com) */
-	.boot_params	= 0xa0000100,
+	.atag_offset	= 0x100,
 	.map_io		= pxa25x_map_io,
 	.nr_irqs	= ESERIES_NR_IRQS,
 	.init_irq	= pxa25x_init_irq,
+	.handle_irq	= pxa25x_handle_irq,
 	.fixup		= eseries_fixup,
 	.init_machine	= e740_init,
-	.timer		= &pxa_timer,
+	.init_time	= pxa_timer_init,
+	.restart	= pxa_restart,
 MACHINE_END
 #endif
 
@@ -662,7 +677,7 @@ static unsigned long e750_pin_config[] __initdata = {
 	/* PC Card */
 	GPIO8_GPIO,   /* CD0 */
 	GPIO44_GPIO,  /* CD1 */
-	GPIO11_GPIO,  /* IRQ0 */
+	/* GPIO11_GPIO,  IRQ0 */
 	GPIO6_GPIO,   /* IRQ1 */
 	GPIO27_GPIO,  /* RST0 */
 	GPIO24_GPIO,  /* RST1 */
@@ -689,7 +704,6 @@ static struct tc6393xb_platform_data e750_tc6393xb_info = {
 	.irq_base       = IRQ_BOARD_START,
 	.scr_pll2cr     = 0x0cc1,
 	.scr_gper       = 0,
-	.gpio_base      = -1,
 	.suspend        = &eseries_tmio_suspend,
 	.resume         = &eseries_tmio_resume,
 	.enable         = &eseries_tmio_enable,
@@ -706,11 +720,27 @@ static struct platform_device e750_tc6393xb_device = {
 	.resource      = eseries_tmio_resources,
 };
 
+static struct gpiod_lookup_table e750_audio_gpio_table = {
+	.dev_id = "e750-audio",
+	.table = {
+		GPIO_LOOKUP("gpio-pxa",  GPIO_E750_HP_AMP_OFF, "Output amp",  GPIO_ACTIVE_LOW),
+		GPIO_LOOKUP("gpio-pxa",  GPIO_E750_SPK_AMP_OFF, "Mic amp", GPIO_ACTIVE_LOW),
+		{ },
+	},
+};
+
+static struct platform_device e750_audio_device = {
+	.name		= "e750-audio",
+	.id		= -1,
+};
+
 /* ------------------------------------------------------------- */
 
 static struct platform_device *e750_devices[] __initdata = {
 	&e750_fb_device,
 	&e750_tc6393xb_device,
+	&e7xx_gpio_vbus,
+	&e750_audio_device,
 };
 
 static void __init e750_init(void)
@@ -722,21 +752,24 @@ static void __init e750_init(void)
 	clk_add_alias("CLK_CK3P6MI", e750_tc6393xb_device.name,
 			"GPIO11_CLK", NULL),
 	eseries_get_tmio_gpios();
+	gpiod_add_lookup_table(&e7xx_gpio_vbus_gpiod_table);
+	gpiod_add_lookup_table(&e750_audio_gpio_table);
 	platform_add_devices(ARRAY_AND_SIZE(e750_devices));
-	pxa_set_udc_info(&e7xx_udc_mach_info);
 	pxa_set_ac97_info(NULL);
 	pxa_set_ficp_info(&e7xx_ficp_platform_data);
 }
 
 MACHINE_START(E750, "Toshiba e750")
 	/* Maintainer: Ian Molton (spyro@f2s.com) */
-	.boot_params	= 0xa0000100,
+	.atag_offset	= 0x100,
 	.map_io		= pxa25x_map_io,
 	.nr_irqs	= ESERIES_NR_IRQS,
 	.init_irq	= pxa25x_init_irq,
+	.handle_irq	= pxa25x_handle_irq,
 	.fixup		= eseries_fixup,
 	.init_machine	= e750_init,
-	.timer		= &pxa_timer,
+	.init_time	= pxa_timer_init,
+	.restart	= pxa_restart,
 MACHINE_END
 #endif
 
@@ -749,6 +782,9 @@ static unsigned long e800_pin_config[] __initdata = {
 	GPIO29_AC97_SDATA_IN_0,
 	GPIO30_AC97_SDATA_OUT,
 	GPIO31_AC97_SYNC,
+
+	/* tc6393xb */
+	GPIO11_3_6MHz,
 };
 
 static struct w100_gen_regs e800_lcd_regs = {
@@ -873,11 +909,22 @@ static struct platform_device e800_fb_device = {
 
 /* --------------------------- UDC definitions --------------------------- */
 
-static struct pxa2xx_udc_mach_info e800_udc_mach_info = {
-	.gpio_vbus   = GPIO_E800_USB_DISC,
-	.gpio_pullup = GPIO_E800_USB_PULLUP,
-	.gpio_pullup_inverted = 1
+static struct gpiod_lookup_table e800_gpio_vbus_gpiod_table = {
+	.dev_id = "gpio-vbus",
+	.table = {
+		GPIO_LOOKUP("gpio-pxa", GPIO_E800_USB_DISC,
+			    "vbus", GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP("gpio-pxa", GPIO_E800_USB_PULLUP,
+			    "pullup", GPIO_ACTIVE_LOW),
+		{ },
+	},
 };
+
+static struct platform_device e800_gpio_vbus = {
+	.name	= "gpio-vbus",
+	.id	= -1,
+};
+
 
 /* ----------------- e800 tc6393xb parameters ------------------ */
 
@@ -885,7 +932,6 @@ static struct tc6393xb_platform_data e800_tc6393xb_info = {
 	.irq_base       = IRQ_BOARD_START,
 	.scr_pll2cr     = 0x0cc1,
 	.scr_gper       = 0,
-	.gpio_base      = -1,
 	.suspend        = &eseries_tmio_suspend,
 	.resume         = &eseries_tmio_resume,
 	.enable         = &eseries_tmio_enable,
@@ -902,11 +948,27 @@ static struct platform_device e800_tc6393xb_device = {
 	.resource      = eseries_tmio_resources,
 };
 
+static struct gpiod_lookup_table e800_audio_gpio_table = {
+	.dev_id = "e800-audio",
+	.table = {
+		GPIO_LOOKUP("gpio-pxa",  GPIO_E800_HP_AMP_OFF, "Output amp",  GPIO_ACTIVE_LOW),
+		GPIO_LOOKUP("gpio-pxa",  GPIO_E800_SPK_AMP_ON, "Mic amp", GPIO_ACTIVE_HIGH),
+		{ },
+	},
+};
+
+static struct platform_device e800_audio_device = {
+	.name		= "e800-audio",
+	.id		= -1,
+};
+
 /* ----------------------------------------------------------------------- */
 
 static struct platform_device *e800_devices[] __initdata = {
 	&e800_fb_device,
 	&e800_tc6393xb_device,
+	&e800_gpio_vbus,
+	&e800_audio_device,
 };
 
 static void __init e800_init(void)
@@ -918,19 +980,22 @@ static void __init e800_init(void)
 	clk_add_alias("CLK_CK3P6MI", e800_tc6393xb_device.name,
 			"GPIO11_CLK", NULL),
 	eseries_get_tmio_gpios();
+	gpiod_add_lookup_table(&e800_gpio_vbus_gpiod_table);
+	gpiod_add_lookup_table(&e800_audio_gpio_table);
 	platform_add_devices(ARRAY_AND_SIZE(e800_devices));
-	pxa_set_udc_info(&e800_udc_mach_info);
 	pxa_set_ac97_info(NULL);
 }
 
 MACHINE_START(E800, "Toshiba e800")
 	/* Maintainer: Ian Molton (spyro@f2s.com) */
-	.boot_params	= 0xa0000100,
+	.atag_offset	= 0x100,
 	.map_io		= pxa25x_map_io,
 	.nr_irqs	= ESERIES_NR_IRQS,
 	.init_irq	= pxa25x_init_irq,
+	.handle_irq	= pxa25x_handle_irq,
 	.fixup		= eseries_fixup,
 	.init_machine	= e800_init,
-	.timer		= &pxa_timer,
+	.init_time	= pxa_timer_init,
+	.restart	= pxa_restart,
 MACHINE_END
 #endif

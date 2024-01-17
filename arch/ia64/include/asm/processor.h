@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 #ifndef _ASM_IA64_PROCESSOR_H
 #define _ASM_IA64_PROCESSOR_H
 
@@ -31,8 +32,7 @@
  * each (assuming 8KB page size), for a total of 8TB of user virtual
  * address space.
  */
-#define TASK_SIZE_OF(tsk)	((tsk)->thread.task_size)
-#define TASK_SIZE       	TASK_SIZE_OF(current)
+#define TASK_SIZE       	DEFAULT_TASK_SIZE
 
 /*
  * This decides where the kernel will search for a free chunk of vm
@@ -69,13 +69,14 @@
 #include <linux/compiler.h>
 #include <linux/threads.h>
 #include <linux/types.h>
+#include <linux/bitops.h>
 
 #include <asm/fpu.h>
 #include <asm/page.h>
 #include <asm/percpu.h>
 #include <asm/rse.h>
 #include <asm/unwind.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 #ifdef CONFIG_NUMA
 #include <asm/nodedata.h>
 #endif
@@ -242,10 +243,6 @@ DECLARE_PER_CPU(struct cpuinfo_ia64, ia64_cpu_info);
 
 extern void print_cpu_info (struct cpuinfo_ia64 *);
 
-typedef struct {
-	unsigned long seg;
-} mm_segment_t;
-
 #define SET_UNALIGN_CTL(task,value)								\
 ({												\
 	(task)->thread.flags = (((task)->thread.flags & ~IA64_THREAD_UAC_MASK)			\
@@ -277,18 +274,8 @@ struct thread_struct {
 	__u8 pad[3];
 	__u64 ksp;			/* kernel stack pointer */
 	__u64 map_base;			/* base address for get_unmapped_area() */
-	__u64 task_size;		/* limit for task size */
 	__u64 rbs_bot;			/* the base address for the RBS */
 	int last_fph_cpu;		/* CPU that may hold the contents of f32-f127 */
-
-#ifdef CONFIG_PERFMON
-	void *pfm_context;		     /* pointer to detailed PMU context */
-	unsigned long pfm_needs_checking;    /* when >0, pending perfmon work on kernel exit */
-# define INIT_THREAD_PM		.pfm_context =		NULL,     \
-				.pfm_needs_checking =	0UL,
-#else
-# define INIT_THREAD_PM
-#endif
 	unsigned long dbr[IA64_NUM_DBG_REGS];
 	unsigned long ibr[IA64_NUM_DBG_REGS];
 	struct ia64_fpreg fph[96];	/* saved/loaded on demand */
@@ -300,16 +287,13 @@ struct thread_struct {
 	.ksp =		0,					\
 	.map_base =	DEFAULT_MAP_BASE,			\
 	.rbs_bot =	STACK_TOP - DEFAULT_USER_STACK_SIZE,	\
-	.task_size =	DEFAULT_TASK_SIZE,			\
 	.last_fph_cpu =  -1,					\
-	INIT_THREAD_PM						\
 	.dbr =		{0, },					\
 	.ibr =		{0, },					\
 	.fph =		{{{{0}}}, }				\
 }
 
 #define start_thread(regs,new_ip,new_sp) do {							\
-	set_fs(USER_DS);									\
 	regs->cr_ipsr = ((regs->cr_ipsr | (IA64_PSR_BITS_TO_SET | IA64_PSR_CPL))		\
 			 & ~(IA64_PSR_BITS_TO_CLEAR | IA64_PSR_RI | IA64_PSR_IS));		\
 	regs->cr_iip = new_ip;									\
@@ -320,7 +304,7 @@ struct thread_struct {
 	regs->loadrs = 0;									\
 	regs->r8 = get_dumpable(current->mm);	/* set "don't zap registers" flag */		\
 	regs->r12 = new_sp - 16;	/* allocate 16 byte scratch area */			\
-	if (unlikely(!get_dumpable(current->mm))) {							\
+	if (unlikely(get_dumpable(current->mm) != SUID_DUMP_USER)) {	\
 		/*										\
 		 * Zap scratch regs to avoid leaking bits between processes with different	\
 		 * uid/privileges.								\
@@ -334,34 +318,8 @@ struct thread_struct {
 struct mm_struct;
 struct task_struct;
 
-/*
- * Free all resources held by a thread. This is called after the
- * parent of DEAD_TASK has collected the exit status of the task via
- * wait().
- */
-#define release_thread(dead_task)
-
-/* Prepare to copy thread state - unlazy all lazy status */
-#define prepare_to_copy(tsk)	do { } while (0)
-
-/*
- * This is the mechanism for creating a new kernel thread.
- *
- * NOTE 1: Only a kernel-only process (ie the swapper or direct
- * descendants who haven't done an "execve()") should use this: it
- * will work within a system call from a "real" process, but the
- * process memory space will not be free'd until both the parent and
- * the child have exited.
- *
- * NOTE 2: This MUST NOT be an inlined function.  Otherwise, we get
- * into trouble in init/main.c when the child thread returns to
- * do_basic_setup() and the timing is such that free_initmem() has
- * been called already.
- */
-extern pid_t kernel_thread (int (*fn)(void *), void *arg, unsigned long flags);
-
 /* Get wait channel for task P.  */
-extern unsigned long get_wchan (struct task_struct *p);
+extern unsigned long __get_wchan (struct task_struct *p);
 
 /* Return instruction pointer of blocked task TSK.  */
 #define KSTK_EIP(tsk)					\
@@ -573,7 +531,7 @@ ia64_get_irr(unsigned int vector)
 {
 	unsigned int reg = vector / 64;
 	unsigned int bit = vector % 64;
-	u64 irr;
+	unsigned long irr;
 
 	switch (reg) {
 	case 0: irr = ia64_getreg(_IA64_REG_CR_IRR0); break;
@@ -622,29 +580,6 @@ ia64_set_unat (__u64 *unat, void *spill_addr, unsigned long nat)
 
 	*unat = (*unat & ~mask) | (nat << bit);
 }
-
-/*
- * Return saved PC of a blocked thread.
- * Note that the only way T can block is through a call to schedule() -> switch_to().
- */
-static inline unsigned long
-thread_saved_pc (struct task_struct *t)
-{
-	struct unw_frame_info info;
-	unsigned long ip;
-
-	unw_init_from_blocked_task(&info, t);
-	if (unw_unwind(&info) < 0)
-		return 0;
-	unw_get_ip(&info, &ip);
-	return ip;
-}
-
-/*
- * Get the current instruction/program counter value.
- */
-#define current_text_addr() \
-	({ void *_pc; _pc = (void *)ia64_getreg(_IA64_REG_IP); _pc; })
 
 static inline __u64
 ia64_get_ivr (void)
@@ -720,6 +655,8 @@ extern unsigned long boot_option_idle_override;
 
 enum idle_boot_override {IDLE_NO_OVERRIDE=0, IDLE_HALT, IDLE_FORCE_MWAIT,
 			 IDLE_NOMWAIT, IDLE_POLL};
+
+void default_idle(void);
 
 #endif /* !__ASSEMBLY__ */
 

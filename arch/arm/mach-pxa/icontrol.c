@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * linux/arch/arm/mach-pxa/icontrol.c
  *
@@ -7,25 +8,22 @@
  * Copyright (C) 2009 TMT Services & Supplies (Pty) Ltd.
  *
  * 2010-01-21 Hennie van der Merve <hvdmerwe@tmtservies.co.za>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 
 #include <linux/irq.h>
 #include <linux/platform_device.h>
-#include <linux/gpio.h>
+#include <linux/property.h>
+#include <linux/gpio/machine.h>
 
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
 
-#include <mach/pxa320.h>
-#include <mach/mxm8x10.h>
+#include "pxa320.h"
+#include "mxm8x10.h"
 
 #include <linux/spi/spi.h>
 #include <linux/spi/pxa2xx_spi.h>
-#include <linux/can/platform/mcp251x.h>
+#include <linux/regulator/machine.h>
 
 #include "generic.h"
 
@@ -44,7 +42,6 @@ static struct pxa2xx_spi_chip mcp251x_chip_info1 = {
 	.rx_threshold   = 128,
 	.dma_burst_size = 8,
 	.timeout        = 235,
-	.gpio_cs        = ICONTROL_MCP251x_nCS1
 };
 
 static struct pxa2xx_spi_chip mcp251x_chip_info2 = {
@@ -52,7 +49,6 @@ static struct pxa2xx_spi_chip mcp251x_chip_info2 = {
 	.rx_threshold   = 128,
 	.dma_burst_size = 8,
 	.timeout        = 235,
-	.gpio_cs        = ICONTROL_MCP251x_nCS2
 };
 
 static struct pxa2xx_spi_chip mcp251x_chip_info3 = {
@@ -60,7 +56,6 @@ static struct pxa2xx_spi_chip mcp251x_chip_info3 = {
 	.rx_threshold   = 128,
 	.dma_burst_size = 8,
 	.timeout        = 235,
-	.gpio_cs        = ICONTROL_MCP251x_nCS3
 };
 
 static struct pxa2xx_spi_chip mcp251x_chip_info4 = {
@@ -68,14 +63,15 @@ static struct pxa2xx_spi_chip mcp251x_chip_info4 = {
 	.rx_threshold   = 128,
 	.dma_burst_size = 8,
 	.timeout        = 235,
-	.gpio_cs        = ICONTROL_MCP251x_nCS4
 };
 
-static struct mcp251x_platform_data mcp251x_info = {
-	.oscillator_frequency = 16E6,
-	.board_specific_setup = NULL,
-	.power_enable         = NULL,
-	.transceiver_enable   = NULL
+static const struct property_entry mcp251x_properties[] = {
+	PROPERTY_ENTRY_U32("clock-frequency", 16000000),
+	{}
+};
+
+static const struct software_node mcp251x_node = {
+	.properties = mcp251x_properties,
 };
 
 static struct spi_board_info mcp251x_board_info[] = {
@@ -84,47 +80,45 @@ static struct spi_board_info mcp251x_board_info[] = {
 		.max_speed_hz    = 6500000,
 		.bus_num         = 3,
 		.chip_select     = 0,
-		.platform_data   = &mcp251x_info,
+		.swnode		 = &mcp251x_node,
 		.controller_data = &mcp251x_chip_info1,
-		.irq             = gpio_to_irq(ICONTROL_MCP251x_nIRQ1)
+		.irq             = PXA_GPIO_TO_IRQ(ICONTROL_MCP251x_nIRQ1)
 	},
 	{
 		.modalias        = "mcp2515",
 		.max_speed_hz    = 6500000,
 		.bus_num         = 3,
 		.chip_select     = 1,
-		.platform_data   = &mcp251x_info,
+		.swnode		 = &mcp251x_node,
 		.controller_data = &mcp251x_chip_info2,
-		.irq             = gpio_to_irq(ICONTROL_MCP251x_nIRQ2)
+		.irq             = PXA_GPIO_TO_IRQ(ICONTROL_MCP251x_nIRQ2)
 	},
 	{
 		.modalias        = "mcp2515",
 		.max_speed_hz    = 6500000,
 		.bus_num         = 4,
 		.chip_select     = 0,
-		.platform_data   = &mcp251x_info,
+		.swnode		 = &mcp251x_node,
 		.controller_data = &mcp251x_chip_info3,
-		.irq             = gpio_to_irq(ICONTROL_MCP251x_nIRQ3)
+		.irq             = PXA_GPIO_TO_IRQ(ICONTROL_MCP251x_nIRQ3)
 	},
 	{
 		.modalias        = "mcp2515",
 		.max_speed_hz    = 6500000,
 		.bus_num         = 4,
 		.chip_select     = 1,
-		.platform_data   = &mcp251x_info,
+		.swnode		 = &mcp251x_node,
 		.controller_data = &mcp251x_chip_info4,
-		.irq             = gpio_to_irq(ICONTROL_MCP251x_nIRQ4)
+		.irq             = PXA_GPIO_TO_IRQ(ICONTROL_MCP251x_nIRQ4)
 	}
 };
 
-static struct pxa2xx_spi_master pxa_ssp3_spi_master_info = {
-	.clock_enable   = CKEN_SSP3,
+static struct pxa2xx_spi_controller pxa_ssp3_spi_master_info = {
 	.num_chipselect = 2,
 	.enable_dma     = 1
 };
 
-static struct pxa2xx_spi_master pxa_ssp4_spi_master_info = {
-	.clock_enable   = CKEN_SSP4,
+static struct pxa2xx_spi_controller pxa_ssp4_spi_master_info = {
 	.num_chipselect = 2,
 	.enable_dma     = 1
 };
@@ -143,6 +137,24 @@ struct platform_device pxa_spi_ssp4 = {
 	.dev           = {
 		.platform_data = &pxa_ssp4_spi_master_info,
 	}
+};
+
+static struct gpiod_lookup_table pxa_ssp3_gpio_table = {
+	.dev_id = "spi3",
+	.table = {
+		GPIO_LOOKUP_IDX("gpio-pxa", ICONTROL_MCP251x_nCS1, "cs", 0, GPIO_ACTIVE_LOW),
+		GPIO_LOOKUP_IDX("gpio-pxa", ICONTROL_MCP251x_nCS2, "cs", 1, GPIO_ACTIVE_LOW),
+		{ },
+	},
+};
+
+static struct gpiod_lookup_table pxa_ssp4_gpio_table = {
+	.dev_id = "spi4",
+	.table = {
+		GPIO_LOOKUP_IDX("gpio-pxa", ICONTROL_MCP251x_nCS3, "cs", 0, GPIO_ACTIVE_LOW),
+		GPIO_LOOKUP_IDX("gpio-pxa", ICONTROL_MCP251x_nCS4, "cs", 1, GPIO_ACTIVE_LOW),
+		{ },
+	},
 };
 
 static struct platform_device *icontrol_spi_devices[] __initdata = {
@@ -177,6 +189,8 @@ static mfp_cfg_t mfp_can_cfg[] __initdata = {
 static void __init icontrol_can_init(void)
 {
 	pxa3xx_mfp_config(ARRAY_AND_SIZE(mfp_can_cfg));
+	gpiod_add_lookup_table(&pxa_ssp3_gpio_table);
+	gpiod_add_lookup_table(&pxa_ssp4_gpio_table);
 	platform_add_devices(ARRAY_AND_SIZE(icontrol_spi_devices));
 	spi_register_board_info(ARRAY_AND_SIZE(mcp251x_board_info));
 }
@@ -188,12 +202,17 @@ static void __init icontrol_init(void)
 	mxm_8x10_mmc_init();
 
 	icontrol_can_init();
+
+	regulator_has_full_constraints();
 }
 
 MACHINE_START(ICONTROL, "iControl/SafeTcam boards using Embedian MXM-8x10 CoM")
-	.boot_params	= 0xa0000100,
+	.atag_offset	= 0x100,
 	.map_io		= pxa3xx_map_io,
+	.nr_irqs	= PXA_NR_IRQS,
 	.init_irq	= pxa3xx_init_irq,
-	.timer		= &pxa_timer,
-	.init_machine	= icontrol_init
+	.handle_irq	= pxa3xx_handle_irq,
+	.init_time	= pxa_timer_init,
+	.init_machine	= icontrol_init,
+	.restart	= pxa_restart,
 MACHINE_END

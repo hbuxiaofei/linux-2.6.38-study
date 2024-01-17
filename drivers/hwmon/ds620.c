@@ -1,23 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  *  ds620.c - Support for temperature sensor and thermostat DS620
  *
  *  Copyright (C) 2010, 2011 Roland Stigge <stigge@antcom.de>
  *
  *  based on ds1621.c by Christian W. Zuckschwerdt  <zany@triq.net>
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  */
 
 #include <linux/module.h>
@@ -30,7 +17,7 @@
 #include <linux/err.h>
 #include <linux/mutex.h>
 #include <linux/sysfs.h>
-#include <linux/i2c/ds620.h>
+#include <linux/platform_data/ds620.h>
 
 /*
  * Many DS620 constants specified below
@@ -67,41 +54,21 @@ static const u8 DS620_REG_TEMP[3] = {
 
 /* Each client has this additional data */
 struct ds620_data {
-	struct device *hwmon_dev;
+	struct i2c_client *client;
 	struct mutex update_lock;
-	char valid;		/* !=0 if following fields are valid */
+	bool valid;		/* true if following fields are valid */
 	unsigned long last_updated;	/* In jiffies */
 
-	u16 temp[3];		/* Register values, word */
+	s16 temp[3];		/* Register values, word */
 };
-
-/*
- *  Temperature registers are word-sized.
- *  DS620 uses a high-byte first convention, which is exactly opposite to
- *  the SMBus standard.
- */
-static int ds620_read_temp(struct i2c_client *client, u8 reg)
-{
-	int ret;
-
-	ret = i2c_smbus_read_word_data(client, reg);
-	if (ret < 0)
-		return ret;
-	return swab16(ret);
-}
-
-static int ds620_write_temp(struct i2c_client *client, u8 reg, u16 value)
-{
-	return i2c_smbus_write_word_data(client, reg, swab16(value));
-}
 
 static void ds620_init_client(struct i2c_client *client)
 {
-	struct ds620_platform_data *ds620_info = client->dev.platform_data;
+	struct ds620_platform_data *ds620_info = dev_get_platdata(&client->dev);
 	u16 conf, new_conf;
 
 	new_conf = conf =
-	    swab16(i2c_smbus_read_word_data(client, DS620_REG_CONF));
+	    i2c_smbus_read_word_swapped(client, DS620_REG_CONF);
 
 	/* switch to continuous conversion mode */
 	new_conf &= ~DS620_REG_CONFIG_1SHOT;
@@ -118,8 +85,7 @@ static void ds620_init_client(struct i2c_client *client)
 	new_conf |= DS620_REG_CONFIG_R1 | DS620_REG_CONFIG_R0;
 
 	if (conf != new_conf)
-		i2c_smbus_write_word_data(client, DS620_REG_CONF,
-					  swab16(new_conf));
+		i2c_smbus_write_word_swapped(client, DS620_REG_CONF, new_conf);
 
 	/* start conversion */
 	i2c_smbus_write_byte(client, DS620_COM_START);
@@ -127,8 +93,8 @@ static void ds620_init_client(struct i2c_client *client)
 
 static struct ds620_data *ds620_update_client(struct device *dev)
 {
-	struct i2c_client *client = to_i2c_client(dev);
-	struct ds620_data *data = i2c_get_clientdata(client);
+	struct ds620_data *data = dev_get_drvdata(dev);
+	struct i2c_client *client = data->client;
 	struct ds620_data *ret = data;
 
 	mutex_lock(&data->update_lock);
@@ -141,8 +107,8 @@ static struct ds620_data *ds620_update_client(struct device *dev)
 		dev_dbg(&client->dev, "Starting ds620 update\n");
 
 		for (i = 0; i < ARRAY_SIZE(data->temp); i++) {
-			res = ds620_read_temp(client,
-					      DS620_REG_TEMP[i]);
+			res = i2c_smbus_read_word_swapped(client,
+							  DS620_REG_TEMP[i]);
 			if (res < 0) {
 				ret = ERR_PTR(res);
 				goto abort;
@@ -152,7 +118,7 @@ static struct ds620_data *ds620_update_client(struct device *dev)
 		}
 
 		data->last_updated = jiffies;
-		data->valid = 1;
+		data->valid = true;
 	}
 abort:
 	mutex_unlock(&data->update_lock);
@@ -160,7 +126,7 @@ abort:
 	return ret;
 }
 
-static ssize_t show_temp(struct device *dev, struct device_attribute *da,
+static ssize_t temp_show(struct device *dev, struct device_attribute *da,
 			 char *buf)
 {
 	struct sensor_device_attribute *attr = to_sensor_dev_attr(da);
@@ -172,54 +138,55 @@ static ssize_t show_temp(struct device *dev, struct device_attribute *da,
 	return sprintf(buf, "%d\n", ((data->temp[attr->index] / 8) * 625) / 10);
 }
 
-static ssize_t set_temp(struct device *dev, struct device_attribute *da,
-			const char *buf, size_t count)
+static ssize_t temp_store(struct device *dev, struct device_attribute *da,
+			  const char *buf, size_t count)
 {
 	int res;
 	long val;
 
 	struct sensor_device_attribute *attr = to_sensor_dev_attr(da);
-	struct i2c_client *client = to_i2c_client(dev);
-	struct ds620_data *data = i2c_get_clientdata(client);
+	struct ds620_data *data = dev_get_drvdata(dev);
+	struct i2c_client *client = data->client;
 
-	res = strict_strtol(buf, 10, &val);
+	res = kstrtol(buf, 10, &val);
 
 	if (res)
 		return res;
 
-	val = (val * 10 / 625) * 8;
+	val = (clamp_val(val, -128000, 128000) * 10 / 625) * 8;
 
 	mutex_lock(&data->update_lock);
 	data->temp[attr->index] = val;
-	ds620_write_temp(client, DS620_REG_TEMP[attr->index],
-			 data->temp[attr->index]);
+	i2c_smbus_write_word_swapped(client, DS620_REG_TEMP[attr->index],
+				     data->temp[attr->index]);
 	mutex_unlock(&data->update_lock);
 	return count;
 }
 
-static ssize_t show_alarm(struct device *dev, struct device_attribute *da,
+static ssize_t alarm_show(struct device *dev, struct device_attribute *da,
 			  char *buf)
 {
 	struct sensor_device_attribute *attr = to_sensor_dev_attr(da);
 	struct ds620_data *data = ds620_update_client(dev);
-	struct i2c_client *client = to_i2c_client(dev);
+	struct i2c_client *client;
 	u16 conf, new_conf;
 	int res;
 
 	if (IS_ERR(data))
 		return PTR_ERR(data);
 
+	client = data->client;
+
 	/* reset alarms if necessary */
-	res = i2c_smbus_read_word_data(client, DS620_REG_CONF);
+	res = i2c_smbus_read_word_swapped(client, DS620_REG_CONF);
 	if (res < 0)
 		return res;
 
-	conf = swab16(res);
-	new_conf = conf;
+	new_conf = conf = res;
 	new_conf &= ~attr->index;
 	if (conf != new_conf) {
-		res = i2c_smbus_write_word_data(client, DS620_REG_CONF,
-						swab16(new_conf));
+		res = i2c_smbus_write_word_swapped(client, DS620_REG_CONF,
+						   new_conf);
 		if (res < 0)
 			return res;
 	}
@@ -227,15 +194,13 @@ static ssize_t show_alarm(struct device *dev, struct device_attribute *da,
 	return sprintf(buf, "%d\n", !!(conf & attr->index));
 }
 
-static SENSOR_DEVICE_ATTR(temp1_input, S_IRUGO, show_temp, NULL, 0);
-static SENSOR_DEVICE_ATTR(temp1_min, S_IWUSR | S_IRUGO, show_temp, set_temp, 1);
-static SENSOR_DEVICE_ATTR(temp1_max, S_IWUSR | S_IRUGO, show_temp, set_temp, 2);
-static SENSOR_DEVICE_ATTR(temp1_min_alarm, S_IRUGO, show_alarm, NULL,
-			  DS620_REG_CONFIG_TLF);
-static SENSOR_DEVICE_ATTR(temp1_max_alarm, S_IRUGO, show_alarm, NULL,
-			  DS620_REG_CONFIG_THF);
+static SENSOR_DEVICE_ATTR_RO(temp1_input, temp, 0);
+static SENSOR_DEVICE_ATTR_RW(temp1_min, temp, 1);
+static SENSOR_DEVICE_ATTR_RW(temp1_max, temp, 2);
+static SENSOR_DEVICE_ATTR_RO(temp1_min_alarm, alarm, DS620_REG_CONFIG_TLF);
+static SENSOR_DEVICE_ATTR_RO(temp1_max_alarm, alarm, DS620_REG_CONFIG_THF);
 
-static struct attribute *ds620_attributes[] = {
+static struct attribute *ds620_attrs[] = {
 	&sensor_dev_attr_temp1_input.dev_attr.attr,
 	&sensor_dev_attr_temp1_min.dev_attr.attr,
 	&sensor_dev_attr_temp1_max.dev_attr.attr,
@@ -244,61 +209,27 @@ static struct attribute *ds620_attributes[] = {
 	NULL
 };
 
-static const struct attribute_group ds620_group = {
-	.attrs = ds620_attributes,
-};
+ATTRIBUTE_GROUPS(ds620);
 
-static int ds620_probe(struct i2c_client *client,
-		       const struct i2c_device_id *id)
+static int ds620_probe(struct i2c_client *client)
 {
+	struct device *dev = &client->dev;
+	struct device *hwmon_dev;
 	struct ds620_data *data;
-	int err;
 
-	data = kzalloc(sizeof(struct ds620_data), GFP_KERNEL);
-	if (!data) {
-		err = -ENOMEM;
-		goto exit;
-	}
+	data = devm_kzalloc(dev, sizeof(struct ds620_data), GFP_KERNEL);
+	if (!data)
+		return -ENOMEM;
 
-	i2c_set_clientdata(client, data);
+	data->client = client;
 	mutex_init(&data->update_lock);
 
 	/* Initialize the DS620 chip */
 	ds620_init_client(client);
 
-	/* Register sysfs hooks */
-	err = sysfs_create_group(&client->dev.kobj, &ds620_group);
-	if (err)
-		goto exit_free;
-
-	data->hwmon_dev = hwmon_device_register(&client->dev);
-	if (IS_ERR(data->hwmon_dev)) {
-		err = PTR_ERR(data->hwmon_dev);
-		goto exit_remove_files;
-	}
-
-	dev_info(&client->dev, "temperature sensor found\n");
-
-	return 0;
-
-exit_remove_files:
-	sysfs_remove_group(&client->dev.kobj, &ds620_group);
-exit_free:
-	kfree(data);
-exit:
-	return err;
-}
-
-static int ds620_remove(struct i2c_client *client)
-{
-	struct ds620_data *data = i2c_get_clientdata(client);
-
-	hwmon_device_unregister(data->hwmon_dev);
-	sysfs_remove_group(&client->dev.kobj, &ds620_group);
-
-	kfree(data);
-
-	return 0;
+	hwmon_dev = devm_hwmon_device_register_with_groups(dev, client->name,
+							   data, ds620_groups);
+	return PTR_ERR_OR_ZERO(hwmon_dev);
 }
 
 static const struct i2c_device_id ds620_id[] = {
@@ -314,24 +245,12 @@ static struct i2c_driver ds620_driver = {
 	.driver = {
 		   .name = "ds620",
 	},
-	.probe = ds620_probe,
-	.remove = ds620_remove,
+	.probe_new = ds620_probe,
 	.id_table = ds620_id,
 };
 
-static int __init ds620_init(void)
-{
-	return i2c_add_driver(&ds620_driver);
-}
-
-static void __exit ds620_exit(void)
-{
-	i2c_del_driver(&ds620_driver);
-}
+module_i2c_driver(ds620_driver);
 
 MODULE_AUTHOR("Roland Stigge <stigge@antcom.de>");
 MODULE_DESCRIPTION("DS620 driver");
 MODULE_LICENSE("GPL");
-
-module_init(ds620_init);
-module_exit(ds620_exit);

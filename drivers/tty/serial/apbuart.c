@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *  Driver for GRLIB serial ports (APBUART)
  *
@@ -10,12 +11,9 @@
  *  Copyright (C) 2009 Kristoffer Glembo <kristoffer@gaisler.com>, Aeroflex Gaisler AB
  */
 
-#if defined(CONFIG_SERIAL_GRLIB_GAISLER_APBUART_CONSOLE) && defined(CONFIG_MAGIC_SYSRQ)
-#define SUPPORT_SYSRQ
-#endif
-
 #include <linux/module.h>
 #include <linux/tty.h>
+#include <linux/tty_flip.h>
 #include <linux/ioport.h>
 #include <linux/init.h>
 #include <linux/serial.h>
@@ -70,14 +68,8 @@ static void apbuart_stop_rx(struct uart_port *port)
 	UART_PUT_CTRL(port, cr);
 }
 
-static void apbuart_enable_ms(struct uart_port *port)
-{
-	/* No modem status change interrupts for APBUART */
-}
-
 static void apbuart_rx_chars(struct uart_port *port)
 {
-	struct tty_struct *tty = port->state->port.tty;
 	unsigned int status, ch, rsr, flag;
 	unsigned int max_chars = port->fifosize;
 
@@ -125,7 +117,7 @@ static void apbuart_rx_chars(struct uart_port *port)
 		status = UART_GET_STATUS(port);
 	}
 
-	tty_flip_buffer_push(tty);
+	tty_flip_buffer_push(&port->state->port);
 }
 
 static void apbuart_tx_chars(struct uart_port *port)
@@ -236,7 +228,7 @@ static void apbuart_shutdown(struct uart_port *port)
 }
 
 static void apbuart_set_termios(struct uart_port *port,
-				struct ktermios *termios, struct ktermios *old)
+				struct ktermios *termios, const struct ktermios *old)
 {
 	unsigned int cr;
 	unsigned long flags;
@@ -328,14 +320,13 @@ static int apbuart_verify_port(struct uart_port *port,
 	return ret;
 }
 
-static struct uart_ops grlib_apbuart_ops = {
+static const struct uart_ops grlib_apbuart_ops = {
 	.tx_empty = apbuart_tx_empty,
 	.set_mctrl = apbuart_set_mctrl,
 	.get_mctrl = apbuart_get_mctrl,
 	.stop_tx = apbuart_stop_tx,
 	.start_tx = apbuart_start_tx,
 	.stop_rx = apbuart_stop_rx,
-	.enable_ms = apbuart_enable_ms,
 	.break_ctl = apbuart_break_ctl,
 	.startup = apbuart_startup,
 	.shutdown = apbuart_shutdown,
@@ -422,7 +413,7 @@ static void apbuart_flush_fifo(struct uart_port *port)
 
 #ifdef CONFIG_SERIAL_GRLIB_GAISLER_APBUART_CONSOLE
 
-static void apbuart_console_putchar(struct uart_port *port, int ch)
+static void apbuart_console_putchar(struct uart_port *port, unsigned char ch)
 {
 	unsigned int status;
 	do {
@@ -553,13 +544,11 @@ static struct uart_driver grlib_apbuart_driver = {
 /* OF Platform Driver                                                       */
 /* ======================================================================== */
 
-static int __devinit apbuart_probe(struct platform_device *op,
-				   const struct of_device_id *match)
+static int apbuart_probe(struct platform_device *op)
 {
-	int i = -1;
+	int i;
 	struct uart_port *port = NULL;
 
-	i = 0;
 	for (i = 0; i < grlib_apbuart_port_nr; i++) {
 		if (op->dev.of_node == grlib_apbuart_nodes[i])
 			break;
@@ -567,6 +556,7 @@ static int __devinit apbuart_probe(struct platform_device *op,
 
 	port = &grlib_apbuart_ports[i];
 	port->dev = &op->dev;
+	port->irq = op->archdata.irqs[0];
 
 	uart_add_one_port(&grlib_apbuart_driver, (struct uart_port *) port);
 
@@ -577,7 +567,7 @@ static int __devinit apbuart_probe(struct platform_device *op,
 	return 0;
 }
 
-static struct of_device_id __initdata apbuart_match[] = {
+static const struct of_device_id apbuart_match[] = {
 	{
 	 .name = "GAISLER_APBUART",
 	 },
@@ -586,37 +576,25 @@ static struct of_device_id __initdata apbuart_match[] = {
 	 },
 	{},
 };
+MODULE_DEVICE_TABLE(of, apbuart_match);
 
-static struct of_platform_driver grlib_apbuart_of_driver = {
+static struct platform_driver grlib_apbuart_of_driver = {
 	.probe = apbuart_probe,
 	.driver = {
-		.owner = THIS_MODULE,
 		.name = "grlib-apbuart",
 		.of_match_table = apbuart_match,
 	},
 };
 
 
-static int grlib_apbuart_configure(void)
+static int __init grlib_apbuart_configure(void)
 {
-	struct device_node *np, *rp;
-	const u32 *prop;
-	int freq_khz, line = 0;
-
-	/* Get bus frequency */
-	rp = of_find_node_by_path("/");
-	if (!rp)
-		return -ENODEV;
-	rp = of_get_next_child(rp, NULL);
-	if (!rp)
-		return -ENODEV;
-	prop = of_get_property(rp, "clock-frequency", NULL);
-	if (!prop)
-		return -ENODEV;
-	freq_khz = *prop;
+	struct device_node *np;
+	int line = 0;
 
 	for_each_matching_node(np, apbuart_match) {
-		const int *irqs, *ampopts;
+		const int *ampopts;
+		const u32 *freq_hz;
 		const struct amba_prom_registers *regs;
 		struct uart_port *port;
 		unsigned long addr;
@@ -624,11 +602,11 @@ static int grlib_apbuart_configure(void)
 		ampopts = of_get_property(np, "ampopts", NULL);
 		if (ampopts && (*ampopts == 0))
 			continue; /* Ignore if used by another OS instance */
-
-		irqs = of_get_property(np, "interrupts", NULL);
 		regs = of_get_property(np, "reg", NULL);
+		/* Frequency of APB Bus is frequency of UART */
+		freq_hz = of_get_property(np, "freq", NULL);
 
-		if (!irqs || !regs)
+		if (!regs || !freq_hz || (*freq_hz == 0))
 			continue;
 
 		grlib_apbuart_nodes[line] = np;
@@ -639,12 +617,13 @@ static int grlib_apbuart_configure(void)
 
 		port->mapbase = addr;
 		port->membase = ioremap(addr, sizeof(struct grlib_apbuart_regs_map));
-		port->irq = *irqs;
+		port->irq = 0;
 		port->iotype = UPIO_MEM;
 		port->ops = &grlib_apbuart_ops;
+		port->has_sysrq = IS_ENABLED(CONFIG_SERIAL_GRLIB_GAISLER_APBUART_CONSOLE);
 		port->flags = UPF_BOOT_AUTOCONF;
 		port->line = line;
-		port->uartclk = freq_khz * 1000;
+		port->uartclk = *freq_hz;
 		port->fifosize = apbuart_scan_fifo_size((struct uart_port *) port, line);
 		line++;
 
@@ -676,10 +655,10 @@ static int __init grlib_apbuart_init(void)
 		return ret;
 	}
 
-	ret = of_register_platform_driver(&grlib_apbuart_of_driver);
+	ret = platform_driver_register(&grlib_apbuart_of_driver);
 	if (ret) {
 		printk(KERN_ERR
-		       "%s: of_register_platform_driver failed (%i)\n",
+		       "%s: platform_driver_register failed (%i)\n",
 		       __FILE__, ret);
 		uart_unregister_driver(&grlib_apbuart_driver);
 		return ret;
@@ -697,7 +676,7 @@ static void __exit grlib_apbuart_exit(void)
 				     &grlib_apbuart_ports[i]);
 
 	uart_unregister_driver(&grlib_apbuart_driver);
-	of_unregister_platform_driver(&grlib_apbuart_of_driver);
+	platform_driver_unregister(&grlib_apbuart_of_driver);
 }
 
 module_init(grlib_apbuart_init);

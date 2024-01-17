@@ -34,6 +34,8 @@
 #ifndef __ARCH_ARM_MACH_OMAP1_PM_H
 #define __ARCH_ARM_MACH_OMAP1_PM_H
 
+#include <linux/soc/ti/omap1-io.h>
+
 /*
  * ----------------------------------------------------------------------------
  * Register and offset definitions to be used in PM assembler code
@@ -104,13 +106,6 @@
 #define OMAP7XX_IDLECT3		0xfffece24
 #define OMAP7XX_IDLE_LOOP_REQUEST	0x0C00
 
-#if     !defined(CONFIG_ARCH_OMAP730) && \
-	!defined(CONFIG_ARCH_OMAP850) && \
-	!defined(CONFIG_ARCH_OMAP15XX) && \
-	!defined(CONFIG_ARCH_OMAP16XX)
-#warning "Power management for this processor not implemented yet"
-#endif
-
 #ifndef __ASSEMBLER__
 
 #include <linux/clk.h>
@@ -123,9 +118,9 @@ extern void allow_idle_sleep(void);
 extern void omap1_pm_idle(void);
 extern void omap1_pm_suspend(void);
 
-extern void omap7xx_cpu_suspend(unsigned short, unsigned short);
-extern void omap1510_cpu_suspend(unsigned short, unsigned short);
-extern void omap1610_cpu_suspend(unsigned short, unsigned short);
+extern void omap7xx_cpu_suspend(unsigned long, unsigned long);
+extern void omap1510_cpu_suspend(unsigned long, unsigned long);
+extern void omap1610_cpu_suspend(unsigned long, unsigned long);
 extern void omap7xx_idle_loop_suspend(void);
 extern void omap1510_idle_loop_suspend(void);
 extern void omap1610_idle_loop_suspend(void);

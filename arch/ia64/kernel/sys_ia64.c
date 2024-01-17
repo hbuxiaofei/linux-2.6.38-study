@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * This file contains various system calls that have different calling
  * conventions on different platforms.
@@ -10,6 +11,8 @@
 #include <linux/mm.h>
 #include <linux/mman.h>
 #include <linux/sched.h>
+#include <linux/sched/mm.h>
+#include <linux/sched/task_stack.h>
 #include <linux/shm.h>
 #include <linux/file.h>		/* doh, must come after sched.h... */
 #include <linux/smp.h>
@@ -18,16 +21,16 @@
 #include <linux/hugetlb.h>
 
 #include <asm/shmparam.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 unsigned long
 arch_get_unmapped_area (struct file *filp, unsigned long addr, unsigned long len,
 			unsigned long pgoff, unsigned long flags)
 {
 	long map_shared = (flags & MAP_SHARED);
-	unsigned long start_addr, align_mask = PAGE_SIZE - 1;
+	unsigned long align_mask = 0;
 	struct mm_struct *mm = current->mm;
-	struct vm_area_struct *vma;
+	struct vm_unmapped_area_info info;
 
 	if (len > RGN_MAP_LIMIT)
 		return -ENOMEM;
@@ -44,7 +47,7 @@ arch_get_unmapped_area (struct file *filp, unsigned long addr, unsigned long len
 		addr = 0;
 #endif
 	if (!addr)
-		addr = mm->free_area_cache;
+		addr = TASK_UNMAPPED_BASE;
 
 	if (map_shared && (TASK_SIZE > 0xfffffffful))
 		/*
@@ -53,28 +56,15 @@ arch_get_unmapped_area (struct file *filp, unsigned long addr, unsigned long len
 		 * tasks, we prefer to avoid exhausting the address space too quickly by
 		 * limiting alignment to a single page.
 		 */
-		align_mask = SHMLBA - 1;
+		align_mask = PAGE_MASK & (SHMLBA - 1);
 
-  full_search:
-	start_addr = addr = (addr + align_mask) & ~align_mask;
-
-	for (vma = find_vma(mm, addr); ; vma = vma->vm_next) {
-		/* At this point:  (!vma || addr < vma->vm_end). */
-		if (TASK_SIZE - len < addr || RGN_MAP_LIMIT - len < REGION_OFFSET(addr)) {
-			if (start_addr != TASK_UNMAPPED_BASE) {
-				/* Start a new search --- just in case we missed some holes.  */
-				addr = TASK_UNMAPPED_BASE;
-				goto full_search;
-			}
-			return -ENOMEM;
-		}
-		if (!vma || addr + len <= vma->vm_start) {
-			/* Remember the address where we stopped this search:  */
-			mm->free_area_cache = addr + len;
-			return addr;
-		}
-		addr = (vma->vm_end + align_mask) & ~align_mask;
-	}
+	info.flags = 0;
+	info.length = len;
+	info.low_limit = addr;
+	info.high_limit = TASK_SIZE;
+	info.align_mask = align_mask;
+	info.align_offset = 0;
+	return vm_unmapped_area(&info);
 }
 
 asmlinkage long
@@ -149,7 +139,7 @@ int ia64_mmap_check(unsigned long addr, unsigned long len,
 asmlinkage unsigned long
 sys_mmap2 (unsigned long addr, unsigned long len, int prot, int flags, int fd, long pgoff)
 {
-	addr = sys_mmap_pgoff(addr, len, prot, flags, fd, pgoff);
+	addr = ksys_mmap_pgoff(addr, len, prot, flags, fd, pgoff);
 	if (!IS_ERR((void *) addr))
 		force_successful_syscall_return();
 	return addr;
@@ -161,7 +151,7 @@ sys_mmap (unsigned long addr, unsigned long len, int prot, int flags, int fd, lo
 	if (offset_in_page(off) != 0)
 		return -EINVAL;
 
-	addr = sys_mmap_pgoff(addr, len, prot, flags, fd, off >> PAGE_SHIFT);
+	addr = ksys_mmap_pgoff(addr, len, prot, flags, fd, off >> PAGE_SHIFT);
 	if (!IS_ERR((void *) addr))
 		force_successful_syscall_return();
 	return addr;
@@ -171,39 +161,37 @@ asmlinkage unsigned long
 ia64_mremap (unsigned long addr, unsigned long old_len, unsigned long new_len, unsigned long flags,
 	     unsigned long new_addr)
 {
-	extern unsigned long do_mremap (unsigned long addr,
-					unsigned long old_len,
-					unsigned long new_len,
-					unsigned long flags,
-					unsigned long new_addr);
-
-	down_write(&current->mm->mmap_sem);
-	{
-		addr = do_mremap(addr, old_len, new_len, flags, new_addr);
-	}
-	up_write(&current->mm->mmap_sem);
-
-	if (IS_ERR((void *) addr))
-		return addr;
-
-	force_successful_syscall_return();
+	addr = sys_mremap(addr, old_len, new_len, flags, new_addr);
+	if (!IS_ERR((void *) addr))
+		force_successful_syscall_return();
 	return addr;
 }
 
-#ifndef CONFIG_PCI
-
 asmlinkage long
-sys_pciconfig_read (unsigned long bus, unsigned long dfn, unsigned long off, unsigned long len,
-		    void *buf)
+ia64_clock_getres(const clockid_t which_clock, struct __kernel_timespec __user *tp)
 {
-	return -ENOSYS;
-}
+	struct timespec64 rtn_tp;
+	s64 tick_ns;
 
-asmlinkage long
-sys_pciconfig_write (unsigned long bus, unsigned long dfn, unsigned long off, unsigned long len,
-		     void *buf)
-{
-	return -ENOSYS;
-}
+	/*
+	 * ia64's clock_gettime() syscall is implemented as a vdso call
+	 * fsys_clock_gettime(). Currently it handles only
+	 * CLOCK_REALTIME and CLOCK_MONOTONIC. Both are based on
+	 * 'ar.itc' counter which gets incremented at a constant
+	 * frequency. It's usually 400MHz, ~2.5x times slower than CPU
+	 * clock frequency. Which is almost a 1ns hrtimer, but not quite.
+	 *
+	 * Let's special-case these timers to report correct precision
+	 * based on ITC frequency and not HZ frequency for supported
+	 * clocks.
+	 */
+	switch (which_clock) {
+	case CLOCK_REALTIME:
+	case CLOCK_MONOTONIC:
+		tick_ns = DIV_ROUND_UP(NSEC_PER_SEC, local_cpu_data->itc_freq);
+		rtn_tp = ns_to_timespec64(tick_ns);
+		return put_timespec64(&rtn_tp, tp);
+	}
 
-#endif /* CONFIG_PCI */
+	return sys_clock_getres(which_clock, tp);
+}

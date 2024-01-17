@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
+#define pr_fmt(fmt) "IPsec: " fmt
+
+#include <crypto/algapi.h>
 #include <crypto/hash.h>
 #include <linux/err.h>
 #include <linux/module.h>
@@ -73,9 +77,9 @@ static inline struct scatterlist *ah_req_sg(struct crypto_ahash *ahash,
  * into IP header for icv calculation. Options are already checked
  * for validity, so paranoia is not required. */
 
-static int ip_clear_mutable_options(struct iphdr *iph, __be32 *daddr)
+static int ip_clear_mutable_options(const struct iphdr *iph, __be32 *daddr)
 {
-	unsigned char * optptr = (unsigned char*)(iph+1);
+	unsigned char *optptr = (unsigned char *)(iph+1);
 	int  l = iph->ihl*4 - sizeof(struct iphdr);
 	int  optlen;
 
@@ -103,7 +107,7 @@ static int ip_clear_mutable_options(struct iphdr *iph, __be32 *daddr)
 			if (optlen < 6)
 				return -EINVAL;
 			memcpy(daddr, optptr+optlen-4, 4);
-			/* Fall through */
+			fallthrough;
 		default:
 			memset(optptr, 0, optlen);
 		}
@@ -136,10 +140,8 @@ static void ah_output_done(struct crypto_async_request *base, int err)
 		memcpy(top_iph+1, iph+1, top_iph->ihl*4 - sizeof(struct iphdr));
 	}
 
-	err = ah->nexthdr;
-
 	kfree(AH_SKB_CB(skb)->tmp);
-	xfrm_output_resume(skb, err);
+	xfrm_output_resume(skb->sk, skb, err);
 }
 
 static int ah_output(struct xfrm_state *x, struct sk_buff *skb)
@@ -155,6 +157,10 @@ static int ah_output(struct xfrm_state *x, struct sk_buff *skb)
 	struct iphdr *iph, *top_iph;
 	struct ip_auth_hdr *ah;
 	struct ah_data *ahp;
+	int seqhi_len = 0;
+	__be32 *seqhi;
+	int sglists = 0;
+	struct scatterlist *seqhisg;
 
 	ahp = x->data;
 	ahash = ahp->ahash;
@@ -167,14 +173,19 @@ static int ah_output(struct xfrm_state *x, struct sk_buff *skb)
 	ah = ip_auth_hdr(skb);
 	ihl = ip_hdrlen(skb);
 
+	if (x->props.flags & XFRM_STATE_ESN) {
+		sglists = 1;
+		seqhi_len = sizeof(*seqhi);
+	}
 	err = -ENOMEM;
-	iph = ah_alloc_tmp(ahash, nfrags, ihl);
+	iph = ah_alloc_tmp(ahash, nfrags + sglists, ihl + seqhi_len);
 	if (!iph)
 		goto out;
-
-	icv = ah_tmp_icv(ahash, iph, ihl);
+	seqhi = (__be32 *)((char *)iph + ihl);
+	icv = ah_tmp_icv(ahash, seqhi, seqhi_len);
 	req = ah_tmp_req(ahash, icv);
 	sg = ah_req_sg(ahash, req);
+	seqhisg = sg + nfrags;
 
 	memset(ah->auth_data, 0, ahp->icv_trunc_len);
 
@@ -201,16 +212,26 @@ static int ah_output(struct xfrm_state *x, struct sk_buff *skb)
 	top_iph->ttl = 0;
 	top_iph->check = 0;
 
-	ah->hdrlen  = (XFRM_ALIGN8(sizeof(*ah) + ahp->icv_trunc_len) >> 2) - 2;
+	if (x->props.flags & XFRM_STATE_ALIGN4)
+		ah->hdrlen  = (XFRM_ALIGN4(sizeof(*ah) + ahp->icv_trunc_len) >> 2) - 2;
+	else
+		ah->hdrlen  = (XFRM_ALIGN8(sizeof(*ah) + ahp->icv_trunc_len) >> 2) - 2;
 
 	ah->reserved = 0;
 	ah->spi = x->id.spi;
-	ah->seq_no = htonl(XFRM_SKB_CB(skb)->seq.output);
+	ah->seq_no = htonl(XFRM_SKB_CB(skb)->seq.output.low);
 
-	sg_init_table(sg, nfrags);
-	skb_to_sgvec(skb, sg, 0, skb->len);
+	sg_init_table(sg, nfrags + sglists);
+	err = skb_to_sgvec_nomark(skb, sg, 0, skb->len);
+	if (unlikely(err < 0))
+		goto out_free;
 
-	ahash_request_set_crypt(req, sg, icv, skb->len);
+	if (x->props.flags & XFRM_STATE_ESN) {
+		/* Attach seqhi sg right after packet payload */
+		*seqhi = htonl(XFRM_SKB_CB(skb)->seq.output.hi);
+		sg_set_buf(seqhisg, seqhi, seqhi_len);
+	}
+	ahash_request_set_crypt(req, sg, icv, skb->len + seqhi_len);
 	ahash_request_set_callback(req, 0, ah_output_done, skb);
 
 	AH_SKB_CB(skb)->tmp = iph;
@@ -220,7 +241,7 @@ static int ah_output(struct xfrm_state *x, struct sk_buff *skb)
 		if (err == -EINPROGRESS)
 			goto out;
 
-		if (err == -EBUSY)
+		if (err == -ENOSPC)
 			err = NET_XMIT_DROP;
 		goto out_free;
 	}
@@ -253,20 +274,27 @@ static void ah_input_done(struct crypto_async_request *base, int err)
 	int ihl = ip_hdrlen(skb);
 	int ah_hlen = (ah->hdrlen + 2) << 2;
 
+	if (err)
+		goto out;
+
 	work_iph = AH_SKB_CB(skb)->tmp;
 	auth_data = ah_tmp_auth(work_iph, ihl);
 	icv = ah_tmp_icv(ahp->ahash, auth_data, ahp->icv_trunc_len);
 
-	err = memcmp(icv, auth_data, ahp->icv_trunc_len) ? -EBADMSG: 0;
+	err = crypto_memneq(icv, auth_data, ahp->icv_trunc_len) ? -EBADMSG : 0;
 	if (err)
 		goto out;
+
+	err = ah->nexthdr;
 
 	skb->network_header += ah_hlen;
 	memcpy(skb_network_header(skb), work_iph, ihl);
 	__skb_pull(skb, ah_hlen + ihl);
-	skb_set_transport_header(skb, -ihl);
 
-	err = ah->nexthdr;
+	if (x->props.mode == XFRM_MODE_TUNNEL)
+		skb_reset_transport_header(skb);
+	else
+		skb_set_transport_header(skb, -ihl);
 out:
 	kfree(AH_SKB_CB(skb)->tmp);
 	xfrm_input_resume(skb, err);
@@ -288,6 +316,10 @@ static int ah_input(struct xfrm_state *x, struct sk_buff *skb)
 	struct ip_auth_hdr *ah;
 	struct ah_data *ahp;
 	int err = -ENOMEM;
+	int seqhi_len = 0;
+	__be32 *seqhi;
+	int sglists = 0;
+	struct scatterlist *seqhisg;
 
 	if (!pskb_may_pull(skb, sizeof(*ah)))
 		goto out;
@@ -299,17 +331,22 @@ static int ah_input(struct xfrm_state *x, struct sk_buff *skb)
 	nexthdr = ah->nexthdr;
 	ah_hlen = (ah->hdrlen + 2) << 2;
 
-	if (ah_hlen != XFRM_ALIGN8(sizeof(*ah) + ahp->icv_full_len) &&
-	    ah_hlen != XFRM_ALIGN8(sizeof(*ah) + ahp->icv_trunc_len))
-		goto out;
+	if (x->props.flags & XFRM_STATE_ALIGN4) {
+		if (ah_hlen != XFRM_ALIGN4(sizeof(*ah) + ahp->icv_full_len) &&
+		    ah_hlen != XFRM_ALIGN4(sizeof(*ah) + ahp->icv_trunc_len))
+			goto out;
+	} else {
+		if (ah_hlen != XFRM_ALIGN8(sizeof(*ah) + ahp->icv_full_len) &&
+		    ah_hlen != XFRM_ALIGN8(sizeof(*ah) + ahp->icv_trunc_len))
+			goto out;
+	}
 
 	if (!pskb_may_pull(skb, ah_hlen))
 		goto out;
 
 	/* We are going to _remove_ AH header to keep sockets happy,
 	 * so... Later this can change. */
-	if (skb_cloned(skb) &&
-	    pskb_expand_head(skb, 0, 0, GFP_ATOMIC))
+	if (skb_unclone(skb, GFP_ATOMIC))
 		goto out;
 
 	skb->ip_summed = CHECKSUM_NONE;
@@ -323,14 +360,24 @@ static int ah_input(struct xfrm_state *x, struct sk_buff *skb)
 	iph = ip_hdr(skb);
 	ihl = ip_hdrlen(skb);
 
-	work_iph = ah_alloc_tmp(ahash, nfrags, ihl + ahp->icv_trunc_len);
-	if (!work_iph)
-		goto out;
+	if (x->props.flags & XFRM_STATE_ESN) {
+		sglists = 1;
+		seqhi_len = sizeof(*seqhi);
+	}
 
-	auth_data = ah_tmp_auth(work_iph, ihl);
+	work_iph = ah_alloc_tmp(ahash, nfrags + sglists, ihl +
+				ahp->icv_trunc_len + seqhi_len);
+	if (!work_iph) {
+		err = -ENOMEM;
+		goto out;
+	}
+
+	seqhi = (__be32 *)((char *)work_iph + ihl);
+	auth_data = ah_tmp_auth(seqhi, seqhi_len);
 	icv = ah_tmp_icv(ahash, auth_data, ahp->icv_trunc_len);
 	req = ah_tmp_req(ahash, icv);
 	sg = ah_req_sg(ahash, req);
+	seqhisg = sg + nfrags;
 
 	memcpy(work_iph, iph, ihl);
 	memcpy(auth_data, ah->auth_data, ahp->icv_trunc_len);
@@ -349,10 +396,17 @@ static int ah_input(struct xfrm_state *x, struct sk_buff *skb)
 
 	skb_push(skb, ihl);
 
-	sg_init_table(sg, nfrags);
-	skb_to_sgvec(skb, sg, 0, skb->len);
+	sg_init_table(sg, nfrags + sglists);
+	err = skb_to_sgvec_nomark(skb, sg, 0, skb->len);
+	if (unlikely(err < 0))
+		goto out_free;
 
-	ahash_request_set_crypt(req, sg, icv, skb->len);
+	if (x->props.flags & XFRM_STATE_ESN) {
+		/* Attach seqhi sg right after packet payload */
+		*seqhi = XFRM_SKB_CB(skb)->seq.input.hi;
+		sg_set_buf(seqhisg, seqhi, seqhi_len);
+	}
+	ahash_request_set_crypt(req, sg, icv, skb->len + seqhi_len);
 	ahash_request_set_callback(req, 0, ah_input_done, skb);
 
 	AH_SKB_CB(skb)->tmp = work_iph;
@@ -362,19 +416,20 @@ static int ah_input(struct xfrm_state *x, struct sk_buff *skb)
 		if (err == -EINPROGRESS)
 			goto out;
 
-		if (err == -EBUSY)
-			err = NET_XMIT_DROP;
 		goto out_free;
 	}
 
-	err = memcmp(icv, auth_data, ahp->icv_trunc_len) ? -EBADMSG: 0;
+	err = crypto_memneq(icv, auth_data, ahp->icv_trunc_len) ? -EBADMSG : 0;
 	if (err)
 		goto out_free;
 
 	skb->network_header += ah_hlen;
 	memcpy(skb_network_header(skb), work_iph, ihl);
 	__skb_pull(skb, ah_hlen + ihl);
-	skb_set_transport_header(skb, -ihl);
+	if (x->props.mode == XFRM_MODE_TUNNEL)
+		skb_reset_transport_header(skb);
+	else
+		skb_set_transport_header(skb, -ihl);
 
 	err = nexthdr;
 
@@ -384,49 +439,70 @@ out:
 	return err;
 }
 
-static void ah4_err(struct sk_buff *skb, u32 info)
+static int ah4_err(struct sk_buff *skb, u32 info)
 {
 	struct net *net = dev_net(skb->dev);
-	struct iphdr *iph = (struct iphdr *)skb->data;
+	const struct iphdr *iph = (const struct iphdr *)skb->data;
 	struct ip_auth_hdr *ah = (struct ip_auth_hdr *)(skb->data+(iph->ihl<<2));
 	struct xfrm_state *x;
 
-	if (icmp_hdr(skb)->type != ICMP_DEST_UNREACH ||
-	    icmp_hdr(skb)->code != ICMP_FRAG_NEEDED)
-		return;
+	switch (icmp_hdr(skb)->type) {
+	case ICMP_DEST_UNREACH:
+		if (icmp_hdr(skb)->code != ICMP_FRAG_NEEDED)
+			return 0;
+		break;
+	case ICMP_REDIRECT:
+		break;
+	default:
+		return 0;
+	}
 
-	x = xfrm_state_lookup(net, skb->mark, (xfrm_address_t *)&iph->daddr, ah->spi, IPPROTO_AH, AF_INET);
+	x = xfrm_state_lookup(net, skb->mark, (const xfrm_address_t *)&iph->daddr,
+			      ah->spi, IPPROTO_AH, AF_INET);
 	if (!x)
-		return;
-	printk(KERN_DEBUG "pmtu discovery on SA AH/%08x/%08x\n",
-	       ntohl(ah->spi), ntohl(iph->daddr));
+		return 0;
+
+	if (icmp_hdr(skb)->type == ICMP_DEST_UNREACH)
+		ipv4_update_pmtu(skb, net, info, 0, IPPROTO_AH);
+	else
+		ipv4_redirect(skb, net, 0, IPPROTO_AH);
 	xfrm_state_put(x);
+
+	return 0;
 }
 
-static int ah_init_state(struct xfrm_state *x)
+static int ah_init_state(struct xfrm_state *x, struct netlink_ext_ack *extack)
 {
 	struct ah_data *ahp = NULL;
 	struct xfrm_algo_desc *aalg_desc;
 	struct crypto_ahash *ahash;
 
-	if (!x->aalg)
+	if (!x->aalg) {
+		NL_SET_ERR_MSG(extack, "AH requires a state with an AUTH algorithm");
 		goto error;
+	}
 
-	if (x->encap)
+	if (x->encap) {
+		NL_SET_ERR_MSG(extack, "AH is not compatible with encapsulation");
 		goto error;
+	}
 
 	ahp = kzalloc(sizeof(*ahp), GFP_KERNEL);
 	if (!ahp)
 		return -ENOMEM;
 
 	ahash = crypto_alloc_ahash(x->aalg->alg_name, 0, 0);
-	if (IS_ERR(ahash))
+	if (IS_ERR(ahash)) {
+		NL_SET_ERR_MSG(extack, "Kernel was unable to initialize cryptographic operations");
 		goto error;
+	}
 
 	ahp->ahash = ahash;
 	if (crypto_ahash_setkey(ahash, x->aalg->alg_key,
-				(x->aalg->alg_key_len + 7) / 8))
+				(x->aalg->alg_key_len + 7) / 8)) {
+		NL_SET_ERR_MSG(extack, "Kernel was unable to initialize cryptographic operations");
 		goto error;
+	}
 
 	/*
 	 * Lookup the algorithm description maintained by xfrm_algo,
@@ -439,19 +515,19 @@ static int ah_init_state(struct xfrm_state *x)
 
 	if (aalg_desc->uinfo.auth.icv_fullbits/8 !=
 	    crypto_ahash_digestsize(ahash)) {
-		printk(KERN_INFO "AH: %s digestsize %u != %hu\n",
-		       x->aalg->alg_name, crypto_ahash_digestsize(ahash),
-		       aalg_desc->uinfo.auth.icv_fullbits/8);
+		NL_SET_ERR_MSG(extack, "Kernel was unable to initialize cryptographic operations");
 		goto error;
 	}
 
 	ahp->icv_full_len = aalg_desc->uinfo.auth.icv_fullbits/8;
 	ahp->icv_trunc_len = x->aalg->alg_trunc_len/8;
 
-	BUG_ON(ahp->icv_trunc_len > MAX_AH_AUTH_LEN);
-
-	x->props.header_len = XFRM_ALIGN8(sizeof(struct ip_auth_hdr) +
-					  ahp->icv_trunc_len);
+	if (x->props.flags & XFRM_STATE_ALIGN4)
+		x->props.header_len = XFRM_ALIGN4(sizeof(struct ip_auth_hdr) +
+						  ahp->icv_trunc_len);
+	else
+		x->props.header_len = XFRM_ALIGN8(sizeof(struct ip_auth_hdr) +
+						  ahp->icv_trunc_len);
 	if (x->props.mode == XFRM_MODE_TUNNEL)
 		x->props.header_len += sizeof(struct iphdr);
 	x->data = ahp;
@@ -477,10 +553,13 @@ static void ah_destroy(struct xfrm_state *x)
 	kfree(ahp);
 }
 
+static int ah4_rcv_cb(struct sk_buff *skb, int err)
+{
+	return 0;
+}
 
 static const struct xfrm_type ah_type =
 {
-	.description	= "AH4",
 	.owner		= THIS_MODULE,
 	.proto	     	= IPPROTO_AH,
 	.flags		= XFRM_TYPE_REPLAY_PROT,
@@ -490,21 +569,22 @@ static const struct xfrm_type ah_type =
 	.output		= ah_output
 };
 
-static const struct net_protocol ah4_protocol = {
+static struct xfrm4_protocol ah4_protocol = {
 	.handler	=	xfrm4_rcv,
+	.input_handler	=	xfrm_input,
+	.cb_handler	=	ah4_rcv_cb,
 	.err_handler	=	ah4_err,
-	.no_policy	=	1,
-	.netns_ok	=	1,
+	.priority	=	0,
 };
 
 static int __init ah4_init(void)
 {
 	if (xfrm_register_type(&ah_type, AF_INET) < 0) {
-		printk(KERN_INFO "ip ah init: can't add xfrm type\n");
+		pr_info("%s: can't add xfrm type\n", __func__);
 		return -EAGAIN;
 	}
-	if (inet_add_protocol(&ah4_protocol, IPPROTO_AH) < 0) {
-		printk(KERN_INFO "ip ah init: can't add protocol\n");
+	if (xfrm4_protocol_register(&ah4_protocol, IPPROTO_AH) < 0) {
+		pr_info("%s: can't add protocol\n", __func__);
 		xfrm_unregister_type(&ah_type, AF_INET);
 		return -EAGAIN;
 	}
@@ -513,10 +593,9 @@ static int __init ah4_init(void)
 
 static void __exit ah4_fini(void)
 {
-	if (inet_del_protocol(&ah4_protocol, IPPROTO_AH) < 0)
-		printk(KERN_INFO "ip ah close: can't remove protocol\n");
-	if (xfrm_unregister_type(&ah_type, AF_INET) < 0)
-		printk(KERN_INFO "ip ah close: can't remove xfrm type\n");
+	if (xfrm4_protocol_deregister(&ah4_protocol, IPPROTO_AH) < 0)
+		pr_info("%s: can't remove protocol\n", __func__);
+	xfrm_unregister_type(&ah_type, AF_INET);
 }
 
 module_init(ah4_init);

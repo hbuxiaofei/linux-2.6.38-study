@@ -12,7 +12,7 @@
 #define _LINUX_DAVINCI_EMAC_H
 
 #include <linux/if_ether.h>
-#include <linux/memory.h>
+#include <linux/nvmem-consumer.h>
 
 struct mdio_platform_data {
 	unsigned long		bus_freq;
@@ -36,6 +36,7 @@ struct emac_platform_data {
 
 	u8 rmii_en;
 	u8 version;
+	bool no_bd_ram;
 	void (*interrupt_enable) (void);
 	void (*interrupt_disable) (void);
 };
@@ -45,5 +46,4 @@ enum {
 	EMAC_VERSION_2,	/* DM646x */
 };
 
-void davinci_get_mac_addr(struct memory_accessor *mem_acc, void *context);
 #endif

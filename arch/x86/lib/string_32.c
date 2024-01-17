@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Most of the string-functions are rather heavily hand-optimized,
  * see especially strsep,strstr,str[c]spn. They should work, but are not
@@ -10,8 +11,9 @@
  * strings.
  */
 
+#define __NO_FORTIFY
 #include <linux/string.h>
-#include <linux/module.h>
+#include <linux/export.h>
 
 #ifdef __HAVE_ARCH_STRCPY
 char *strcpy(char *dest, const char *src)
@@ -164,15 +166,13 @@ EXPORT_SYMBOL(strchr);
 size_t strlen(const char *s)
 {
 	int d0;
-	int res;
+	size_t res;
 	asm volatile("repne\n\t"
-		"scasb\n\t"
-		"notl %0\n\t"
-		"decl %0"
+		"scasb"
 		: "=c" (res), "=&D" (d0)
 		: "1" (s), "a" (0), "0" (0xffffffffu)
 		: "memory");
-	return res;
+	return ~res - 1;
 }
 EXPORT_SYMBOL(strlen);
 #endif

@@ -1,6 +1,16 @@
+# SPDX-License-Identifier: GPL-2.0
+config HAVE_ACPI_APEI
+	bool
+
+config HAVE_ACPI_APEI_NMI
+	bool
+
 config ACPI_APEI
 	bool "ACPI Platform Error Interface (APEI)"
-	depends on X86
+	select MISC_FILESYSTEMS
+	select PSTORE
+	select UEFI_CPER
+	depends on HAVE_ACPI_APEI
 	help
 	  APEI allows to report errors (for example from the chipset)
 	  to the operating system. This improves NMI handling
@@ -8,9 +18,11 @@ config ACPI_APEI
 	  error injection.
 
 config ACPI_APEI_GHES
-	tristate "APEI Generic Hardware Error Source"
-	depends on ACPI_APEI && X86
+	bool "APEI Generic Hardware Error Source"
+	depends on ACPI_APEI
 	select ACPI_HED
+	select IRQ_WORK
+	select GENERIC_ALLOCATOR
 	help
 	  Generic Hardware Error Source provides a way to report
 	  platform hardware errors (such as that from chipset). It
@@ -20,6 +32,25 @@ config ACPI_APEI_GHES
 	  error registers or non-standard hardware link can be checked
 	  by firmware to produce more valuable hardware error
 	  information for Linux.
+
+config ACPI_APEI_PCIEAER
+	bool "APEI PCIe AER logging/recovering support"
+	depends on ACPI_APEI && PCIEAER
+	help
+	  PCIe AER errors may be reported via APEI firmware first mode.
+	  Turn on this option to enable the corresponding support.
+
+config ACPI_APEI_SEA
+	bool
+	depends on ARM64 && ACPI_APEI_GHES
+	default y
+
+config ACPI_APEI_MEMORY_FAILURE
+	bool "APEI memory error recovering support"
+	depends on ACPI_APEI && MEMORY_FAILURE
+	help
+	  Memory errors may be reported via APEI firmware first mode.
+	  Turn on this option to enable the memory recovering support.
 
 config ACPI_APEI_EINJ
 	tristate "APEI Error INJection (EINJ)"

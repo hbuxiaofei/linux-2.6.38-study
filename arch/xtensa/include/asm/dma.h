@@ -37,7 +37,7 @@
  *	the size of the statically mapped kernel segment
  *	(XCHAL_KSEG_{CACHED,BYPASS}_SIZE), ie. 128 MB.
  *
- * NOTE: When the entire KSEG area is DMA capable, we substract
+ * NOTE: When the entire KSEG area is DMA capable, we subtract
  *	one from the max address so that the virt_to_phys() macro
  *	works correctly on the address (otherwise the address
  *	enters another area, and virt_to_phys() may not return
@@ -51,12 +51,5 @@
 /* Reserve and release a DMA channel */
 extern int request_dma(unsigned int dmanr, const char * device_id);
 extern void free_dma(unsigned int dmanr);
-
-#ifdef CONFIG_PCI
-extern int isa_dma_bridge_buggy;
-#else
-#define isa_dma_bridge_buggy 	(0)
-#endif
-
 
 #endif

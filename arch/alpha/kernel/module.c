@@ -1,19 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*  Kernel module help for Alpha.
     Copyright (C) 2002 Richard Henderson.
 
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation; either version 2 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 #include <linux/moduleloader.h>
 #include <linux/elf.h>
@@ -28,20 +16,6 @@
 #else
 #define DEBUGP(fmt...)
 #endif
-
-void *
-module_alloc(unsigned long size)
-{
-	if (size == 0)
-		return NULL;
-	return vmalloc(size);
-}
-
-void
-module_free(struct module *mod, void *module_region)
-{
-	vfree(module_region);
-}
 
 /* Allocate the GOT at the end of the core sections.  */
 
@@ -156,14 +130,6 @@ module_frob_arch_sections(Elf64_Ehdr *hdr, Elf64_Shdr *sechdrs,
 }
 
 int
-apply_relocate(Elf64_Shdr *sechdrs, const char *strtab, unsigned int symindex,
-	       unsigned int relsec, struct module *me)
-{
-	printk(KERN_ERR "module %s: REL relocation unsupported\n", me->name);
-	return -ENOEXEC;
-}
-
-int
 apply_relocate_add(Elf64_Shdr *sechdrs, const char *strtab,
 		   unsigned int symindex, unsigned int relsec,
 		   struct module *me)
@@ -180,10 +146,8 @@ apply_relocate_add(Elf64_Shdr *sechdrs, const char *strtab,
 	base = (void *)sechdrs[sechdrs[relsec].sh_info].sh_addr;
 	symtab = (Elf64_Sym *)sechdrs[symindex].sh_addr;
 
-	/* The small sections were sorted to the end of the segment.
-	   The following should definitely cover them.  */
-	gp = (u64)me->module_core + me->core_size - 0x8000;
 	got = sechdrs[me->arch.gotsecindex].sh_addr;
+	gp = got + 0x8000;
 
 	for (i = 0; i < n; i++) {
 		unsigned long r_sym = ELF64_R_SYM (rela[i].r_info);
@@ -202,6 +166,9 @@ apply_relocate_add(Elf64_Shdr *sechdrs, const char *strtab,
 
 		switch (r_type) {
 		case R_ALPHA_NONE:
+			break;
+		case R_ALPHA_REFLONG:
+			*(u32 *)location = value;
 			break;
 		case R_ALPHA_REFQUAD:
 			/* BUG() can produce misaligned relocations. */
@@ -243,7 +210,7 @@ apply_relocate_add(Elf64_Shdr *sechdrs, const char *strtab,
 			    STO_ALPHA_STD_GPLOAD)
 				/* Omit the prologue. */
 				value += 8;
-			/* FALLTHRU */
+			fallthrough;
 		case R_ALPHA_BRADDR:
 			value -= (u64)location + 4;
 			if (value & 3)
@@ -301,16 +268,4 @@ apply_relocate_add(Elf64_Shdr *sechdrs, const char *strtab,
 	}
 
 	return 0;
-}
-
-int
-module_finalize(const Elf_Ehdr *hdr, const Elf_Shdr *sechdrs,
-		struct module *me)
-{
-	return 0;
-}
-
-void
-module_arch_cleanup(struct module *mod)
-{
 }

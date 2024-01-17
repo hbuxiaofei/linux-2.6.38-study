@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *	linux/arch/alpha/kernel/err_titan.c
  *
@@ -533,8 +534,6 @@ static struct el_subpacket_annotation el_titan_annotations[] = {
 static struct el_subpacket *
 el_process_regatta_subpacket(struct el_subpacket *header)
 {
-	int status;
-
 	if (header->class != EL_CLASS__REGATTA_FAMILY) {
 		printk("%s  ** Unexpected header CLASS %d TYPE %d, aborting\n",
 		       err_print_prefix,
@@ -551,7 +550,7 @@ el_process_regatta_subpacket(struct el_subpacket *header)
 		printk("%s  ** Occurred on CPU %d:\n", 
 		       err_print_prefix,
 		       (int)header->by_type.regatta_frame.cpuid);
-		status = privateer_process_logout_frame((struct el_common *)
+		privateer_process_logout_frame((struct el_common *)
 			header->by_type.regatta_frame.data_start, 1);
 		break;
 	default:

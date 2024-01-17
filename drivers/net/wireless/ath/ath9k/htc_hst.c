@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010 Atheros Communications Inc.
+ * Copyright (c) 2010-2011 Atheros Communications Inc.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -14,24 +14,26 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include "htc.h"
 
 static int htc_issue_send(struct htc_target *target, struct sk_buff* skb,
-			  u16 len, u8 flags, u8 epid,
-			  struct ath9k_htc_tx_ctl *tx_ctl)
+			  u16 len, u8 flags, u8 epid)
+
 {
 	struct htc_frame_hdr *hdr;
 	struct htc_endpoint *endpoint = &target->endpoint[epid];
 	int status;
 
-	hdr = (struct htc_frame_hdr *)
-		skb_push(skb, sizeof(struct htc_frame_hdr));
+	hdr = skb_push(skb, sizeof(struct htc_frame_hdr));
 	hdr->endpoint_id = epid;
 	hdr->flags = flags;
 	hdr->payload_len = cpu_to_be16(len);
+	memset(hdr->control, 0, sizeof(hdr->control));
 
-	status = target->hif->send(target->hif_dev, endpoint->ul_pipeid, skb,
-				   tx_ctl);
+	status = target->hif->send(target->hif_dev, endpoint->ul_pipeid, skb);
+
 	return status;
 }
 
@@ -112,6 +114,9 @@ static void htc_process_conn_rsp(struct htc_target *target,
 
 	if (svc_rspmsg->status == HTC_SERVICE_SUCCESS) {
 		epid = svc_rspmsg->endpoint_id;
+		if (epid < 0 || epid >= ENDPOINT_MAX)
+			return;
+
 		service_id = be16_to_cpu(svc_rspmsg->service_id);
 		max_msglen = be16_to_cpu(svc_rspmsg->max_msg_len);
 		endpoint = &target->endpoint[epid];
@@ -144,7 +149,8 @@ static int htc_config_pipe_credits(struct htc_target *target)
 {
 	struct sk_buff *skb;
 	struct htc_config_pipe_msg *cp_msg;
-	int ret, time_left;
+	int ret;
+	unsigned long time_left;
 
 	skb = alloc_skb(50 + sizeof(struct htc_frame_hdr), GFP_ATOMIC);
 	if (!skb) {
@@ -153,8 +159,7 @@ static int htc_config_pipe_credits(struct htc_target *target)
 	}
 	skb_reserve(skb, sizeof(struct htc_frame_hdr));
 
-	cp_msg = (struct htc_config_pipe_msg *)
-		skb_put(skb, sizeof(struct htc_config_pipe_msg));
+	cp_msg = skb_put(skb, sizeof(struct htc_config_pipe_msg));
 
 	cp_msg->message_id = cpu_to_be16(HTC_MSG_CONFIG_PIPE_ID);
 	cp_msg->pipe_id = USB_WLAN_TX_PIPE;
@@ -162,7 +167,7 @@ static int htc_config_pipe_credits(struct htc_target *target)
 
 	target->htc_flags |= HTC_OP_CONFIG_PIPE_CREDITS;
 
-	ret = htc_issue_send(target, skb, skb->len, 0, ENDPOINT0, NULL);
+	ret = htc_issue_send(target, skb, skb->len, 0, ENDPOINT0);
 	if (ret)
 		goto err;
 
@@ -182,7 +187,8 @@ static int htc_setup_complete(struct htc_target *target)
 {
 	struct sk_buff *skb;
 	struct htc_comp_msg *comp_msg;
-	int ret = 0, time_left;
+	int ret = 0;
+	unsigned long time_left;
 
 	skb = alloc_skb(50 + sizeof(struct htc_frame_hdr), GFP_ATOMIC);
 	if (!skb) {
@@ -191,13 +197,12 @@ static int htc_setup_complete(struct htc_target *target)
 	}
 	skb_reserve(skb, sizeof(struct htc_frame_hdr));
 
-	comp_msg = (struct htc_comp_msg *)
-		skb_put(skb, sizeof(struct htc_comp_msg));
+	comp_msg = skb_put(skb, sizeof(struct htc_comp_msg));
 	comp_msg->msg_id = cpu_to_be16(HTC_MSG_SETUP_COMPLETE_ID);
 
 	target->htc_flags |= HTC_OP_START_WAIT;
 
-	ret = htc_issue_send(target, skb, skb->len, 0, ENDPOINT0, NULL);
+	ret = htc_issue_send(target, skb, skb->len, 0, ENDPOINT0);
 	if (ret)
 		goto err;
 
@@ -234,13 +239,14 @@ int htc_connect_service(struct htc_target *target,
 	struct sk_buff *skb;
 	struct htc_endpoint *endpoint;
 	struct htc_conn_svc_msg *conn_msg;
-	int ret, time_left;
+	int ret;
+	unsigned long time_left;
 
 	/* Find an available endpoint */
 	endpoint = get_next_avail_ep(target->endpoint);
 	if (!endpoint) {
-		dev_err(target->dev, "Endpoint is not available for"
-			"service %d\n", service_connreq->service_id);
+		dev_err(target->dev, "Endpoint is not available for service %d\n",
+			service_connreq->service_id);
 		return -EINVAL;
 	}
 
@@ -260,15 +266,18 @@ int htc_connect_service(struct htc_target *target,
 
 	skb_reserve(skb, sizeof(struct htc_frame_hdr));
 
-	conn_msg = (struct htc_conn_svc_msg *)
-			skb_put(skb, sizeof(struct htc_conn_svc_msg));
+	conn_msg = skb_put(skb, sizeof(struct htc_conn_svc_msg));
 	conn_msg->service_id = cpu_to_be16(service_connreq->service_id);
 	conn_msg->msg_id = cpu_to_be16(HTC_MSG_CONNECT_SERVICE_ID);
 	conn_msg->con_flags = cpu_to_be16(service_connreq->con_flags);
 	conn_msg->dl_pipeid = endpoint->dl_pipeid;
 	conn_msg->ul_pipeid = endpoint->ul_pipeid;
 
-	ret = htc_issue_send(target, skb, skb->len, 0, ENDPOINT0, NULL);
+	/* To prevent infoleak */
+	conn_msg->svc_meta_len = 0;
+	conn_msg->pad = 0;
+
+	ret = htc_issue_send(target, skb, skb->len, 0, ENDPOINT0);
 	if (ret)
 		goto err;
 
@@ -286,35 +295,33 @@ err:
 	return ret;
 }
 
-int htc_send(struct htc_target *target, struct sk_buff *skb,
-	     enum htc_endpoint_id epid, struct ath9k_htc_tx_ctl *tx_ctl)
+int htc_send(struct htc_target *target, struct sk_buff *skb)
 {
-	return htc_issue_send(target, skb, skb->len, 0, epid, tx_ctl);
+	struct ath9k_htc_tx_ctl *tx_ctl;
+
+	tx_ctl = HTC_SKB_CB(skb);
+	return htc_issue_send(target, skb, skb->len, 0, tx_ctl->epid);
+}
+
+int htc_send_epid(struct htc_target *target, struct sk_buff *skb,
+		  enum htc_endpoint_id epid)
+{
+	return htc_issue_send(target, skb, skb->len, 0, epid);
 }
 
 void htc_stop(struct htc_target *target)
 {
-	enum htc_endpoint_id epid;
-	struct htc_endpoint *endpoint;
-
-	for (epid = ENDPOINT0; epid < ENDPOINT_MAX; epid++) {
-		endpoint = &target->endpoint[epid];
-		if (endpoint->service_id != 0)
-			target->hif->stop(target->hif_dev, endpoint->ul_pipeid);
-	}
+	target->hif->stop(target->hif_dev);
 }
 
 void htc_start(struct htc_target *target)
 {
-	enum htc_endpoint_id epid;
-	struct htc_endpoint *endpoint;
+	target->hif->start(target->hif_dev);
+}
 
-	for (epid = ENDPOINT0; epid < ENDPOINT_MAX; epid++) {
-		endpoint = &target->endpoint[epid];
-		if (endpoint->service_id != 0)
-			target->hif->start(target->hif_dev,
-					   endpoint->ul_pipeid);
-	}
+void htc_sta_drain(struct htc_target *target, u8 idx)
+{
+	target->hif->sta_drain(target->hif_dev, idx);
 }
 
 void ath9k_htc_txcompletion_cb(struct htc_target *htc_handle,
@@ -337,6 +344,8 @@ void ath9k_htc_txcompletion_cb(struct htc_target *htc_handle,
 
 	if (skb) {
 		htc_hdr = (struct htc_frame_hdr *) skb->data;
+		if (htc_hdr->endpoint_id >= ARRAY_SIZE(htc_handle->endpoint))
+			goto ret;
 		endpoint = &htc_handle->endpoint[htc_hdr->endpoint_id];
 		skb_pull(skb, sizeof(struct htc_frame_hdr));
 
@@ -344,23 +353,45 @@ void ath9k_htc_txcompletion_cb(struct htc_target *htc_handle,
 			endpoint->ep_callbacks.tx(endpoint->ep_callbacks.priv,
 						  skb, htc_hdr->endpoint_id,
 						  txok);
+		} else {
+			kfree_skb(skb);
 		}
 	}
 
 	return;
 ret:
-	/* HTC-generated packets are freed here. */
-	if (htc_hdr && htc_hdr->endpoint_id != ENDPOINT0)
-		dev_kfree_skb_any(skb);
-	else
-		kfree_skb(skb);
+	kfree_skb(skb);
+}
+
+static void ath9k_htc_fw_panic_report(struct htc_target *htc_handle,
+				      struct sk_buff *skb, u32 len)
+{
+	uint32_t *pattern = (uint32_t *)skb->data;
+
+	if (*pattern == 0x33221199 && len >= sizeof(struct htc_panic_bad_vaddr)) {
+		struct htc_panic_bad_vaddr *htc_panic;
+		htc_panic = (struct htc_panic_bad_vaddr *) skb->data;
+		dev_err(htc_handle->dev, "ath: firmware panic! "
+			"exccause: 0x%08x; pc: 0x%08x; badvaddr: 0x%08x.\n",
+			htc_panic->exccause, htc_panic->pc,
+			htc_panic->badvaddr);
+		return;
+	}
+	if (*pattern == 0x33221299) {
+		struct htc_panic_bad_epid *htc_panic;
+		htc_panic = (struct htc_panic_bad_epid *) skb->data;
+		dev_err(htc_handle->dev, "ath: firmware panic! "
+			"bad epid: 0x%08x\n", htc_panic->epid);
+		return;
+	}
+	dev_err(htc_handle->dev, "ath: unknown panic pattern!\n");
 }
 
 /*
  * HTC Messages are handled directly here and the obtained SKB
  * is freed.
  *
- * Sevice messages (Data, WMI) passed to the corresponding
+ * Service messages (Data, WMI) are passed to the corresponding
  * endpoint RX handlers, which have to free the SKB.
  */
 void ath9k_htc_rx_msg(struct htc_target *htc_handle,
@@ -374,10 +405,26 @@ void ath9k_htc_rx_msg(struct htc_target *htc_handle,
 	if (!htc_handle || !skb)
 		return;
 
+	/* A valid message requires len >= 8.
+	 *
+	 *   sizeof(struct htc_frame_hdr) == 8
+	 *   sizeof(struct htc_ready_msg) == 8
+	 *   sizeof(struct htc_panic_bad_vaddr) == 16
+	 *   sizeof(struct htc_panic_bad_epid) == 8
+	 */
+	if (unlikely(len < sizeof(struct htc_frame_hdr)))
+		goto invalid;
 	htc_hdr = (struct htc_frame_hdr *) skb->data;
 	epid = htc_hdr->endpoint_id;
 
-	if (epid >= ENDPOINT_MAX) {
+	if (epid == 0x99) {
+		ath9k_htc_fw_panic_report(htc_handle, skb, len);
+		kfree_skb(skb);
+		return;
+	}
+
+	if (epid < 0 || epid >= ENDPOINT_MAX) {
+invalid:
 		if (pipe_id != USB_REG_IN_PIPE)
 			dev_kfree_skb_any(skb);
 		else
@@ -389,21 +436,30 @@ void ath9k_htc_rx_msg(struct htc_target *htc_handle,
 
 		/* Handle trailer */
 		if (htc_hdr->flags & HTC_FLAGS_RECV_TRAILER) {
-			if (be32_to_cpu(*(__be32 *) skb->data) == 0x00C60000)
+			if (be32_to_cpu(*(__be32 *) skb->data) == 0x00C60000) {
 				/* Move past the Watchdog pattern */
 				htc_hdr = (struct htc_frame_hdr *)(skb->data + 4);
+				len -= 4;
+			}
 		}
 
 		/* Get the message ID */
+		if (unlikely(len < sizeof(struct htc_frame_hdr) + sizeof(__be16)))
+			goto invalid;
 		msg_id = (__be16 *) ((void *) htc_hdr +
 				     sizeof(struct htc_frame_hdr));
 
 		/* Now process HTC messages */
 		switch (be16_to_cpu(*msg_id)) {
 		case HTC_MSG_READY_ID:
+			if (unlikely(len < sizeof(struct htc_ready_msg)))
+				goto invalid;
 			htc_process_target_rdy(htc_handle, htc_hdr);
 			break;
 		case HTC_MSG_CONNECT_SERVICE_RESPONSE_ID:
+			if (unlikely(len < sizeof(struct htc_frame_hdr) +
+				     sizeof(struct htc_conn_svc_rspmsg)))
+				goto invalid;
 			htc_process_conn_rsp(htc_handle, htc_hdr);
 			break;
 		default:
@@ -422,6 +478,8 @@ void ath9k_htc_rx_msg(struct htc_target *htc_handle,
 		if (endpoint->ep_callbacks.rx)
 			endpoint->ep_callbacks.rx(endpoint->ep_callbacks.priv,
 						  skb, epid);
+		else
+			goto invalid;
 	}
 }
 
@@ -433,11 +491,8 @@ struct htc_target *ath9k_htc_hw_alloc(void *hif_handle,
 	struct htc_target *target;
 
 	target = kzalloc(sizeof(struct htc_target), GFP_KERNEL);
-	if (!target) {
-		printk(KERN_ERR "Unable to allocate memory for"
-			"target device\n");
+	if (!target)
 		return NULL;
-	}
 
 	init_completion(&target->target_wait);
 	init_completion(&target->cmd_wait);
@@ -466,7 +521,7 @@ int ath9k_htc_hw_init(struct htc_target *target,
 		      char *product, u32 drv_info)
 {
 	if (ath9k_htc_probe_device(target, dev, devid, product, drv_info)) {
-		printk(KERN_ERR "Failed to initialize the device\n");
+		pr_err("Failed to initialize the device\n");
 		return -ENODEV;
 	}
 

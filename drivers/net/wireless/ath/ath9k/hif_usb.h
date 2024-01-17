@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010 Atheros Communications Inc.
+ * Copyright (c) 2010-2011 Atheros Communications Inc.
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -17,6 +17,27 @@
 #ifndef HTC_USB_H
 #define HTC_USB_H
 
+/* old firmware images */
+#define FIRMWARE_AR7010_1_1     "htc_7010.fw"
+#define FIRMWARE_AR9271         "htc_9271.fw"
+
+/* supported Major FW version */
+#define MAJOR_VERSION_REQ 1
+#define MINOR_VERSION_REQ 3
+/* minimal and maximal supported Minor FW version. */
+#define FIRMWARE_MINOR_IDX_MAX  4
+#define FIRMWARE_MINOR_IDX_MIN  3
+#define HTC_FW_PATH	"ath9k_htc"
+
+#define HTC_9271_MODULE_FW  HTC_FW_PATH "/htc_9271-" \
+			__stringify(MAJOR_VERSION_REQ) \
+			"." __stringify(FIRMWARE_MINOR_IDX_MAX) ".0.fw"
+#define HTC_7010_MODULE_FW  HTC_FW_PATH "/htc_7010-" \
+			__stringify(MAJOR_VERSION_REQ) \
+			"." __stringify(FIRMWARE_MINOR_IDX_MAX) ".0.fw"
+
+extern int htc_use_dev_fw;
+
 #define IS_AR7010_DEVICE(_v) (((_v) == AR9280_USB) || ((_v) == AR9287_USB))
 
 #define AR9271_FIRMWARE       0x501000
@@ -31,7 +52,7 @@
 
 /* FIXME: Verify these numbers (with Windows) */
 #define MAX_TX_URB_NUM  8
-#define MAX_TX_BUF_NUM  1024
+#define MAX_TX_BUF_NUM  256
 #define MAX_TX_BUF_SIZE 32768
 #define MAX_TX_AGGR_NUM 20
 
@@ -40,7 +61,7 @@
 #define MAX_PKT_NUM_IN_TRANSFER 10
 
 #define MAX_REG_OUT_URB_NUM  1
-#define MAX_REG_OUT_BUF_NUM  8
+#define MAX_REG_IN_URB_NUM   64
 
 #define MAX_REG_IN_BUF_SIZE 64
 
@@ -49,6 +70,8 @@
 #define USB_WLAN_RX_PIPE  2
 #define USB_REG_IN_PIPE   3
 #define USB_REG_OUT_PIPE  4
+
+#define USB_MSG_TIMEOUT 1000 /* (ms) */
 
 #define HIF_USB_MAX_RXPIPES 2
 #define HIF_USB_MAX_TXPIPES 4
@@ -61,6 +84,11 @@ struct tx_buf {
 	struct sk_buff_head skb_queue;
 	struct hif_device_usb *hif_dev;
 	struct list_head list;
+};
+
+struct rx_buf {
+	struct sk_buff *skb;
+	struct hif_device_usb *hif_dev;
 };
 
 #define HIF_USB_TX_STOP  BIT(0)
@@ -82,19 +110,24 @@ struct cmd_buf {
 };
 
 #define HIF_USB_START BIT(0)
+#define HIF_USB_READY BIT(1)
 
 struct hif_device_usb {
-	u16 device_id;
 	struct usb_device *udev;
 	struct usb_interface *interface;
-	const struct firmware *firmware;
+	const struct usb_device_id *usb_device_id;
+	const void *fw_data;
+	size_t fw_size;
+	struct completion fw_done;
 	struct htc_target *htc_handle;
 	struct hif_usb_tx tx;
-	struct urb *reg_in_urb;
 	struct usb_anchor regout_submitted;
 	struct usb_anchor rx_submitted;
+	struct usb_anchor reg_in_submitted;
+	struct usb_anchor mgmt_submitted;
 	struct sk_buff *remain_skb;
-	const char *fw_name;
+	char fw_name[32];
+	int fw_minor_index;
 	int rx_remain_len;
 	int rx_pkt_len;
 	int rx_transfer_len;
@@ -105,5 +138,6 @@ struct hif_device_usb {
 
 int ath9k_hif_usb_init(void);
 void ath9k_hif_usb_exit(void);
+void ath9k_hif_usb_dealloc_urbs(struct hif_device_usb *hif_dev);
 
 #endif /* HTC_USB_H */

@@ -1,4 +1,5 @@
-/**
+// SPDX-License-Identifier: GPL-2.0-or-later
+/*
  * eCryptfs: Linux filesystem encryption layer
  *
  * Copyright (C) 1997-2003 Erez Zadok
@@ -6,21 +7,6 @@
  * Copyright (C) 2004-2006 International Business Machines Corp.
  *   Author(s): Michael A. Halcrow <mahalcro@us.ibm.com>
  *              Michael C. Thompson <mcthomps@us.ibm.com>
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License as
- * published by the Free Software Foundation; either version 2 of the
- * License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA
- * 02111-1307, USA.
  */
 
 #include <linux/fs.h>
@@ -29,7 +15,8 @@
 #include <linux/slab.h>
 #include <linux/seq_file.h>
 #include <linux/file.h>
-#include <linux/crypto.h>
+#include <linux/statfs.h>
+#include <linux/magic.h>
 #include "ecryptfs_kernel.h"
 
 struct kmem_cache *ecryptfs_inode_info_cache;
@@ -51,24 +38,26 @@ static struct inode *ecryptfs_alloc_inode(struct super_block *sb)
 	struct ecryptfs_inode_info *inode_info;
 	struct inode *inode = NULL;
 
-	inode_info = kmem_cache_alloc(ecryptfs_inode_info_cache, GFP_KERNEL);
+	inode_info = alloc_inode_sb(sb, ecryptfs_inode_info_cache, GFP_KERNEL);
 	if (unlikely(!inode_info))
 		goto out;
-	ecryptfs_init_crypt_stat(&inode_info->crypt_stat);
+	if (ecryptfs_init_crypt_stat(&inode_info->crypt_stat)) {
+		kmem_cache_free(ecryptfs_inode_info_cache, inode_info);
+		goto out;
+	}
 	mutex_init(&inode_info->lower_file_mutex);
+	atomic_set(&inode_info->lower_file_count, 0);
 	inode_info->lower_file = NULL;
 	inode = &inode_info->vfs_inode;
 out:
 	return inode;
 }
 
-static void ecryptfs_i_callback(struct rcu_head *head)
+static void ecryptfs_free_inode(struct inode *inode)
 {
-	struct inode *inode = container_of(head, struct inode, i_rcu);
 	struct ecryptfs_inode_info *inode_info;
 	inode_info = ecryptfs_inode_to_private(inode);
 
-	INIT_LIST_HEAD(&inode->i_dentry);
 	kmem_cache_free(ecryptfs_inode_info_cache, inode_info);
 }
 
@@ -78,8 +67,7 @@ static void ecryptfs_i_callback(struct rcu_head *head)
  *
  * This is used during the final destruction of the inode.  All
  * allocation of memory related to the inode, including allocated
- * memory in the crypt_stat struct, will be released here. This
- * function also fput()'s the persistent file for the lower inode.
+ * memory in the crypt_stat struct, will be released here.
  * There should be no chance that this deallocation will be missed.
  */
 static void ecryptfs_destroy_inode(struct inode *inode)
@@ -87,39 +75,13 @@ static void ecryptfs_destroy_inode(struct inode *inode)
 	struct ecryptfs_inode_info *inode_info;
 
 	inode_info = ecryptfs_inode_to_private(inode);
-	if (inode_info->lower_file) {
-		struct dentry *lower_dentry =
-			inode_info->lower_file->f_dentry;
-
-		BUG_ON(!lower_dentry);
-		if (lower_dentry->d_inode) {
-			fput(inode_info->lower_file);
-			inode_info->lower_file = NULL;
-		}
-	}
+	BUG_ON(inode_info->lower_file);
 	ecryptfs_destroy_crypt_stat(&inode_info->crypt_stat);
-	call_rcu(&inode->i_rcu, ecryptfs_i_callback);
-}
-
-/**
- * ecryptfs_init_inode
- * @inode: The ecryptfs inode
- *
- * Set up the ecryptfs inode.
- */
-void ecryptfs_init_inode(struct inode *inode, struct inode *lower_inode)
-{
-	ecryptfs_set_inode_lower(inode, lower_inode);
-	inode->i_ino = lower_inode->i_ino;
-	inode->i_version++;
-	inode->i_op = &ecryptfs_main_iops;
-	inode->i_fop = &ecryptfs_main_fops;
-	inode->i_mapping->a_ops = &ecryptfs_aops;
 }
 
 /**
  * ecryptfs_statfs
- * @sb: The ecryptfs super block
+ * @dentry: The ecryptfs dentry
  * @buf: The struct kstatfs to fill in with stats
  *
  * Get the filesystem statistics. Currently, we let this pass right through
@@ -128,15 +90,25 @@ void ecryptfs_init_inode(struct inode *inode, struct inode *lower_inode)
 static int ecryptfs_statfs(struct dentry *dentry, struct kstatfs *buf)
 {
 	struct dentry *lower_dentry = ecryptfs_dentry_to_lower(dentry);
+	int rc;
 
 	if (!lower_dentry->d_sb->s_op->statfs)
 		return -ENOSYS;
-	return lower_dentry->d_sb->s_op->statfs(lower_dentry, buf);
+
+	rc = lower_dentry->d_sb->s_op->statfs(lower_dentry, buf);
+	if (rc)
+		return rc;
+
+	buf->f_type = ECRYPTFS_SUPER_MAGIC;
+	rc = ecryptfs_set_f_namelen(&buf->f_namelen, buf->f_namelen,
+	       &ecryptfs_superblock_to_private(dentry->d_sb)->mount_crypt_stat);
+
+	return rc;
 }
 
 /**
  * ecryptfs_evict_inode
- * @inode - The ecryptfs inode
+ * @inode: The ecryptfs inode
  *
  * Called by iput() when the inode reference count reached zero
  * and the inode is not hashed anywhere.  Used to clear anything
@@ -146,20 +118,20 @@ static int ecryptfs_statfs(struct dentry *dentry, struct kstatfs *buf)
  */
 static void ecryptfs_evict_inode(struct inode *inode)
 {
-	truncate_inode_pages(&inode->i_data, 0);
-	end_writeback(inode);
+	truncate_inode_pages_final(&inode->i_data);
+	clear_inode(inode);
 	iput(ecryptfs_inode_to_lower(inode));
 }
 
-/**
+/*
  * ecryptfs_show_options
  *
  * Prints the mount options for a given superblock.
  * Returns zero; does not fail.
  */
-static int ecryptfs_show_options(struct seq_file *m, struct vfsmount *mnt)
+static int ecryptfs_show_options(struct seq_file *m, struct dentry *root)
 {
-	struct super_block *sb = mnt->mnt_sb;
+	struct super_block *sb = root->d_sb;
 	struct ecryptfs_mount_crypt_stat *mount_crypt_stat =
 		&ecryptfs_superblock_to_private(sb)->mount_crypt_stat;
 	struct ecryptfs_global_auth_tok *walker;
@@ -198,7 +170,7 @@ static int ecryptfs_show_options(struct seq_file *m, struct vfsmount *mnt)
 const struct super_operations ecryptfs_sops = {
 	.alloc_inode = ecryptfs_alloc_inode,
 	.destroy_inode = ecryptfs_destroy_inode,
-	.drop_inode = generic_delete_inode,
+	.free_inode = ecryptfs_free_inode,
 	.statfs = ecryptfs_statfs,
 	.remount_fs = NULL,
 	.evict_inode = ecryptfs_evict_inode,

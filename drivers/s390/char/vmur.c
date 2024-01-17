@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * Linux driver for System z and s390 unit record devices
  * (z/VM virtual punch, reader, printer)
@@ -11,15 +12,17 @@
 #define KMSG_COMPONENT "vmur"
 #define pr_fmt(fmt) KMSG_COMPONENT ": " fmt
 
-#include <linux/kernel_stat.h>
 #include <linux/cdev.h>
 #include <linux/slab.h>
+#include <linux/module.h>
+#include <linux/kobject.h>
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <asm/cio.h>
 #include <asm/ccwdev.h>
 #include <asm/debug.h>
 #include <asm/diag.h>
+#include <asm/scsw.h>
 
 #include "vmur.h"
 
@@ -61,20 +64,23 @@ static int ur_probe(struct ccw_device *cdev);
 static void ur_remove(struct ccw_device *cdev);
 static int ur_set_online(struct ccw_device *cdev);
 static int ur_set_offline(struct ccw_device *cdev);
-static int ur_pm_suspend(struct ccw_device *cdev);
 
 static struct ccw_driver ur_driver = {
-	.name		= "vmur",
-	.owner		= THIS_MODULE,
+	.driver = {
+		.name	= "vmur",
+		.owner	= THIS_MODULE,
+	},
 	.ids		= ur_ids,
 	.probe		= ur_probe,
 	.remove		= ur_remove,
 	.set_online	= ur_set_online,
 	.set_offline	= ur_set_offline,
-	.freeze		= ur_pm_suspend,
+	.int_class	= IRQIO_VMR,
 };
 
 static DEFINE_MUTEX(vmur_mutex);
+
+static void ur_uevent(struct work_struct *ws);
 
 /*
  * Allocation, freeing, getting and putting of urdev structures
@@ -86,7 +92,7 @@ static DEFINE_MUTEX(vmur_mutex);
  * urd references:
  * - ur_probe gets a urd reference, ur_remove drops the reference
  *   dev_get_drvdata(&cdev->dev)
- * - ur_open gets a urd reference, ur_relase drops the reference
+ * - ur_open gets a urd reference, ur_release drops the reference
  *   (urf->urd)
  *
  * cdev references:
@@ -106,8 +112,9 @@ static struct urdev *urdev_alloc(struct ccw_device *cdev)
 	ccw_device_get_id(cdev, &urd->dev_id);
 	mutex_init(&urd->io_mutex);
 	init_waitqueue_head(&urd->wait);
+	INIT_WORK(&urd->uevent_work, ur_uevent);
 	spin_lock_init(&urd->open_lock);
-	atomic_set(&urd->ref_count,  1);
+	refcount_set(&urd->ref_count,  1);
 	urd->cdev = cdev;
 	get_device(&cdev->dev);
 	return urd;
@@ -123,7 +130,7 @@ static void urdev_free(struct urdev *urd)
 
 static void urdev_get(struct urdev *urd)
 {
-	atomic_inc(&urd->ref_count);
+	refcount_inc(&urd->ref_count);
 }
 
 static struct urdev *urdev_get_from_cdev(struct ccw_device *cdev)
@@ -156,30 +163,8 @@ static struct urdev *urdev_get_from_devno(u16 devno)
 
 static void urdev_put(struct urdev *urd)
 {
-	if (atomic_dec_and_test(&urd->ref_count))
+	if (refcount_dec_and_test(&urd->ref_count))
 		urdev_free(urd);
-}
-
-/*
- * State and contents of ur devices can be changed by class D users issuing
- * CP commands such as PURGE or TRANSFER, while the Linux guest is suspended.
- * Also the Linux guest might be logged off, which causes all active spool
- * files to be closed.
- * So we cannot guarantee that spool files are still the same when the Linux
- * guest is resumed. In order to avoid unpredictable results at resume time
- * we simply refuse to suspend if a ur device node is open.
- */
-static int ur_pm_suspend(struct ccw_device *cdev)
-{
-	struct urdev *urd = dev_get_drvdata(&cdev->dev);
-
-	TRACE("ur_pm_suspend: cdev=%p\n", cdev);
-	if (urd->open_flag) {
-		pr_err("Unit record device %s is busy, %s refusing to "
-		       "suspend.\n", dev_name(&cdev->dev), ur_banner);
-		return -EBUSY;
-	}
-	return 0;
 }
 
 /*
@@ -238,7 +223,7 @@ static struct ccw1 *alloc_chan_prog(const char __user *ubuf, int rec_count,
 	 * That means we allocate room for CCWs to cover count/reclen
 	 * records plus a NOP.
 	 */
-	cpa = kzalloc((rec_count + 1) * sizeof(struct ccw1),
+	cpa = kcalloc(rec_count + 1, sizeof(struct ccw1),
 		      GFP_KERNEL | GFP_DMA);
 	if (!cpa)
 		return ERR_PTR(-ENOMEM);
@@ -295,6 +280,18 @@ out:
 	return rc;
 }
 
+static void ur_uevent(struct work_struct *ws)
+{
+	struct urdev *urd = container_of(ws, struct urdev, uevent_work);
+	char *envp[] = {
+		"EVENT=unsol_de",	/* Unsolicited device-end interrupt */
+		NULL
+	};
+
+	kobject_uevent_env(&urd->cdev->dev.kobj, KOBJ_CHANGE, envp);
+	urdev_put(urd);
+}
+
 /*
  * ur interrupt handler, called from the ccw_device layer
  */
@@ -303,17 +300,26 @@ static void ur_int_handler(struct ccw_device *cdev, unsigned long intparm,
 {
 	struct urdev *urd;
 
-	kstat_cpu(smp_processor_id()).irqs[IOINT_VMR]++;
-	TRACE("ur_int_handler: intparm=0x%lx cstat=%02x dstat=%02x res=%u\n",
-	      intparm, irb->scsw.cmd.cstat, irb->scsw.cmd.dstat,
-	      irb->scsw.cmd.count);
-
-	if (!intparm) {
-		TRACE("ur_int_handler: unsolicited interrupt\n");
-		return;
+	if (!IS_ERR(irb)) {
+		TRACE("ur_int_handler: intparm=0x%lx cstat=%02x dstat=%02x res=%u\n",
+		      intparm, irb->scsw.cmd.cstat, irb->scsw.cmd.dstat,
+		      irb->scsw.cmd.count);
 	}
 	urd = dev_get_drvdata(&cdev->dev);
-	BUG_ON(!urd);
+	if (!intparm) {
+		TRACE("ur_int_handler: unsolicited interrupt\n");
+
+		if (scsw_dstat(&irb->scsw) & DEV_STAT_DEV_END) {
+			/*
+			 * Userspace might be interested in a transition to
+			 * device-ready state.
+			 */
+			urdev_get(urd);
+			schedule_work(&urd->uevent_work);
+		}
+
+		return;
+	}
 	/* On special conditions irb is an error pointer */
 	if (IS_ERR(irb))
 		urd->io_request_rc = PTR_ERR(irb);
@@ -701,7 +707,7 @@ static int ur_open(struct inode *inode, struct file *file)
 	 * We treat the minor number as the devno of the ur device
 	 * to find in the driver tree.
 	 */
-	devno = MINOR(file->f_dentry->d_inode->i_rdev);
+	devno = iminor(file_inode(file));
 
 	urd = urdev_get_from_devno(devno);
 	if (!urd) {
@@ -780,24 +786,11 @@ static int ur_release(struct inode *inode, struct file *file)
 
 static loff_t ur_llseek(struct file *file, loff_t offset, int whence)
 {
-	loff_t newpos;
-
 	if ((file->f_flags & O_ACCMODE) != O_RDONLY)
 		return -ESPIPE; /* seek allowed only for reader */
 	if (offset % PAGE_SIZE)
 		return -ESPIPE; /* only multiples of 4K allowed */
-	switch (whence) {
-	case 0: /* SEEK_SET */
-		newpos = offset;
-		break;
-	case 1: /* SEEK_CUR */
-		newpos = file->f_pos + offset;
-		break;
-	default:
-		return -EINVAL;
-	}
-	file->f_pos = newpos;
-	return newpos;
+	return no_seek_end_llseek(file, offset, whence);
 }
 
 static const struct file_operations ur_fops = {
@@ -842,7 +835,6 @@ static int ur_probe(struct ccw_device *cdev)
 		rc = -ENOMEM;
 		goto fail_urdev_put;
 	}
-	cdev->handler = ur_int_handler;
 
 	/* validate virtual unit record device */
 	urd->class = get_urd_class(urd);
@@ -856,6 +848,7 @@ static int ur_probe(struct ccw_device *cdev)
 	}
 	spin_lock_irq(get_ccwdev_lock(cdev));
 	dev_set_drvdata(&cdev->dev, urd);
+	cdev->handler = ur_int_handler;
 	spin_unlock_irq(get_ccwdev_lock(cdev));
 
 	mutex_unlock(&vmur_mutex);
@@ -901,11 +894,10 @@ static int ur_set_online(struct ccw_device *cdev)
 		goto fail_urdev_put;
 	}
 
-	cdev_init(urd->char_device, &ur_fops);
-	urd->char_device->dev = MKDEV(major, minor);
+	urd->char_device->ops = &ur_fops;
 	urd->char_device->owner = ur_fops.owner;
 
-	rc = cdev_add(urd->char_device, urd->char_device->dev, 1);
+	rc = cdev_add(urd->char_device, MKDEV(major, minor), 1);
 	if (rc)
 		goto fail_free_cdev;
 	if (urd->cdev->id.cu_type == READER_PUNCH_DEVTYPE) {
@@ -920,8 +912,8 @@ static int ur_set_online(struct ccw_device *cdev)
 		goto fail_free_cdev;
 	}
 
-	urd->device = device_create(vmur_class, NULL, urd->char_device->dev,
-				    NULL, "%s", node_id);
+	urd->device = device_create(vmur_class, &cdev->dev,
+				    urd->char_device->dev, NULL, "%s", node_id);
 	if (IS_ERR(urd->device)) {
 		rc = PTR_ERR(urd->device);
 		TRACE("ur_set_online: device_create rc=%d\n", rc);
@@ -956,11 +948,15 @@ static int ur_set_offline_force(struct ccw_device *cdev, int force)
 		rc = -EBUSY;
 		goto fail_urdev_put;
 	}
-	if (!force && (atomic_read(&urd->ref_count) > 2)) {
+	if (!force && (refcount_read(&urd->ref_count) > 2)) {
 		/* There is still a user of urd (e.g. ur_open) */
 		TRACE("ur_set_offline: BUSY\n");
 		rc = -EBUSY;
 		goto fail_urdev_put;
+	}
+	if (cancel_work_sync(&urd->uevent_work)) {
+		/* Work not run yet - need to release reference here */
+		urdev_put(urd);
 	}
 	device_destroy(vmur_class, urd->char_device->dev);
 	cdev_del(urd->char_device);
@@ -997,6 +993,7 @@ static void ur_remove(struct ccw_device *cdev)
 	spin_lock_irqsave(get_ccwdev_lock(cdev), flags);
 	urdev_put(dev_get_drvdata(&cdev->dev));
 	dev_set_drvdata(&cdev->dev, NULL);
+	cdev->handler = NULL;
 	spin_unlock_irqrestore(get_ccwdev_lock(cdev), flags);
 
 	mutex_unlock(&vmur_mutex);

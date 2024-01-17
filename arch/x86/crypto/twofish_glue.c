@@ -44,17 +44,21 @@
 #include <linux/module.h>
 #include <linux/types.h>
 
-asmlinkage void twofish_enc_blk(struct crypto_tfm *tfm, u8 *dst, const u8 *src);
-asmlinkage void twofish_dec_blk(struct crypto_tfm *tfm, u8 *dst, const u8 *src);
+asmlinkage void twofish_enc_blk(struct twofish_ctx *ctx, u8 *dst,
+				const u8 *src);
+EXPORT_SYMBOL_GPL(twofish_enc_blk);
+asmlinkage void twofish_dec_blk(struct twofish_ctx *ctx, u8 *dst,
+				const u8 *src);
+EXPORT_SYMBOL_GPL(twofish_dec_blk);
 
 static void twofish_encrypt(struct crypto_tfm *tfm, u8 *dst, const u8 *src)
 {
-	twofish_enc_blk(tfm, dst, src);
+	twofish_enc_blk(crypto_tfm_ctx(tfm), dst, src);
 }
 
 static void twofish_decrypt(struct crypto_tfm *tfm, u8 *dst, const u8 *src)
 {
-	twofish_dec_blk(tfm, dst, src);
+	twofish_dec_blk(crypto_tfm_ctx(tfm), dst, src);
 }
 
 static struct crypto_alg alg = {
@@ -64,9 +68,8 @@ static struct crypto_alg alg = {
 	.cra_flags		=	CRYPTO_ALG_TYPE_CIPHER,
 	.cra_blocksize		=	TF_BLOCK_SIZE,
 	.cra_ctxsize		=	sizeof(struct twofish_ctx),
-	.cra_alignmask		=	3,
+	.cra_alignmask		=	0,
 	.cra_module		=	THIS_MODULE,
-	.cra_list		=	LIST_HEAD_INIT(alg.cra_list),
 	.cra_u			=	{
 		.cipher = {
 			.cia_min_keysize	=	TF_MIN_KEY_SIZE,
@@ -78,20 +81,20 @@ static struct crypto_alg alg = {
 	}
 };
 
-static int __init init(void)
+static int __init twofish_glue_init(void)
 {
 	return crypto_register_alg(&alg);
 }
 
-static void __exit fini(void)
+static void __exit twofish_glue_fini(void)
 {
 	crypto_unregister_alg(&alg);
 }
 
-module_init(init);
-module_exit(fini);
+module_init(twofish_glue_init);
+module_exit(twofish_glue_fini);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION ("Twofish Cipher Algorithm, asm optimized");
-MODULE_ALIAS("twofish");
-MODULE_ALIAS("twofish-asm");
+MODULE_ALIAS_CRYPTO("twofish");
+MODULE_ALIAS_CRYPTO("twofish-asm");

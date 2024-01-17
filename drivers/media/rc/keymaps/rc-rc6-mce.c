@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* rc-rc6-mce.c - Keytable for Windows Media Center RC-6 remotes for use
  * with the Media Center Edition eHome Infrared Transceiver.
  *
@@ -5,14 +6,10 @@
  *
  * See http://mediacenterguides.com/book/export/html/31 for details on
  * key mappings.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 
 #include <media/rc-map.h>
+#include <linux/module.h>
 
 static struct rc_map_table rc6_mce[] = {
 
@@ -29,8 +26,8 @@ static struct rc_map_table rc6_mce[] = {
 
 	{ 0x800f040a, KEY_DELETE },
 	{ 0x800f040b, KEY_ENTER },
-	{ 0x800f040c, KEY_POWER },		/* PC Power */
-	{ 0x800f040d, KEY_PROG1 },		/* Windows MCE button */
+	{ 0x800f040c, KEY_SLEEP },		/* Formerly PC Power */
+	{ 0x800f040d, KEY_MEDIA },		/* Windows MCE button */
 	{ 0x800f040e, KEY_MUTE },
 	{ 0x800f040f, KEY_INFO },
 
@@ -44,7 +41,6 @@ static struct rc_map_table rc6_mce[] = {
 	{ 0x800f0416, KEY_PLAY },
 	{ 0x800f0417, KEY_RECORD },
 	{ 0x800f0418, KEY_PAUSE },
-	{ 0x800f046e, KEY_PLAYPAUSE },
 	{ 0x800f0419, KEY_STOP },
 	{ 0x800f041a, KEY_NEXT },
 	{ 0x800f041b, KEY_PREVIOUS },
@@ -86,8 +82,9 @@ static struct rc_map_table rc6_mce[] = {
 	{ 0x800f045e, KEY_BLUE },
 
 	{ 0x800f0465, KEY_POWER2 },	/* TV Power */
+	{ 0x800f0469, KEY_MESSENGER },
 	{ 0x800f046e, KEY_PLAYPAUSE },
-	{ 0x800f046f, KEY_MEDIA },	/* Start media application (NEW) */
+	{ 0x800f046f, KEY_PLAYER },	/* Start media application (NEW) */
 
 	{ 0x800f0480, KEY_BRIGHTNESSDOWN },
 	{ 0x800f0481, KEY_PLAYPAUSE },
@@ -95,10 +92,10 @@ static struct rc_map_table rc6_mce[] = {
 
 static struct rc_map_list rc6_mce_map = {
 	.map = {
-		.scan    = rc6_mce,
-		.size    = ARRAY_SIZE(rc6_mce),
-		.rc_type = RC_TYPE_RC6,
-		.name    = RC_MAP_RC6_MCE,
+		.scan     = rc6_mce,
+		.size     = ARRAY_SIZE(rc6_mce),
+		.rc_proto = RC_PROTO_RC6_MCE,
+		.name     = RC_MAP_RC6_MCE,
 	}
 };
 

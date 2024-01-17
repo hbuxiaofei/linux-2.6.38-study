@@ -16,7 +16,7 @@
 #include <linux/errno.h>
 #include <linux/slab.h>
 
-#include <mach/pm.h>
+#include "pm.h"
 
 struct pxa_cpu_pm_fns *pxa_cpu_pm_fns;
 static unsigned long *sleep_save;
@@ -42,7 +42,6 @@ int pxa_pm_enter(suspend_state_t state)
 
 	/* *** go zzz *** */
 	pxa_cpu_pm_fns->enter(state);
-	cpu_init();
 
 	if (state != PM_SUSPEND_STANDBY && pxa_cpu_pm_fns->restore) {
 		/* after sleeping, validate the checksum */
@@ -66,11 +65,6 @@ int pxa_pm_enter(suspend_state_t state)
 }
 
 EXPORT_SYMBOL_GPL(pxa_pm_enter);
-
-unsigned long sleep_phys_sp(void *sp)
-{
-	return virt_to_phys(sp);
-}
 
 static int pxa_pm_valid(suspend_state_t state)
 {
@@ -110,12 +104,11 @@ static int __init pxa_pm_init(void)
 		return -EINVAL;
 	}
 
-	sleep_save = kmalloc(pxa_cpu_pm_fns->save_count * sizeof(unsigned long),
-			     GFP_KERNEL);
-	if (!sleep_save) {
-		printk(KERN_ERR "failed to alloc memory for pm save\n");
+	sleep_save = kmalloc_array(pxa_cpu_pm_fns->save_count,
+				   sizeof(*sleep_save),
+				   GFP_KERNEL);
+	if (!sleep_save)
 		return -ENOMEM;
-	}
 
 	suspend_set_ops(&pxa_pm_ops);
 	return 0;

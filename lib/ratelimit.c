@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * ratelimit.c - Do something with rate limit.
  *
@@ -5,13 +6,11 @@
  *
  * 2008-05-01 rewrite the function and use a ratelimit_state data struct as
  * parameter. Now every user can use their own standalone ratelimit_state.
- *
- * This file is released under the GPLv2.
  */
 
 #include <linux/ratelimit.h>
 #include <linux/jiffies.h>
-#include <linux/module.h>
+#include <linux/export.h>
 
 /*
  * __ratelimit - rate limiting
@@ -27,10 +26,16 @@
  */
 int ___ratelimit(struct ratelimit_state *rs, const char *func)
 {
+	/* Paired with WRITE_ONCE() in .proc_handler().
+	 * Changing two values seperately could be inconsistent
+	 * and some message could be lost.  (See: net_ratelimit_state).
+	 */
+	int interval = READ_ONCE(rs->interval);
+	int burst = READ_ONCE(rs->burst);
 	unsigned long flags;
 	int ret;
 
-	if (!rs->interval)
+	if (!interval)
 		return 1;
 
 	/*
@@ -39,28 +44,32 @@ int ___ratelimit(struct ratelimit_state *rs, const char *func)
 	 * in addition to the one that will be printed by
 	 * the entity that is holding the lock already:
 	 */
-	if (!spin_trylock_irqsave(&rs->lock, flags))
+	if (!raw_spin_trylock_irqsave(&rs->lock, flags))
 		return 0;
 
 	if (!rs->begin)
 		rs->begin = jiffies;
 
-	if (time_is_before_jiffies(rs->begin + rs->interval)) {
-		if (rs->missed)
-			printk(KERN_WARNING "%s: %d callbacks suppressed\n",
-				func, rs->missed);
-		rs->begin   = 0;
+	if (time_is_before_jiffies(rs->begin + interval)) {
+		if (rs->missed) {
+			if (!(rs->flags & RATELIMIT_MSG_ON_RELEASE)) {
+				printk_deferred(KERN_WARNING
+						"%s: %d callbacks suppressed\n",
+						func, rs->missed);
+				rs->missed = 0;
+			}
+		}
+		rs->begin   = jiffies;
 		rs->printed = 0;
-		rs->missed  = 0;
 	}
-	if (rs->burst && rs->burst > rs->printed) {
+	if (burst && burst > rs->printed) {
 		rs->printed++;
 		ret = 1;
 	} else {
 		rs->missed++;
 		ret = 0;
 	}
-	spin_unlock_irqrestore(&rs->lock, flags);
+	raw_spin_unlock_irqrestore(&rs->lock, flags);
 
 	return ret;
 }

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Hardware definitions for Palm Zire72
  *
@@ -10,16 +11,11 @@
  * Rewrite for mainline:
  *	Marek Vasut <marek.vasut@gmail.com>
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
- *
  * (find more info at www.hackndev.com)
- *
  */
 
 #include <linux/platform_device.h>
-#include <linux/sysdev.h>
+#include <linux/syscore_ops.h>
 #include <linux/delay.h>
 #include <linux/irq.h>
 #include <linux/gpio_keys.h>
@@ -29,24 +25,27 @@
 #include <linux/gpio.h>
 #include <linux/wm97xx.h>
 #include <linux/power_supply.h>
-#include <linux/usb/gpio_vbus.h>
+#include <linux/platform_data/i2c-gpio.h>
+#include <linux/gpio/machine.h>
 
 #include <asm/mach-types.h>
+#include <asm/suspend.h>
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
 
-#include <mach/pxa27x.h>
-#include <mach/audio.h>
-#include <mach/palmz72.h>
-#include <mach/mmc.h>
-#include <mach/pxafb.h>
-#include <mach/irda.h>
-#include <plat/pxa27x_keypad.h>
-#include <mach/udc.h>
-#include <mach/palmasoc.h>
-#include <mach/palm27x.h>
+#include "pxa27x.h"
+#include <linux/platform_data/asoc-pxa.h>
+#include "palmz72.h"
+#include <linux/platform_data/mmc-pxamci.h>
+#include <linux/platform_data/video-pxafb.h>
+#include <linux/platform_data/irda-pxaficp.h>
+#include <linux/platform_data/keypad-pxa27x.h>
+#include "udc.h"
+#include <linux/platform_data/asoc-palm27x.h>
+#include "palm27x.h"
 
-#include <mach/pm.h>
+#include "pm.h"
+#include <linux/platform_data/media/camera-pxa.h>
 
 #include "generic.h"
 #include "devices.h"
@@ -103,6 +102,28 @@ static unsigned long palmz72_pin_config[] __initdata = {
 	GPIO22_GPIO,	/* LCD border color */
 	GPIO96_GPIO,	/* lcd power */
 
+	/* PXA Camera */
+	GPIO81_CIF_DD_0,
+	GPIO48_CIF_DD_5,
+	GPIO50_CIF_DD_3,
+	GPIO51_CIF_DD_2,
+	GPIO52_CIF_DD_4,
+	GPIO53_CIF_MCLK,
+	GPIO54_CIF_PCLK,
+	GPIO55_CIF_DD_1,
+	GPIO84_CIF_FV,
+	GPIO85_CIF_LV,
+	GPIO93_CIF_DD_6,
+	GPIO108_CIF_DD_7,
+
+	GPIO56_GPIO,	/* OV9640 Powerdown */
+	GPIO57_GPIO,	/* OV9640 Reset */
+	GPIO91_GPIO,	/* OV9640 Power */
+
+	/* I2C */
+	GPIO117_GPIO,	/* I2C_SCL */
+	GPIO118_GPIO,	/* I2C_SDA */
+
 	/* Misc. */
 	GPIO0_GPIO	| WAKEUP_ON_LEVEL_HIGH,	/* power detect */
 	GPIO88_GPIO,				/* green led */
@@ -113,7 +134,7 @@ static unsigned long palmz72_pin_config[] __initdata = {
  * GPIO keyboard
  ******************************************************************************/
 #if defined(CONFIG_KEYBOARD_PXA27x) || defined(CONFIG_KEYBOARD_PXA27x_MODULE)
-static unsigned int palmz72_matrix_keys[] = {
+static const unsigned int palmz72_matrix_keys[] = {
 	KEY(0, 0, KEY_POWER),
 	KEY(0, 1, KEY_F1),
 	KEY(0, 2, KEY_ENTER),
@@ -129,11 +150,15 @@ static unsigned int palmz72_matrix_keys[] = {
 	KEY(3, 2, KEY_LEFT),
 };
 
+static struct matrix_keymap_data almz72_matrix_keymap_data = {
+	.keymap			= palmz72_matrix_keys,
+	.keymap_size		= ARRAY_SIZE(palmz72_matrix_keys),
+};
+
 static struct pxa27x_keypad_platform_data palmz72_keypad_platform_data = {
 	.matrix_key_rows	= 4,
 	.matrix_key_cols	= 3,
-	.matrix_key_map		= palmz72_matrix_keys,
-	.matrix_key_map_size	= ARRAY_SIZE(palmz72_matrix_keys),
+	.matrix_keymap_data	= &almz72_matrix_keymap_data,
 
 	.debounce_interval	= 30,
 };
@@ -207,51 +232,56 @@ static struct palmz72_resume_info palmz72_resume_info = {
 
 static unsigned long store_ptr;
 
-/* sys_device for Palm Zire 72 PM */
+/* syscore_ops for Palm Zire 72 PM */
 
-static int palmz72_pm_suspend(struct sys_device *dev, pm_message_t msg)
+static int palmz72_pm_suspend(void)
 {
 	/* setup the resume_info struct for the original bootloader */
-	palmz72_resume_info.resume_addr = (u32) pxa_cpu_resume;
+	palmz72_resume_info.resume_addr = (u32) cpu_resume;
 
 	/* Storing memory touched by ROM */
 	store_ptr = *PALMZ72_SAVE_DWORD;
 
 	/* Setting PSPR to a proper value */
-	PSPR = virt_to_phys(&palmz72_resume_info);
+	PSPR = __pa_symbol(&palmz72_resume_info);
 
 	return 0;
 }
 
-static int palmz72_pm_resume(struct sys_device *dev)
+static void palmz72_pm_resume(void)
 {
 	*PALMZ72_SAVE_DWORD = store_ptr;
-	return 0;
 }
 
-static struct sysdev_class palmz72_pm_sysclass = {
-	.name = "palmz72_pm",
+static struct syscore_ops palmz72_pm_syscore_ops = {
 	.suspend = palmz72_pm_suspend,
 	.resume = palmz72_pm_resume,
 };
 
-static struct sys_device palmz72_pm_device = {
-	.cls = &palmz72_pm_sysclass,
-};
-
 static int __init palmz72_pm_init(void)
 {
-	int ret = -ENODEV;
 	if (machine_is_palmz72()) {
-		ret = sysdev_class_register(&palmz72_pm_sysclass);
-		if (ret == 0)
-			ret = sysdev_register(&palmz72_pm_device);
+		register_syscore_ops(&palmz72_pm_syscore_ops);
+		return 0;
 	}
-	return ret;
+	return -ENODEV;
 }
 
 device_initcall(palmz72_pm_init);
 #endif
+
+static struct gpiod_lookup_table palmz72_mci_gpio_table = {
+	.dev_id = "pxa2xx-mci.0",
+	.table = {
+		GPIO_LOOKUP("gpio-pxa", GPIO_NR_PALMZ72_SD_DETECT_N,
+			    "cd", GPIO_ACTIVE_LOW),
+		GPIO_LOOKUP("gpio-pxa", GPIO_NR_PALMZ72_SD_RO,
+			    "wp", GPIO_ACTIVE_LOW),
+		GPIO_LOOKUP("gpio-pxa", GPIO_NR_PALMZ72_SD_POWER_N,
+			    "power", GPIO_ACTIVE_LOW),
+		{ },
+	},
+};
 
 /******************************************************************************
  * Machine init
@@ -263,8 +293,7 @@ static void __init palmz72_init(void)
 	pxa_set_btuart_info(NULL);
 	pxa_set_stuart_info(NULL);
 
-	palm27x_mmc_init(GPIO_NR_PALMZ72_SD_DETECT_N, GPIO_NR_PALMZ72_SD_RO,
-			GPIO_NR_PALMZ72_SD_POWER_N, 1);
+	palm27x_mmc_init(&palmz72_mci_gpio_table);
 	palm27x_lcd_init(-1, &palm_320x320_lcd_mode);
 	palm27x_udc_init(GPIO_NR_PALMZ72_USB_DETECT_N,
 			GPIO_NR_PALMZ72_USB_PULLUP, 0);
@@ -279,9 +308,12 @@ static void __init palmz72_init(void)
 }
 
 MACHINE_START(PALMZ72, "Palm Zire72")
-	.boot_params	= 0xa0000100,
+	.atag_offset	= 0x100,
 	.map_io		= pxa27x_map_io,
+	.nr_irqs	= PXA_NR_IRQS,
 	.init_irq	= pxa27x_init_irq,
-	.timer		= &pxa_timer,
-	.init_machine	= palmz72_init
+	.handle_irq	= pxa27x_handle_irq,
+	.init_time	= pxa_timer_init,
+	.init_machine	= palmz72_init,
+	.restart	= pxa_restart,
 MACHINE_END

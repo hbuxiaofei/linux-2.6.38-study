@@ -1,18 +1,11 @@
+/* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * Copyright (c) 2005-2010 Brocade Communications Systems, Inc.
+ * Copyright (c) 2005-2014 Brocade Communications Systems, Inc.
+ * Copyright (c) 2014- QLogic Corporation.
  * All rights reserved
- * www.brocade.com
+ * www.qlogic.com
  *
- * Linux driver for Brocade Fibre Channel Host Bus Adapter.
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License (GPL) Version 2 as
- * published by the Free Software Foundation
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
+ * Linux driver for QLogic BR-series Fibre Channel Host Bus Adapter.
  */
 /*
  * fcbuild.h - FC link service frame building and parsing routines
@@ -66,6 +59,9 @@ fc_rpsc_operspeed_to_bfa_speed(enum fc_rpsc_op_speed speed)
 	case RPSC_OP_SPEED_8G:
 		return BFA_PORT_SPEED_8GBPS;
 
+	case RPSC_OP_SPEED_16G:
+		return BFA_PORT_SPEED_16GBPS;
+
 	case RPSC_OP_SPEED_10G:
 		return BFA_PORT_SPEED_10GBPS;
 
@@ -93,6 +89,9 @@ fc_bfa_speed_to_rpsc_operspeed(enum bfa_port_speed op_speed)
 
 	case BFA_PORT_SPEED_8GBPS:
 		return RPSC_OP_SPEED_8G;
+
+	case BFA_PORT_SPEED_16GBPS:
+		return RPSC_OP_SPEED_16G;
 
 	case BFA_PORT_SPEED_10GBPS:
 		return RPSC_OP_SPEED_10G;
@@ -141,11 +140,11 @@ u16        fc_flogi_acc_build(struct fchs_s *fchs, struct fc_logi_s *flogi,
 				   u32 s_id, __be16 ox_id,
 				   wwn_t port_name, wwn_t node_name,
 				   u16 pdu_size,
-				   u16 local_bb_credits);
+				   u16 local_bb_credits, u8 bb_scn);
 
 u16        fc_plogi_build(struct fchs_s *fchs, void *pld, u32 d_id,
 			       u32 s_id, u16 ox_id, wwn_t port_name,
-			       wwn_t node_name, u16 pdu_size);
+			       wwn_t node_name, u16 pdu_size, u16 bb_cr);
 
 enum fc_parse_status fc_plogi_parse(struct fchs_s *fchs);
 
@@ -156,10 +155,11 @@ enum fc_parse_status fc_abts_rsp_parse(struct fchs_s *buf, int len);
 
 u16        fc_rrq_build(struct fchs_s *buf, struct fc_rrq_s *rrq, u32 d_id,
 			     u32 s_id, u16 ox_id, u16 rrq_oxid);
-enum fc_parse_status fc_rrq_rsp_parse(struct fchs_s *buf, int len);
 
 u16        fc_rspnid_build(struct fchs_s *fchs, void *pld, u32 s_id,
 				u16 ox_id, u8 *name);
+u16	fc_rsnn_nn_build(struct fchs_s *fchs, void *pld, u32 s_id,
+				wwn_t node_name, u8 *name);
 
 u16        fc_rftid_build(struct fchs_s *fchs, void *pld, u32 s_id,
 			       u16 ox_id, enum bfa_lport_role role);
@@ -177,13 +177,17 @@ u16        fc_gidpn_build(struct fchs_s *fchs, void *pyld, u32 s_id,
 u16        fc_gpnid_build(struct fchs_s *fchs, void *pld, u32 s_id,
 			       u16 ox_id, u32 port_id);
 
+u16	fc_gs_rjt_build(struct fchs_s *fchs, struct ct_hdr_s *cthdr,
+			u32 d_id, u32 s_id, u16 ox_id,
+			u8 reason_code, u8 reason_code_expl);
+
 u16        fc_scr_build(struct fchs_s *fchs, struct fc_scr_s *scr,
 			u8 set_br_reg, u32 s_id, u16 ox_id);
 
 u16        fc_plogi_acc_build(struct fchs_s *fchs, void *pld, u32 d_id,
 				   u32 s_id, u16 ox_id,
 				   wwn_t port_name, wwn_t node_name,
-				   u16 pdu_size);
+				   u16 pdu_size, u16 bb_cr);
 
 u16        fc_adisc_build(struct fchs_s *fchs, struct fc_adisc_s *adisc,
 			u32 d_id, u32 s_id, __be16 ox_id, wwn_t port_name,
@@ -263,8 +267,6 @@ void		fc_get_fc4type_bitmask(u8 fc4_type, u8 *bit_mask);
 void		fc_els_req_build(struct fchs_s *fchs, u32 d_id, u32 s_id,
 					 __be16 ox_id);
 
-enum fc_parse_status	fc_els_rsp_parse(struct fchs_s *fchs, int len);
-
 enum fc_parse_status	fc_plogi_rsp_parse(struct fchs_s *fchs, int len,
 					wwn_t port_name);
 
@@ -284,8 +286,6 @@ u16 fc_tprlo_acc_build(struct fchs_s *fchs, struct fc_tprlo_acc_s *tprlo_acc,
 u16 fc_prlo_acc_build(struct fchs_s *fchs, struct fc_prlo_acc_s *prlo_acc,
 		u32 d_id, u32 s_id, __be16 ox_id, int num_pages);
 
-u16 fc_logo_rsp_parse(struct fchs_s *fchs, int len);
-
 u16 fc_pdisc_build(struct fchs_s *fchs, u32 d_id, u32 s_id,
 		u16 ox_id, wwn_t port_name, wwn_t node_name,
 		u16 pdu_size);
@@ -295,13 +295,9 @@ u16 fc_pdisc_rsp_parse(struct fchs_s *fchs, int len, wwn_t port_name);
 u16 fc_prlo_build(struct fchs_s *fchs, u32 d_id, u32 s_id,
 		u16 ox_id, int num_pages);
 
-u16 fc_prlo_rsp_parse(struct fchs_s *fchs, int len);
-
 u16 fc_tprlo_build(struct fchs_s *fchs, u32 d_id, u32 s_id,
 		u16 ox_id, int num_pages, enum fc_tprlo_type tprlo_type,
 		u32 tpr_id);
-
-u16 fc_tprlo_rsp_parse(struct fchs_s *fchs, int len);
 
 u16 fc_ba_rjt_build(struct fchs_s *fchs, u32 d_id, u32 s_id,
 		__be16 ox_id, u32 reason_code, u32 reason_expl);

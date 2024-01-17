@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  *	linux/arch/alpha/kernel/sys_mikasa.c
  *
@@ -17,12 +18,11 @@
 #include <linux/bitops.h>
 
 #include <asm/ptrace.h>
-#include <asm/system.h>
+#include <asm/mce.h>
 #include <asm/dma.h>
 #include <asm/irq.h>
 #include <asm/mmu_context.h>
 #include <asm/io.h>
-#include <asm/pgtable.h>
 #include <asm/core_apecs.h>
 #include <asm/core_cia.h>
 #include <asm/tlbflush.h>
@@ -98,7 +98,8 @@ mikasa_init_irq(void)
 	mikasa_update_irq_hw(0);
 
 	for (i = 16; i < 32; ++i) {
-		set_irq_chip_and_handler(i, &mikasa_irq_type, handle_level_irq);
+		irq_set_chip_and_handler(i, &mikasa_irq_type,
+					 handle_level_irq);
 		irq_set_status_flags(i, IRQ_LEVEL);
 	}
 
@@ -144,10 +145,10 @@ mikasa_init_irq(void)
  * comes in on.  This makes interrupt processing much easier.
  */
 
-static int __init
-mikasa_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+static int
+mikasa_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
-	static char irq_tab[8][5] __initdata = {
+	static char irq_tab[8][5] = {
 		/*INT    INTA   INTB   INTC   INTD */
 		{16+12, 16+12, 16+12, 16+12, 16+12},	/* IdSel 17,  SCSI */
 		{   -1,    -1,    -1,    -1,    -1},	/* IdSel 18,  PCEB */

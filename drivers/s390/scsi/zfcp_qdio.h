@@ -1,31 +1,22 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*
  * zfcp device driver
  *
  * Header file for zfcp qdio interface
  *
- * Copyright IBM Corporation 2010
+ * Copyright IBM Corp. 2010
  */
 
 #ifndef ZFCP_QDIO_H
 #define ZFCP_QDIO_H
 
+#include <linux/interrupt.h>
 #include <asm/qdio.h>
 
 #define ZFCP_QDIO_SBALE_LEN	PAGE_SIZE
 
-/* DMQ bug workaround: don't use last SBALE */
-#define ZFCP_QDIO_MAX_SBALES_PER_SBAL	(QDIO_MAX_ELEMENTS_PER_BUFFER - 1)
-
-/* index of last SBALE (with respect to DMQ bug workaround) */
-#define ZFCP_QDIO_LAST_SBALE_PER_SBAL	(ZFCP_QDIO_MAX_SBALES_PER_SBAL - 1)
-
 /* Max SBALS for chaining */
 #define ZFCP_QDIO_MAX_SBALS_PER_REQ	36
-
-/* max. number of (data buffer) SBALEs in largest SBAL chain
- * request ID + QTCB in SBALE 0 + 1 of first SBAL in chain   */
-#define ZFCP_QDIO_MAX_SBALES_PER_REQ     \
-	(ZFCP_QDIO_MAX_SBALS_PER_REQ * ZFCP_QDIO_MAX_SBALES_PER_SBAL - 2)
 
 /**
  * struct zfcp_qdio - basic qdio data structure
@@ -39,7 +30,12 @@
  * @req_q_util: used for accounting
  * @req_q_full: queue full incidents
  * @req_q_wq: used to wait for SBAL availability
+ * @irq_tasklet: used for QDIO interrupt processing
+ * @request_tasklet: used for Request Queue completion processing
+ * @request_timer: used to trigger the Request Queue completion processing
  * @adapter: adapter used in conjunction with this qdio structure
+ * @max_sbale_per_sbal: qdio limit per sbal
+ * @max_sbale_per_req: qdio limit per request
  */
 struct zfcp_qdio {
 	struct qdio_buffer	*res_q[QDIO_MAX_BUFFERS_PER_Q];
@@ -52,7 +48,12 @@ struct zfcp_qdio {
 	u64			req_q_util;
 	atomic_t		req_q_full;
 	wait_queue_head_t	req_q_wq;
+	struct tasklet_struct	irq_tasklet;
+	struct tasklet_struct	request_tasklet;
+	struct timer_list	request_timer;
 	struct zfcp_adapter	*adapter;
+	u16			max_sbale_per_sbal;
+	u16			max_sbale_per_req;
 };
 
 /**
@@ -63,24 +64,22 @@ struct zfcp_qdio {
  * @sbal_last: last sbal for this request
  * @sbal_limit: last possible sbal for this request
  * @sbale_curr: current sbale at creation of this request
- * @sbal_response: sbal used in interrupt
  * @qdio_outb_usage: usage of outbound queue
  */
 struct zfcp_qdio_req {
-	u32	sbtype;
+	u8	sbtype;
 	u8	sbal_number;
 	u8	sbal_first;
 	u8	sbal_last;
 	u8	sbal_limit;
 	u8	sbale_curr;
-	u8	sbal_response;
 	u16	qdio_outb_usage;
 };
 
 /**
  * zfcp_qdio_sbale_req - return pointer to sbale on req_q for a request
  * @qdio: pointer to struct zfcp_qdio
- * @q_rec: pointer to struct zfcp_qdio_req
+ * @q_req: pointer to struct zfcp_qdio_req
  * Returns: pointer to qdio_buffer_element (sbale) structure
  */
 static inline struct qdio_buffer_element *
@@ -92,7 +91,7 @@ zfcp_qdio_sbale_req(struct zfcp_qdio *qdio, struct zfcp_qdio_req *q_req)
 /**
  * zfcp_qdio_sbale_curr - return current sbale on req_q for a request
  * @qdio: pointer to struct zfcp_qdio
- * @fsf_req: pointer to struct zfcp_fsf_req
+ * @q_req: pointer to struct zfcp_qdio_req
  * Returns: pointer to qdio_buffer_element (sbale) structure
  */
 static inline struct qdio_buffer_element *
@@ -116,7 +115,7 @@ zfcp_qdio_sbale_curr(struct zfcp_qdio *qdio, struct zfcp_qdio_req *q_req)
  */
 static inline
 void zfcp_qdio_req_init(struct zfcp_qdio *qdio, struct zfcp_qdio_req *q_req,
-			unsigned long req_id, u32 sbtype, void *data, u32 len)
+			unsigned long req_id, u8 sbtype, void *data, u32 len)
 {
 	struct qdio_buffer_element *sbale;
 	int count = min(atomic_read(&qdio->req_q_free),
@@ -130,13 +129,14 @@ void zfcp_qdio_req_init(struct zfcp_qdio *qdio, struct zfcp_qdio_req *q_req,
 					% QDIO_MAX_BUFFERS_PER_Q;
 
 	sbale = zfcp_qdio_sbale_req(qdio, q_req);
-	sbale->addr = (void *) req_id;
-	sbale->flags = SBAL_FLAGS0_COMMAND | sbtype;
+	sbale->addr = req_id;
+	sbale->eflags = 0;
+	sbale->sflags = SBAL_SFLAGS0_COMMAND | sbtype;
 
 	if (unlikely(!data))
 		return;
 	sbale++;
-	sbale->addr = data;
+	sbale->addr = virt_to_phys(data);
 	sbale->length = len;
 }
 
@@ -144,6 +144,8 @@ void zfcp_qdio_req_init(struct zfcp_qdio *qdio, struct zfcp_qdio_req *q_req,
  * zfcp_qdio_fill_next - Fill next sbale, only for single sbal requests
  * @qdio: pointer to struct zfcp_qdio
  * @q_req: pointer to struct zfcp_queue_req
+ * @data: pointer to data
+ * @len: length of data
  *
  * This is only required for single sbal requests, calling it when
  * wrapping around to the next sbal is a bug.
@@ -154,10 +156,10 @@ void zfcp_qdio_fill_next(struct zfcp_qdio *qdio, struct zfcp_qdio_req *q_req,
 {
 	struct qdio_buffer_element *sbale;
 
-	BUG_ON(q_req->sbale_curr == ZFCP_QDIO_LAST_SBALE_PER_SBAL);
+	BUG_ON(q_req->sbale_curr == qdio->max_sbale_per_sbal - 1);
 	q_req->sbale_curr++;
 	sbale = zfcp_qdio_sbale_curr(qdio, q_req);
-	sbale->addr = data;
+	sbale->addr = virt_to_phys(data);
 	sbale->length = len;
 }
 
@@ -173,7 +175,7 @@ void zfcp_qdio_set_sbale_last(struct zfcp_qdio *qdio,
 	struct qdio_buffer_element *sbale;
 
 	sbale = zfcp_qdio_sbale_curr(qdio, q_req);
-	sbale->flags |= SBAL_FLAGS_LAST_ENTRY;
+	sbale->eflags |= SBAL_EFLAGS_LAST_ENTRY;
 }
 
 /**
@@ -191,12 +193,14 @@ int zfcp_qdio_sg_one_sbale(struct scatterlist *sg)
 
 /**
  * zfcp_qdio_skip_to_last_sbale - skip to last sbale in sbal
+ * @qdio: pointer to struct zfcp_qdio
  * @q_req: The current zfcp_qdio_req
  */
 static inline
-void zfcp_qdio_skip_to_last_sbale(struct zfcp_qdio_req *q_req)
+void zfcp_qdio_skip_to_last_sbale(struct zfcp_qdio *qdio,
+				  struct zfcp_qdio_req *q_req)
 {
-	q_req->sbale_curr = ZFCP_QDIO_LAST_SBALE_PER_SBAL;
+	q_req->sbale_curr = qdio->max_sbale_per_sbal - 1;
 }
 
 /**
@@ -227,8 +231,37 @@ void zfcp_qdio_set_data_div(struct zfcp_qdio *qdio,
 {
 	struct qdio_buffer_element *sbale;
 
-	sbale = &qdio->req_q[q_req->sbal_first]->element[0];
+	sbale = qdio->req_q[q_req->sbal_first]->element;
 	sbale->length = count;
+}
+
+/**
+ * zfcp_qdio_real_bytes - count bytes used
+ * @sg: pointer to struct scatterlist
+ */
+static inline
+unsigned int zfcp_qdio_real_bytes(struct scatterlist *sg)
+{
+	unsigned int real_bytes = 0;
+
+	for (; sg; sg = sg_next(sg))
+		real_bytes += sg->length;
+
+	return real_bytes;
+}
+
+/**
+ * zfcp_qdio_set_scount - set SBAL count value
+ * @qdio: pointer to struct zfcp_qdio
+ * @q_req: The current zfcp_qdio_req
+ */
+static inline
+void zfcp_qdio_set_scount(struct zfcp_qdio *qdio, struct zfcp_qdio_req *q_req)
+{
+	struct qdio_buffer_element *sbale;
+
+	sbale = qdio->req_q[q_req->sbal_first]->element;
+	sbale->scount = q_req->sbal_number - 1;
 }
 
 #endif /* ZFCP_QDIO_H */

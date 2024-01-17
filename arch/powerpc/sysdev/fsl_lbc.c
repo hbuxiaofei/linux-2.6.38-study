@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Freescale LBC and UPM routines.
  *
@@ -7,29 +8,27 @@
  * Author: Anton Vorontsov <avorontsov@ru.mvista.com>
  * Author: Jack Lan <Jack.Lan@freescale.com>
  * Author: Roy Zang <tie-fei.zang@freescale.com>
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
  */
 
 #include <linux/init.h>
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/kernel.h>
 #include <linux/compiler.h>
 #include <linux/spinlock.h>
 #include <linux/types.h>
 #include <linux/io.h>
 #include <linux/of.h>
+#include <linux/of_address.h>
+#include <linux/of_irq.h>
 #include <linux/slab.h>
+#include <linux/sched.h>
 #include <linux/platform_device.h>
 #include <linux/interrupt.h>
 #include <linux/mod_devicetable.h>
-#include <asm/prom.h>
+#include <linux/syscore_ops.h>
 #include <asm/fsl_lbc.h>
 
-static spinlock_t fsl_lbc_lock = __SPIN_LOCK_UNLOCKED(fsl_lbc_lock);
+static DEFINE_SPINLOCK(fsl_lbc_lock);
 struct fsl_lbc_ctrl *fsl_lbc_ctrl_dev;
 EXPORT_SYMBOL(fsl_lbc_ctrl_dev);
 
@@ -39,7 +38,7 @@ EXPORT_SYMBOL(fsl_lbc_ctrl_dev);
  *
  * This function converts a base address of lbc into the right format for the
  * BR register. If the SOC has eLBC then it returns 32bit physical address
- * else it convers a 34bit local bus physical address to correct format of
+ * else it converts a 34bit local bus physical address to correct format of
  * 32bit address for BR register (Example: MPC8641).
  */
 u32 fsl_lbc_addr(phys_addr_t addr_base)
@@ -73,8 +72,8 @@ int fsl_lbc_find(phys_addr_t addr_base)
 
 	lbc = fsl_lbc_ctrl_dev->regs;
 	for (i = 0; i < ARRAY_SIZE(lbc->bank); i++) {
-		__be32 br = in_be32(&lbc->bank[i].br);
-		__be32 or = in_be32(&lbc->bank[i].or);
+		u32 br = in_be32(&lbc->bank[i].br);
+		u32 or = in_be32(&lbc->bank[i].or);
 
 		if (br & BR_V && (br & or & BR_BA) == fsl_lbc_addr(addr_base))
 			return i;
@@ -96,7 +95,7 @@ EXPORT_SYMBOL(fsl_lbc_find);
 int fsl_upm_find(phys_addr_t addr_base, struct fsl_upm *upm)
 {
 	int bank;
-	__be32 br;
+	u32 br;
 	struct fsl_lbc_regs __iomem *lbc;
 
 	bank = fsl_lbc_find(addr_base);
@@ -184,7 +183,8 @@ int fsl_upm_run_pattern(struct fsl_upm *upm, void __iomem *io_base, u32 mar)
 }
 EXPORT_SYMBOL(fsl_upm_run_pattern);
 
-static int __devinit fsl_lbc_ctrl_init(struct fsl_lbc_ctrl *ctrl)
+static int fsl_lbc_ctrl_init(struct fsl_lbc_ctrl *ctrl,
+			     struct device_node *node)
 {
 	struct fsl_lbc_regs __iomem *lbc = ctrl->regs;
 
@@ -195,8 +195,9 @@ static int __devinit fsl_lbc_ctrl_init(struct fsl_lbc_ctrl *ctrl)
 	out_be32(&lbc->lteccr, LTECCR_CLEAR);
 	out_be32(&lbc->ltedr, LTEDR_ENABLE);
 
-	/* Enable interrupts for any detected events */
-	out_be32(&lbc->lteir, LTEIR_ENABLE);
+	/* Set the monitor timeout value to the maximum for erratum A001 */
+	if (of_device_is_compatible(node, "fsl,elbc"))
+		clrsetbits_be32(&lbc->lbcr, LBCR_BMT, LBCR_BMTPS);
 
 	return 0;
 }
@@ -211,10 +212,14 @@ static irqreturn_t fsl_lbc_ctrl_irq(int irqno, void *data)
 	struct fsl_lbc_ctrl *ctrl = data;
 	struct fsl_lbc_regs __iomem *lbc = ctrl->regs;
 	u32 status;
+	unsigned long flags;
 
+	spin_lock_irqsave(&fsl_lbc_lock, flags);
 	status = in_be32(&lbc->ltesr);
-	if (!status)
+	if (!status) {
+		spin_unlock_irqrestore(&fsl_lbc_lock, flags);
 		return IRQ_NONE;
+	}
 
 	out_be32(&lbc->ltesr, LTESR_CLEAR);
 	out_be32(&lbc->lteatr, 0);
@@ -236,8 +241,6 @@ static irqreturn_t fsl_lbc_ctrl_irq(int irqno, void *data)
 	if (status & LTESR_CS)
 		dev_err(ctrl->dev, "Chip select error: "
 			"LTESR 0x%08X\n", status);
-	if (status & LTESR_UPM)
-		;
 	if (status & LTESR_FCT) {
 		dev_err(ctrl->dev, "FCM command time-out: "
 			"LTESR 0x%08X\n", status);
@@ -257,6 +260,7 @@ static irqreturn_t fsl_lbc_ctrl_irq(int irqno, void *data)
 	if (status & ~LTESR_MASK)
 		dev_err(ctrl->dev, "Unknown error: "
 			"LTESR 0x%08X\n", status);
+	spin_unlock_irqrestore(&fsl_lbc_lock, flags);
 	return IRQ_HANDLED;
 }
 
@@ -270,7 +274,7 @@ static irqreturn_t fsl_lbc_ctrl_irq(int irqno, void *data)
  * in the chip probe function.
 */
 
-static int __devinit fsl_lbc_ctrl_probe(struct platform_device *dev)
+static int fsl_lbc_ctrl_probe(struct platform_device *dev)
 {
 	int ret;
 
@@ -295,8 +299,8 @@ static int __devinit fsl_lbc_ctrl_probe(struct platform_device *dev)
 		goto err;
 	}
 
-	fsl_lbc_ctrl_dev->irq = irq_of_parse_and_map(dev->dev.of_node, 0);
-	if (fsl_lbc_ctrl_dev->irq == NO_IRQ) {
+	fsl_lbc_ctrl_dev->irq[0] = irq_of_parse_and_map(dev->dev.of_node, 0);
+	if (!fsl_lbc_ctrl_dev->irq[0]) {
 		dev_err(&dev->dev, "failed to get irq resource\n");
 		ret = -ENODEV;
 		goto err;
@@ -304,26 +308,96 @@ static int __devinit fsl_lbc_ctrl_probe(struct platform_device *dev)
 
 	fsl_lbc_ctrl_dev->dev = &dev->dev;
 
-	ret = fsl_lbc_ctrl_init(fsl_lbc_ctrl_dev);
+	ret = fsl_lbc_ctrl_init(fsl_lbc_ctrl_dev, dev->dev.of_node);
 	if (ret < 0)
 		goto err;
 
-	ret = request_irq(fsl_lbc_ctrl_dev->irq, fsl_lbc_ctrl_irq, 0,
+	ret = request_irq(fsl_lbc_ctrl_dev->irq[0], fsl_lbc_ctrl_irq, 0,
 				"fsl-lbc", fsl_lbc_ctrl_dev);
 	if (ret != 0) {
 		dev_err(&dev->dev, "failed to install irq (%d)\n",
-			fsl_lbc_ctrl_dev->irq);
-		ret = fsl_lbc_ctrl_dev->irq;
+			fsl_lbc_ctrl_dev->irq[0]);
+		ret = fsl_lbc_ctrl_dev->irq[0];
 		goto err;
 	}
 
+	fsl_lbc_ctrl_dev->irq[1] = irq_of_parse_and_map(dev->dev.of_node, 1);
+	if (fsl_lbc_ctrl_dev->irq[1]) {
+		ret = request_irq(fsl_lbc_ctrl_dev->irq[1], fsl_lbc_ctrl_irq,
+				IRQF_SHARED, "fsl-lbc-err", fsl_lbc_ctrl_dev);
+		if (ret) {
+			dev_err(&dev->dev, "failed to install irq (%d)\n",
+					fsl_lbc_ctrl_dev->irq[1]);
+			ret = fsl_lbc_ctrl_dev->irq[1];
+			goto err1;
+		}
+	}
+
+	/* Enable interrupts for any detected events */
+	out_be32(&fsl_lbc_ctrl_dev->regs->lteir, LTEIR_ENABLE);
+
 	return 0;
 
+err1:
+	free_irq(fsl_lbc_ctrl_dev->irq[0], fsl_lbc_ctrl_dev);
 err:
 	iounmap(fsl_lbc_ctrl_dev->regs);
 	kfree(fsl_lbc_ctrl_dev);
+	fsl_lbc_ctrl_dev = NULL;
 	return ret;
 }
+
+#ifdef CONFIG_SUSPEND
+
+/* save lbc registers */
+static int fsl_lbc_syscore_suspend(void)
+{
+	struct fsl_lbc_ctrl *ctrl;
+	struct fsl_lbc_regs __iomem *lbc;
+
+	ctrl = fsl_lbc_ctrl_dev;
+	if (!ctrl)
+		goto out;
+
+	lbc = ctrl->regs;
+	if (!lbc)
+		goto out;
+
+	ctrl->saved_regs = kmalloc(sizeof(struct fsl_lbc_regs), GFP_KERNEL);
+	if (!ctrl->saved_regs)
+		return -ENOMEM;
+
+	_memcpy_fromio(ctrl->saved_regs, lbc, sizeof(struct fsl_lbc_regs));
+
+out:
+	return 0;
+}
+
+/* restore lbc registers */
+static void fsl_lbc_syscore_resume(void)
+{
+	struct fsl_lbc_ctrl *ctrl;
+	struct fsl_lbc_regs __iomem *lbc;
+
+	ctrl = fsl_lbc_ctrl_dev;
+	if (!ctrl)
+		goto out;
+
+	lbc = ctrl->regs;
+	if (!lbc)
+		goto out;
+
+	if (ctrl->saved_regs) {
+		_memcpy_toio(lbc, ctrl->saved_regs,
+				sizeof(struct fsl_lbc_regs));
+		kfree(ctrl->saved_regs);
+		ctrl->saved_regs = NULL;
+	}
+
+out:
+	return;
+}
+#endif /* CONFIG_SUSPEND */
 
 static const struct of_device_id fsl_lbc_match[] = {
 	{ .compatible = "fsl,elbc", },
@@ -332,6 +406,13 @@ static const struct of_device_id fsl_lbc_match[] = {
 	{ .compatible = "fsl,pq2pro-localbus", },
 	{},
 };
+
+#ifdef CONFIG_SUSPEND
+static struct syscore_ops lbc_syscore_pm_ops = {
+	.suspend = fsl_lbc_syscore_suspend,
+	.resume = fsl_lbc_syscore_resume,
+};
+#endif
 
 static struct platform_driver fsl_lbc_ctrl_driver = {
 	.driver = {
@@ -343,6 +424,9 @@ static struct platform_driver fsl_lbc_ctrl_driver = {
 
 static int __init fsl_lbc_init(void)
 {
+#ifdef CONFIG_SUSPEND
+	register_syscore_ops(&lbc_syscore_pm_ops);
+#endif
 	return platform_driver_register(&fsl_lbc_ctrl_driver);
 }
-module_init(fsl_lbc_init);
+subsys_initcall(fsl_lbc_init);

@@ -1,7 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (C) ST-Ericsson AB 2010
- * Author:	Sjur Brendeland/sjur.brandeland@stericsson.com
- * License terms: GNU General Public License (GPL) version 2
+ * Author:	Sjur Brendeland
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ":%s(): " fmt, __func__
@@ -10,25 +10,27 @@
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/slab.h>
+#include <linux/module.h>
+#include <linux/pkt_sched.h>
 #include <net/caif/caif_layer.h>
 #include <net/caif/cfsrvl.h>
 #include <net/caif/cfpkt.h>
+#include <net/caif/caif_dev.h>
 
 #define SRVL_CTRL_PKT_SIZE 1
 #define SRVL_FLOW_OFF 0x81
 #define SRVL_FLOW_ON  0x80
 #define SRVL_SET_PIN  0x82
-#define SRVL_CTRL_PKT_SIZE 1
 
 #define container_obj(layr) container_of(layr, struct cfsrvl, layer)
 
 static void cfservl_ctrlcmd(struct cflayer *layr, enum caif_ctrlcmd ctrl,
-				int phyid)
+			    int phyid)
 {
 	struct cfsrvl *service = container_obj(layr);
 
-	caif_assert(layr->up != NULL);
-	caif_assert(layr->up->ctrlcmd != NULL);
+	if (layr->up == NULL || layr->up->ctrlcmd == NULL)
+		return;
 
 	switch (ctrl) {
 	case CAIF_CTRLCMD_INIT_RSP:
@@ -107,10 +109,8 @@ static int cfservl_modemcmd(struct cflayer *layr, enum caif_modemcmd ctrl)
 			struct caif_payload_info *info;
 			u8 flow_on = SRVL_FLOW_ON;
 			pkt = cfpkt_create(SRVL_CTRL_PKT_SIZE);
-			if (!pkt) {
-				pr_warn("Out of memory\n");
+			if (!pkt)
 				return -ENOMEM;
-			}
 
 			if (cfpkt_add_head(pkt, &flow_on, 1) < 0) {
 				pr_err("Packet is erroneous!\n");
@@ -121,6 +121,7 @@ static int cfservl_modemcmd(struct cflayer *layr, enum caif_modemcmd ctrl)
 			info->channel_id = service->layer.id;
 			info->hdr_len = 1;
 			info->dev_info = &service->dev_info;
+			cfpkt_set_prio(pkt, TC_PRIO_CONTROL);
 			return layr->dn->transmit(layr->dn, pkt);
 		}
 	case CAIF_MODEMCMD_FLOW_OFF_REQ:
@@ -129,10 +130,8 @@ static int cfservl_modemcmd(struct cflayer *layr, enum caif_modemcmd ctrl)
 			struct caif_payload_info *info;
 			u8 flow_off = SRVL_FLOW_OFF;
 			pkt = cfpkt_create(SRVL_CTRL_PKT_SIZE);
-			if (!pkt) {
-				pr_warn("Out of memory\n");
+			if (!pkt)
 				return -ENOMEM;
-			}
 
 			if (cfpkt_add_head(pkt, &flow_off, 1) < 0) {
 				pr_err("Packet is erroneous!\n");
@@ -143,6 +142,7 @@ static int cfservl_modemcmd(struct cflayer *layr, enum caif_modemcmd ctrl)
 			info->channel_id = service->layer.id;
 			info->hdr_len = 1;
 			info->dev_info = &service->dev_info;
+			cfpkt_set_prio(pkt, TC_PRIO_CONTROL);
 			return layr->dn->transmit(layr->dn, pkt);
 		}
 	default:
@@ -151,22 +151,16 @@ static int cfservl_modemcmd(struct cflayer *layr, enum caif_modemcmd ctrl)
 	return -EINVAL;
 }
 
-void cfservl_destroy(struct cflayer *layer)
+static void cfsrvl_release(struct cflayer *layer)
 {
-	kfree(layer);
-}
-
-void cfsrvl_release(struct kref *kref)
-{
-	struct cfsrvl *service = container_of(kref, struct cfsrvl, ref);
+	struct cfsrvl *service = container_of(layer, struct cfsrvl, layer);
 	kfree(service);
 }
 
 void cfsrvl_init(struct cfsrvl *service,
-			u8 channel_id,
-			struct dev_info *dev_info,
-			bool supports_flowctrl
-			)
+		 u8 channel_id,
+		 struct dev_info *dev_info,
+		 bool supports_flowctrl)
 {
 	caif_assert(offsetof(struct cfsrvl, layer) == 0);
 	service->open = false;
@@ -178,22 +172,17 @@ void cfsrvl_init(struct cfsrvl *service,
 	service->dev_info = *dev_info;
 	service->supports_flowctrl = supports_flowctrl;
 	service->release = cfsrvl_release;
-	kref_init(&service->ref);
 }
-
 
 bool cfsrvl_ready(struct cfsrvl *service, int *err)
 {
-	if (service->open && service->modem_flow_on && service->phy_flow_on)
-		return true;
 	if (!service->open) {
 		*err = -ENOTCONN;
 		return false;
 	}
-	caif_assert(!(service->modem_flow_on && service->phy_flow_on));
-	*err = -EAGAIN;
-	return false;
+	return true;
 }
+
 u8 cfsrvl_getphyid(struct cflayer *layer)
 {
 	struct cfsrvl *servl = container_obj(layer);
@@ -205,3 +194,27 @@ bool cfsrvl_phyid_match(struct cflayer *layer, int phyid)
 	struct cfsrvl *servl = container_obj(layer);
 	return servl->dev_info.id == phyid;
 }
+
+void caif_free_client(struct cflayer *adap_layer)
+{
+	struct cfsrvl *servl;
+	if (adap_layer == NULL || adap_layer->dn == NULL)
+		return;
+	servl = container_obj(adap_layer->dn);
+	servl->release(&servl->layer);
+}
+EXPORT_SYMBOL(caif_free_client);
+
+void caif_client_register_refcnt(struct cflayer *adapt_layer,
+				 void (*hold)(struct cflayer *lyr),
+				 void (*put)(struct cflayer *lyr))
+{
+	struct cfsrvl *service;
+
+	if (WARN_ON(adapt_layer == NULL || adapt_layer->dn == NULL))
+		return;
+	service = container_of(adapt_layer->dn, struct cfsrvl, layer);
+	service->hold = hold;
+	service->put = put;
+}
+EXPORT_SYMBOL(caif_client_register_refcnt);

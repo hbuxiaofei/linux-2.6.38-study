@@ -14,9 +14,10 @@
 #include <linux/list.h>
 #include <linux/radix-tree.h>
 #include <linux/spinlock.h>
+#include <linux/export.h>
 #include "internals.h"
 
-static struct intc_map_entry intc_irq_xlate[NR_IRQS];
+static struct intc_map_entry intc_irq_xlate[INTC_NR_IRQS];
 
 struct intc_virq_list {
 	unsigned int irq;
@@ -82,47 +83,50 @@ EXPORT_SYMBOL_GPL(intc_irq_lookup);
 
 static int add_virq_to_pirq(unsigned int irq, unsigned int virq)
 {
-	struct intc_virq_list **last, *entry;
-	struct irq_data *data = irq_get_irq_data(irq);
+	struct intc_virq_list *entry;
+	struct intc_virq_list **last = NULL;
 
 	/* scan for duplicates */
-	last = (struct intc_virq_list **)&data->handler_data;
-	for_each_virq(entry, data->handler_data) {
+	for_each_virq(entry, irq_get_handler_data(irq)) {
 		if (entry->irq == virq)
 			return 0;
 		last = &entry->next;
 	}
 
 	entry = kzalloc(sizeof(struct intc_virq_list), GFP_ATOMIC);
-	if (!entry) {
-		pr_err("can't allocate VIRQ mapping for %d\n", virq);
+	if (!entry)
 		return -ENOMEM;
-	}
 
 	entry->irq = virq;
 
-	*last = entry;
+	if (last)
+		*last = entry;
+	else
+		irq_set_handler_data(irq, entry);
 
 	return 0;
 }
 
-static void intc_virq_handler(unsigned int irq, struct irq_desc *desc)
+static void intc_virq_handler(struct irq_desc *desc)
 {
-	struct irq_data *data = irq_get_irq_data(irq);
+	unsigned int irq = irq_desc_get_irq(desc);
+	struct irq_data *data = irq_desc_get_irq_data(desc);
 	struct irq_chip *chip = irq_data_get_irq_chip(data);
-	struct intc_virq_list *entry, *vlist = irq_data_get_irq_data(data);
+	struct intc_virq_list *entry, *vlist = irq_data_get_irq_handler_data(data);
 	struct intc_desc_int *d = get_intc_desc(irq);
 
 	chip->irq_mask_ack(data);
 
 	for_each_virq(entry, vlist) {
 		unsigned long addr, handle;
+		struct irq_desc *vdesc = irq_to_desc(entry->irq);
 
-		handle = (unsigned long)get_irq_data(entry->irq);
-		addr = INTC_REG(d, _INTC_ADDR_E(handle), 0);
-
-		if (intc_reg_fns[_INTC_FN(handle)](addr, handle, 0))
-			generic_handle_irq(entry->irq);
+		if (vdesc) {
+			handle = (unsigned long)irq_desc_get_handler_data(vdesc);
+			addr = INTC_REG(d, _INTC_ADDR_E(handle), 0);
+			if (intc_reg_fns[_INTC_FN(handle)](addr, handle, 0))
+				generic_handle_irq_desc(vdesc);
+		}
 	}
 
 	chip->irq_unmask(data);
@@ -218,29 +222,37 @@ restart:
 		if (radix_tree_deref_retry(entry))
 			goto restart;
 
-		irq = create_irq();
+		irq = irq_alloc_desc(numa_node_id());
 		if (unlikely(irq < 0)) {
 			pr_err("no more free IRQs, bailing..\n");
 			break;
 		}
+
+		activate_irq(irq);
 
 		pr_info("Setting up a chained VIRQ from %d -> %d\n",
 			irq, entry->pirq);
 
 		intc_irq_xlate_set(irq, entry->enum_id, d);
 
-		set_irq_chip_and_handler_name(irq, get_irq_chip(entry->pirq),
+		irq_set_chip_and_handler_name(irq, irq_get_chip(entry->pirq),
 					      handle_simple_irq, "virq");
-		set_irq_chip_data(irq, get_irq_chip_data(entry->pirq));
+		irq_set_chip_data(irq, irq_get_chip_data(entry->pirq));
 
-		set_irq_data(irq, (void *)entry->handle);
+		irq_set_handler_data(irq, (void *)entry->handle);
 
-		set_irq_chained_handler(entry->pirq, intc_virq_handler);
+		/*
+		 * Set the virtual IRQ as non-threadable.
+		 */
+		irq_set_nothread(irq);
+
+		/* Set handler data before installing the handler */
 		add_virq_to_pirq(entry->pirq, irq);
+		irq_set_chained_handler(entry->pirq, intc_virq_handler);
 
 		radix_tree_tag_clear(&d->tree, entry->enum_id,
 				     INTC_TAG_VIRQ_NEEDS_ALLOC);
-		radix_tree_replace_slot((void **)entries[i],
+		radix_tree_replace_slot(&d->tree, (void **)entries[i],
 					&intc_irq_xlate[irq]);
 	}
 

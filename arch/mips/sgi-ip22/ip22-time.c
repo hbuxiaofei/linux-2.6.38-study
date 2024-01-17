@@ -10,6 +10,7 @@
  * Copyright (C) 2003, 06 Ralf Baechle (ralf@linux-mips.org)
  */
 #include <linux/bcd.h>
+#include <linux/i8253.h>
 #include <linux/init.h>
 #include <linux/irq.h>
 #include <linux/kernel.h>
@@ -20,7 +21,6 @@
 
 #include <asm/cpu.h>
 #include <asm/mipsregs.h>
-#include <asm/i8253.h>
 #include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/time.h>
@@ -32,7 +32,7 @@
 static unsigned long dosample(void)
 {
 	u32 ct0, ct1;
-	u8 msb, lsb;
+	u8 msb;
 
 	/* Start the counter. */
 	sgint->tcword = (SGINT_TCWORD_CNT2 | SGINT_TCWORD_CALL |
@@ -46,7 +46,7 @@ static unsigned long dosample(void)
 	/* Latch and spin until top byte of counter2 is zero */
 	do {
 		writeb(SGINT_TCWORD_CNT2 | SGINT_TCWORD_CLAT, &sgint->tcword);
-		lsb = readb(&sgint->tcnt2);
+		(void) readb(&sgint->tcnt2);
 		msb = readb(&sgint->tcnt2);
 		ct1 = read_c0_count();
 	} while (msb);
@@ -123,7 +123,7 @@ void __irq_entry indy_8254timer_irq(void)
 	char c;
 
 	irq_enter();
-	kstat_incr_irqs_this_cpu(irq, irq_to_desc(irq));
+	kstat_incr_irq_this_cpu(irq);
 	printk(KERN_ALERT "Oops, got 8254 interrupt.\n");
 	ArcRead(0, &c, 1, &cnt);
 	ArcEnterInteractiveMode();

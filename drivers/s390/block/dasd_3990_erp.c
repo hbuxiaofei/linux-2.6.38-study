@@ -1,9 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
- * File...........: linux/drivers/s390/block/dasd_3990_erp.c
  * Author(s)......: Horst  Hummel    <Horst.Hummel@de.ibm.com>
  *		    Holger Smolinski <Holger.Smolinski@de.ibm.com>
  * Bugreports.to..: <Linux390@de.ibm.com>
- * (C) IBM Corporation, IBM Deutschland Entwicklung GmbH, 2000, 2001
+ * Copyright IBM Corp. 2000, 2001
  *
  */
 
@@ -153,7 +153,7 @@ dasd_3990_erp_alternate_path(struct dasd_ccw_req * erp)
 	opm = ccw_device_get_path_mask(device->cdev);
 	spin_unlock_irqrestore(get_ccwdev_lock(device->cdev), flags);
 	if (erp->lpm == 0)
-		erp->lpm = device->path_data.opm &
+		erp->lpm = dasd_path_get_opm(device) &
 			~(erp->irb.esw.esw0.sublog.lpum);
 	else
 		erp->lpm &= ~(erp->irb.esw.esw0.sublog.lpum);
@@ -201,7 +201,7 @@ dasd_3990_erp_DCTL(struct dasd_ccw_req * erp, char modifier)
 	struct ccw1 *ccw;
 	struct dasd_ccw_req *dctl_cqr;
 
-	dctl_cqr = dasd_alloc_erp_request((char *) &erp->magic, 1,
+	dctl_cqr = dasd_alloc_erp_request(erp->magic, 1,
 					  sizeof(struct DCTL_data),
 					  device);
 	if (IS_ERR(dctl_cqr)) {
@@ -230,7 +230,7 @@ dasd_3990_erp_DCTL(struct dasd_ccw_req * erp, char modifier)
 	dctl_cqr->expires = 5 * 60 * HZ;
 	dctl_cqr->retries = 2;
 
-	dctl_cqr->buildclk = get_clock();
+	dctl_cqr->buildclk = get_tod_clock();
 
 	dctl_cqr->status = DASD_CQR_FILLED;
 
@@ -274,7 +274,7 @@ static struct dasd_ccw_req *dasd_3990_erp_action_1(struct dasd_ccw_req *erp)
 	    !test_bit(DASD_CQR_VERIFY_PATH, &erp->flags)) {
 		erp->status = DASD_CQR_FILLED;
 		erp->retries = 10;
-		erp->lpm = erp->startdev->path_data.opm;
+		erp->lpm = dasd_path_get_opm(erp->startdev);
 		erp->function = dasd_3990_erp_action_1_sec;
 	}
 	return erp;
@@ -675,7 +675,7 @@ dasd_3990_handle_env_data(struct dasd_ccw_req * erp, char *sense)
 			break;
 		case 0x0D:
 			dev_warn(&device->cdev->dev,
-				    "FORMAT 4 - No syn byte in count "
+				    "FORMAT 4 - No sync byte in count "
 				    "address area; offset active\n");
 			break;
 		case 0x0E:
@@ -685,7 +685,7 @@ dasd_3990_handle_env_data(struct dasd_ccw_req * erp, char *sense)
 			break;
 		case 0x0F:
 			dev_warn(&device->cdev->dev,
-				    "FORMAT 4 - No syn byte in data area; "
+				    "FORMAT 4 - No sync byte in data area; "
 				    "offset active\n");
 			break;
 		default:
@@ -1000,7 +1000,7 @@ dasd_3990_handle_env_data(struct dasd_ccw_req * erp, char *sense)
 			break;
 		default:
 			dev_warn(&device->cdev->dev,
-				    "FORMAT D - Reserved\n");
+				    "FORMAT F - Reserved\n");
 		}
 		break;
 
@@ -1050,11 +1050,17 @@ dasd_3990_erp_com_rej(struct dasd_ccw_req * erp, char *sense)
 		dev_err(&device->cdev->dev, "An I/O request was rejected"
 			" because writing is inhibited\n");
 		erp = dasd_3990_erp_cleanup(erp, DASD_CQR_FAILED);
+	} else if (sense[7] & SNS7_INVALID_ON_SEC) {
+		dev_err(&device->cdev->dev, "An I/O request was rejected on a copy pair secondary device\n");
+		/* suppress dump of sense data for this error */
+		set_bit(DASD_CQR_SUPPRESS_CR, &erp->refers->flags);
+		erp = dasd_3990_erp_cleanup(erp, DASD_CQR_FAILED);
 	} else {
 		/* fatal error -  set status to FAILED
 		   internal error 09 - Command Reject */
-		dev_err(&device->cdev->dev, "An error occurred in the DASD "
-			"device driver, reason=%s\n", "09");
+		if (!test_bit(DASD_CQR_SUPPRESS_CR, &erp->flags))
+			dev_err(&device->cdev->dev,
+				"An error occurred in the DASD device driver, reason=09\n");
 
 		erp = dasd_3990_erp_cleanup(erp, DASD_CQR_FAILED);
 	}
@@ -1368,8 +1374,14 @@ dasd_3990_erp_no_rec(struct dasd_ccw_req * default_erp, char *sense)
 
 	struct dasd_device *device = default_erp->startdev;
 
-	dev_err(&device->cdev->dev,
-		    "The specified record was not found\n");
+	/*
+	 * In some cases the 'No Record Found' error might be expected and
+	 * log messages shouldn't be written then.
+	 * Check if the according suppress bit is set.
+	 */
+	if (!test_bit(DASD_CQR_SUPPRESS_NRF, &default_erp->flags))
+		dev_err(&device->cdev->dev,
+			"The specified record was not found\n");
 
 	return dasd_3990_erp_cleanup(default_erp, DASD_CQR_FAILED);
 
@@ -1394,8 +1406,14 @@ dasd_3990_erp_file_prot(struct dasd_ccw_req * erp)
 
 	struct dasd_device *device = erp->startdev;
 
-	dev_err(&device->cdev->dev, "Accessing the DASD failed because of "
-		"a hardware error\n");
+	/*
+	 * In some cases the 'File Protected' error might be expected and
+	 * log messages shouldn't be written then.
+	 * Check if the according suppress bit is set.
+	 */
+	if (!test_bit(DASD_CQR_SUPPRESS_FP, &erp->flags))
+		dev_err(&device->cdev->dev,
+			"Accessing the DASD failed because of a hardware error\n");
 
 	return dasd_3990_erp_cleanup(erp, DASD_CQR_FAILED);
 
@@ -1639,7 +1657,7 @@ dasd_3990_erp_action_1B_32(struct dasd_ccw_req * default_erp, char *sense)
 	}
 
 	/* Build new ERP request including DE/LO */
-	erp = dasd_alloc_erp_request((char *) &cqr->magic,
+	erp = dasd_alloc_erp_request(cqr->magic,
 				     2 + 1,/* DE/LO + TIC */
 				     sizeof(struct DE_eckd_data) +
 				     sizeof(struct LO_eckd_data), device);
@@ -1718,9 +1736,9 @@ dasd_3990_erp_action_1B_32(struct dasd_ccw_req * default_erp, char *sense)
 	erp->startdev = device;
 	erp->memdev = device;
 	erp->magic = default_erp->magic;
-	erp->expires = 0;
+	erp->expires = default_erp->expires;
 	erp->retries = 256;
-	erp->buildclk = get_clock();
+	erp->buildclk = get_tod_clock();
 	erp->status = DASD_CQR_FILLED;
 
 	/* remove the default erp */
@@ -1915,7 +1933,7 @@ dasd_3990_erp_compound_path(struct dasd_ccw_req * erp, char *sense)
 		    !test_bit(DASD_CQR_VERIFY_PATH, &erp->flags)) {
 			/* reset the lpm and the status to be able to
 			 * try further actions. */
-			erp->lpm = erp->startdev->path_data.opm;
+			erp->lpm = dasd_path_get_opm(erp->startdev);
 			erp->status = DASD_CQR_NEED_ERP;
 		}
 	}
@@ -1974,7 +1992,7 @@ dasd_3990_erp_compound_code(struct dasd_ccw_req * erp, char *sense)
  * DASD_3990_ERP_COMPOUND_CONFIG
  *
  * DESCRIPTION
- *   Handles the compound ERP action for configruation
+ *   Handles the compound ERP action for configuration
  *   dependent error.
  *   Note: duplex handling is not implemented (yet).
  *
@@ -2197,6 +2215,64 @@ dasd_3990_erp_inspect_32(struct dasd_ccw_req * erp, char *sense)
 
 }				/* end dasd_3990_erp_inspect_32 */
 
+static void dasd_3990_erp_disable_path(struct dasd_device *device, __u8 lpum)
+{
+	int pos = pathmask_to_pos(lpum);
+
+	if (!(device->features & DASD_FEATURE_PATH_AUTODISABLE)) {
+		dev_err(&device->cdev->dev,
+			"Path %x.%02x (pathmask %02x) is operational despite excessive IFCCs\n",
+			device->path[pos].cssid, device->path[pos].chpid, lpum);
+		goto out;
+	}
+
+	/* no remaining path, cannot disable */
+	if (!(dasd_path_get_opm(device) & ~lpum)) {
+		dev_err(&device->cdev->dev,
+			"Last path %x.%02x (pathmask %02x) is operational despite excessive IFCCs\n",
+			device->path[pos].cssid, device->path[pos].chpid, lpum);
+		goto out;
+	}
+
+	dev_err(&device->cdev->dev,
+		"Path %x.%02x (pathmask %02x) is disabled - IFCC threshold exceeded\n",
+		device->path[pos].cssid, device->path[pos].chpid, lpum);
+	dasd_path_remove_opm(device, lpum);
+	dasd_path_add_ifccpm(device, lpum);
+
+out:
+	device->path[pos].errorclk = 0;
+	atomic_set(&device->path[pos].error_count, 0);
+}
+
+static void dasd_3990_erp_account_error(struct dasd_ccw_req *erp)
+{
+	struct dasd_device *device = erp->startdev;
+	__u8 lpum = erp->refers->irb.esw.esw1.lpum;
+	int pos = pathmask_to_pos(lpum);
+	unsigned long clk;
+
+	if (!device->path_thrhld)
+		return;
+
+	clk = get_tod_clock();
+	/*
+	 * check if the last error is longer ago than the timeout,
+	 * if so reset error state
+	 */
+	if ((tod_to_ns(clk - device->path[pos].errorclk) / NSEC_PER_SEC)
+	    >= device->path_interval) {
+		atomic_set(&device->path[pos].error_count, 0);
+		device->path[pos].errorclk = 0;
+	}
+	atomic_inc(&device->path[pos].error_count);
+	device->path[pos].errorclk = clk;
+	/* threshold exceeded disable path if possible */
+	if (atomic_read(&device->path[pos].error_count) >=
+	    device->path_thrhld)
+		dasd_3990_erp_disable_path(device, lpum);
+}
+
 /*
  *****************************************************************************
  * main ERP control functions (24 and 32 byte sense)
@@ -2207,7 +2283,7 @@ dasd_3990_erp_inspect_32(struct dasd_ccw_req * erp, char *sense)
  * DASD_3990_ERP_CONTROL_CHECK
  *
  * DESCRIPTION
- *   Does a generic inspection if a control check occured and sets up
+ *   Does a generic inspection if a control check occurred and sets up
  *   the related error recovery procedure
  *
  * PARAMETER
@@ -2226,6 +2302,7 @@ dasd_3990_erp_control_check(struct dasd_ccw_req *erp)
 					   | SCHN_STAT_CHN_CTRL_CHK)) {
 		DBF_DEV_EVENT(DBF_WARNING, device, "%s",
 			    "channel or interface control check");
+		dasd_3990_erp_account_error(erp);
 		erp = dasd_3990_erp_action_4(erp, NULL);
 	}
 	return erp;
@@ -2250,7 +2327,7 @@ dasd_3990_erp_inspect(struct dasd_ccw_req *erp)
 	struct dasd_ccw_req *erp_new = NULL;
 	char *sense;
 
-	/* if this problem occured on an alias retry on base */
+	/* if this problem occurred on an alias retry on base */
 	erp_new = dasd_3990_erp_inspect_alias(erp);
 	if (erp_new)
 		return erp_new;
@@ -2282,7 +2359,7 @@ dasd_3990_erp_inspect(struct dasd_ccw_req *erp)
  * DASD_3990_ERP_ADD_ERP
  *
  * DESCRIPTION
- *   This funtion adds an additional request block (ERP) to the head of
+ *   This function adds an additional request block (ERP) to the head of
  *   the given cqr (or erp).
  *   For a command mode cqr the erp is initialized as an default erp
  *   (retry TIC).
@@ -2316,14 +2393,14 @@ static struct dasd_ccw_req *dasd_3990_erp_add_erp(struct dasd_ccw_req *cqr)
 	}
 
 	/* allocate additional request block */
-	erp = dasd_alloc_erp_request((char *) &cqr->magic,
+	erp = dasd_alloc_erp_request(cqr->magic,
 				     cplength, datasize, device);
 	if (IS_ERR(erp)) {
                 if (cqr->retries <= 0) {
 			DBF_DEV_EVENT(DBF_ERR, device, "%s",
 				    "Unable to allocate ERP request");
 			cqr->status = DASD_CQR_FAILED;
-                        cqr->stopclk = get_clock ();
+			cqr->stopclk = get_tod_clock();
 		} else {
 			DBF_DEV_EVENT(DBF_ERR, device,
                                      "Unable to allocate ERP request "
@@ -2363,9 +2440,9 @@ static struct dasd_ccw_req *dasd_3990_erp_add_erp(struct dasd_ccw_req *cqr)
 	erp->memdev   = device;
 	erp->block    = cqr->block;
 	erp->magic    = cqr->magic;
-	erp->expires  = 0;
+	erp->expires  = cqr->expires;
 	erp->retries  = 256;
-	erp->buildclk = get_clock();
+	erp->buildclk = get_tod_clock();
 	erp->status = DASD_CQR_FILLED;
 
 	return erp;
@@ -2742,6 +2819,16 @@ dasd_3990_erp_action(struct dasd_ccw_req * cqr)
 	} else {
 		/* matching erp found - set all leading erp's to DONE */
 		erp = dasd_3990_erp_handle_match_erp(cqr, erp);
+	}
+
+
+	/*
+	 * For path verification work we need to stick with the path that was
+	 * originally chosen so that the per path configuration data is
+	 * assigned correctly.
+	 */
+	if (test_bit(DASD_CQR_VERIFY_PATH, &erp->flags) && cqr->lpm) {
+		erp->lpm = cqr->lpm;
 	}
 
 	if (device->features & DASD_FEATURE_ERPLOG) {

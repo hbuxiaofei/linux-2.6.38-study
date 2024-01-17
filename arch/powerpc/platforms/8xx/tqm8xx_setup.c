@@ -18,7 +18,6 @@
  */
 
 #include <linux/init.h>
-#include <linux/module.h>
 #include <linux/param.h>
 #include <linux/string.h>
 #include <linux/ioport.h>
@@ -29,6 +28,7 @@
 #include <linux/fs_uart_pd.h>
 #include <linux/fsl_devices.h>
 #include <linux/mii.h>
+#include <linux/of_fdt.h>
 #include <linux/of_platform.h>
 
 #include <asm/delay.h>
@@ -36,21 +36,20 @@
 #include <asm/machdep.h>
 #include <asm/page.h>
 #include <asm/processor.h>
-#include <asm/system.h>
 #include <asm/time.h>
-#include <asm/mpc8xx.h>
 #include <asm/8xx_immap.h>
 #include <asm/cpm1.h>
 #include <asm/fs_pd.h>
 #include <asm/udbg.h>
 
 #include "mpc8xx.h"
+#include "pic.h"
 
 struct cpm_pin {
 	int port, pin, flags;
 };
 
-static struct __initdata cpm_pin tqm8xx_pins[] = {
+static struct cpm_pin tqm8xx_pins[] __initdata = {
 	/* SMC1 */
 	{CPM_PORTB, 24, CPM_PIN_INPUT}, /* RX */
 	{CPM_PORTB, 25, CPM_PIN_INPUT | CPM_PIN_SECONDARY}, /* TX */
@@ -65,7 +64,7 @@ static struct __initdata cpm_pin tqm8xx_pins[] = {
 	{CPM_PORTC, 11, CPM_PIN_INPUT | CPM_PIN_SECONDARY | CPM_PIN_GPIO},
 };
 
-static struct __initdata cpm_pin tqm8xx_fec_pins[] = {
+static struct cpm_pin tqm8xx_fec_pins[] __initdata = {
 	/* MII */
 	{CPM_PORTD, 3, CPM_PIN_OUTPUT},
 	{CPM_PORTD, 4, CPM_PIN_OUTPUT},
@@ -106,6 +105,9 @@ static void __init init_ioports(void)
 	if (dnode == NULL)
 		return;
 	prop = of_find_property(dnode, "ethernet1", &len);
+
+	of_node_put(dnode);
+
 	if (prop == NULL)
 		return;
 
@@ -121,12 +123,10 @@ static void __init tqm8xx_setup_arch(void)
 
 static int __init tqm8xx_probe(void)
 {
-	unsigned long node = of_get_flat_dt_root();
-
-	return of_flat_dt_is_compatible(node, "tqc,tqm8xx");
+	return of_machine_is_compatible("tqc,tqm8xx");
 }
 
-static struct of_device_id __initdata of_bus_ids[] = {
+static const struct of_device_id of_bus_ids[] __initconst = {
 	{ .name = "soc", },
 	{ .name = "cpm", },
 	{ .name = "localbus", },
@@ -146,7 +146,7 @@ define_machine(tqm8xx) {
 	.name			= "TQM8xx",
 	.probe			= tqm8xx_probe,
 	.setup_arch		= tqm8xx_setup_arch,
-	.init_IRQ		= mpc8xx_pics_init,
+	.init_IRQ		= mpc8xx_pic_init,
 	.get_irq		= mpc8xx_get_irq,
 	.restart		= mpc8xx_restart,
 	.calibrate_decr		= mpc8xx_calibrate_decr,

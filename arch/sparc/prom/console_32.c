@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * console.c: Routines that deal with sending and receiving IO
  *            to/from the current console device using the PROM.
@@ -11,7 +12,6 @@
 #include <linux/sched.h>
 #include <asm/openprom.h>
 #include <asm/oplib.h>
-#include <asm/system.h>
 #include <linux/string.h>
 
 extern void restore_current(void);
@@ -38,7 +38,7 @@ static int prom_nbputchar(const char *buf)
 		break;
 	default:
 		break;
-	};
+	}
 	restore_current();
 	spin_unlock_irqrestore(&prom_lock, flags);
 	return i; /* Ugh, we could spin forever on unsupported proms ;( */

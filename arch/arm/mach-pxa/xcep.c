@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*  linux/arch/arm/mach-pxa/xcep.c
  *
  *  Support for the Iskratel Electronics XCEP platform as used in
@@ -8,14 +9,11 @@
  *  Contributions by: Matej Kenda <matej.kenda@i-tech.si>
  *  Created:    June 2006
  *  Copyright:  (C) 2006-2009 Instrumentation Technologies
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License version 2 as
- *  published by the Free Software Foundation.
  */
 
 #include <linux/platform_device.h>
 #include <linux/i2c.h>
+#include <linux/platform_data/i2c-pxa.h>
 #include <linux/smc91x.h>
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/partitions.h>
@@ -26,14 +24,12 @@
 #include <asm/mach/irq.h>
 #include <asm/mach/map.h>
 
-#include <plat/i2c.h>
-
-#include <mach/hardware.h>
-#include <mach/pxa2xx-regs.h>
-#include <mach/mfp-pxa25x.h>
-#include <mach/smemc.h>
+#include "pxa25x.h"
+#include "addr-map.h"
+#include "smemc.h"
 
 #include "generic.h"
+#include "devices.h"
 
 #define XCEP_ETH_PHYS		(PXA_CS3_PHYS + 0x00000300)
 #define XCEP_ETH_PHYS_END	(PXA_CS3_PHYS + 0x000fffff)
@@ -122,7 +118,8 @@ static struct resource smc91x_resources[] = {
 };
 
 static struct smc91x_platdata xcep_smc91x_info = {
-	.flags	= SMC91X_USE_32BIT | SMC91X_NOWAIT | SMC91X_USE_DMA,
+	.flags	= SMC91X_USE_8BIT | SMC91X_USE_16BIT | SMC91X_USE_32BIT |
+		  SMC91X_NOWAIT | SMC91X_USE_DMA,
 };
 
 static struct platform_device smc91x_device = {
@@ -144,8 +141,7 @@ static struct platform_device *devices[] __initdata = {
 
 /* We have to state that there are HWMON devices on the I2C bus on XCEP.
  * Drivers for HWMON verify capabilities of the adapter when loading and
- * refuse to attach if the adapter doesn't support HWMON class of devices.
- * See also Documentation/i2c/porting-clients. */
+ * refuse to attach if the adapter doesn't support HWMON class of devices. */
 static struct i2c_pxa_platform_data xcep_i2c_platform_data  = {
 	.class = I2C_CLASS_HWMON
 };
@@ -182,10 +178,13 @@ static void __init xcep_init(void)
 }
 
 MACHINE_START(XCEP, "Iskratel XCEP")
-	.boot_params	= 0xa0000100,
+	.atag_offset	= 0x100,
 	.init_machine	= xcep_init,
 	.map_io		= pxa25x_map_io,
+	.nr_irqs	= PXA_NR_IRQS,
 	.init_irq	= pxa25x_init_irq,
-	.timer		= &pxa_timer,
+	.handle_irq	= pxa25x_handle_irq,
+	.init_time	= pxa_timer_init,
+	.restart	= pxa_restart,
 MACHINE_END
 
