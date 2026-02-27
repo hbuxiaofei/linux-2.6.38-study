@@ -139,8 +139,8 @@ struct stable_node {
 			struct list_head list;
 		};
 	};
-	struct hlist_head hlist;
-	unsigned long kpfn;
+	struct hlist_head hlist; // 反向映射链表头, 使用该KSM页面的所有rmap_item链表
+	unsigned long kpfn;      // 该KSM页面的物理页帧号
 #ifdef CONFIG_NUMA
 	int nid;
 #endif
@@ -185,8 +185,8 @@ struct rmap_item {
 /* The stable and unstable tree heads */
 static struct rb_root one_stable_tree[1] = { RB_ROOT };
 static struct rb_root one_unstable_tree[1] = { RB_ROOT };
-static struct rb_root *root_stable_tree = one_stable_tree;
-static struct rb_root *root_unstable_tree = one_unstable_tree;
+static struct rb_root *root_stable_tree = one_stable_tree;     // 稳定树: 存储已合并的KSM页面
+static struct rb_root *root_unstable_tree = one_unstable_tree; // 不稳定树: 存储候选合并页面, 每轮扫描后重建
 
 /* Recently migrated nodes of stable tree, pending proper placement */
 static LIST_HEAD(migrate_nodes);
@@ -1081,6 +1081,9 @@ out:
  *
  * This function returns 0 if the pages were merged, -EFAULT otherwise.
  */
+// rmap_item 要处理的那个用户页面（page）的反向映射项
+// page      要被合并掉的普通用户匿名页面（我们要让它指向 kpage）
+// kpage     已经存在的 KSM 共享页面（稳定树中的页面，已写保护）
 static int try_to_merge_with_ksm_page(struct rmap_item *rmap_item,
 				      struct page *page, struct page *kpage)
 {
@@ -1341,6 +1344,7 @@ struct rmap_item *unstable_tree_search_insert(struct rmap_item *rmap_item,
 
 		cond_resched();
 		tree_rmap_item = rb_entry(*new, struct rmap_item, node);
+		// 获取rmap_item对应的物理页面, 这会增加页面的引用计数
 		tree_page = get_mergeable_page(tree_rmap_item);
 		if (IS_ERR_OR_NULL(tree_page))
 			return NULL;
@@ -1369,14 +1373,18 @@ struct rmap_item *unstable_tree_search_insert(struct rmap_item *rmap_item,
 			 * it will be flushed out and put in the right unstable
 			 * tree next time: only merge with it when across_nodes.
 			 */
+			// 如果不允许跨NUMA节点合并, 且tree_page已迁移到另一个节点
+			// 只有在允许跨节点时才合并
 			put_page(tree_page);
 			return NULL;
 		} else {
+			// 找到匹配, 返回
 			*tree_pagep = tree_page;
 			return tree_rmap_item;
 		}
 	}
 
+	// 设置UNSTABLE_FLAG, 插入到不稳定树
 	rmap_item->address |= UNSTABLE_FLAG;
 	rmap_item->address |= (ksm_scan.seqnr & SEQNR_MASK);
 	DO_NUMA(rmap_item->nid = nid);
@@ -1413,6 +1421,9 @@ static void stable_tree_append(struct rmap_item *rmap_item,
  *
  * @page: the page that we are searching identical page to.
  * @rmap_item: the reverse mapping into the virtual address of this page
+ *
+ * @page: 要处理的页面
+ * @rmap_item: 页面的反向映射项
  */
 static void cmp_and_merge_page(struct page *page, struct rmap_item *rmap_item)
 {
@@ -1438,6 +1449,7 @@ static void cmp_and_merge_page(struct page *page, struct rmap_item *rmap_item)
 	}
 
 	/* We first start with searching the page inside the stable tree */
+	// 1. 在稳定树中查找
 	kpage = stable_tree_search(page);
 	if (kpage == page && rmap_item->head == stable_node) {
 		put_page(kpage);
@@ -1447,6 +1459,7 @@ static void cmp_and_merge_page(struct page *page, struct rmap_item *rmap_item)
 	remove_rmap_item_from_tree(rmap_item);
 
 	if (kpage) {
+		// 找到匹配的KSM页面, 尝试合并
 		err = try_to_merge_with_ksm_page(rmap_item, page, kpage);
 		if (!err) {
 			/*
@@ -1454,6 +1467,7 @@ static void cmp_and_merge_page(struct page *page, struct rmap_item *rmap_item)
 			 * add its rmap_item to the stable tree.
 			 */
 			lock_page(kpage);
+			// 合并成功, 将rmap_item加入稳定树
 			stable_tree_append(rmap_item, page_stable_node(kpage));
 			unlock_page(kpage);
 		}
@@ -1473,9 +1487,11 @@ static void cmp_and_merge_page(struct page *page, struct rmap_item *rmap_item)
 		return;
 	}
 
+	// 2. 在不稳定树中查找, 如果没找到匹配，将当前页面插入不稳定树
 	tree_rmap_item =
 		unstable_tree_search_insert(rmap_item, page, &tree_page);
 	if (tree_rmap_item) {
+		// 找到匹配, 合并page和tree_page
 		kpage = try_to_merge_two_pages(rmap_item, page,
 						tree_rmap_item, tree_page);
 		put_page(tree_page);
@@ -1485,6 +1501,7 @@ static void cmp_and_merge_page(struct page *page, struct rmap_item *rmap_item)
 			 * node in the stable tree and add both rmap_items.
 			 */
 			lock_page(kpage);
+			// 合并成功, 插入稳定树
 			stable_node = stable_tree_insert(kpage);
 			if (stable_node) {
 				stable_tree_append(tree_rmap_item, stable_node);
@@ -1565,6 +1582,7 @@ static struct rmap_item *scan_get_next_rmap_item(struct page **page)
 		 * those moved out to the migrate_nodes list can accumulate:
 		 * so prune them once before each full scan.
 		 */
+		// 如果不允许(默认允许)跨节点合并, 清理迁移节点列表
 		if (!ksm_merge_across_nodes) {
 			struct stable_node *stable_node;
 			struct list_head *this, *next;
@@ -1580,6 +1598,7 @@ static struct rmap_item *scan_get_next_rmap_item(struct page **page)
 			}
 		}
 
+		// 重置所有不稳定树
 		for (nid = 0; nid < ksm_nr_node_ids; nid++)
 			root_unstable_tree[nid] = RB_ROOT;
 
@@ -1699,6 +1718,7 @@ static void ksm_do_scan(unsigned int scan_npages)
 
 	while (scan_npages-- && likely(!freezing(current))) {
 		cond_resched();
+		// 找到一个合适的匿名page, 并为其建立由物理地址到虚拟地址的反向映射
 		rmap_item = scan_get_next_rmap_item(&page);
 		if (!rmap_item)
 			return;
